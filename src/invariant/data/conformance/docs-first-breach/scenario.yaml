@@ -1,0 +1,31 @@
+description: >
+  Docs-first breached by omission. A pipeline is started and nothing under
+  the architecture docs is ever read, so the way from designing to red is
+  refused by docs.read_architecture.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+
+steps:
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - {kind: cli, in: worktree, argv: [pipeline, gates]}
+  - {id: advance-red, kind: cli, in: worktree, argv: [pipeline, advance, red]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: block}
+    abandoned: {}
+  refusals:
+    advance-red: [docs.read_architecture]

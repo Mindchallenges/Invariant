@@ -1,0 +1,141 @@
+version: 1
+
+# The library's own manifest. ADR-001's closing note says "a control the
+# library will not run against itself is a control it should not ship", and
+# until now that was aspiration: there was no manifest here, so none of it ran.
+
+project:
+  name: invariant
+  ecosystems: [python]
+
+paths:
+  docs: docs/architecture
+  memory: .claude/memory
+  memory_index: MEMORY.md
+
+docs:
+  # invariant's own docs project (ADR-018 increment 7): conf.py, the pinned
+  # requirements.txt and its .venv at docs/; the architecture pages stay at
+  # paths.docs (D3). Enforced: the mandate's rules block and cannot be
+  # lowered (ruling 19), and only the recorded routes pass them.
+  format: sphinx
+  diagrams: mermaid
+  needs:
+    state: enforced
+
+items:
+  backend: sphinx_needs
+  path: docs/backlog.rst
+  # An ADDITIONAL project prefix, if a repo wants one (e.g. "HEAP_"). The item
+  # type already contributes its own stem, so setting "BUG_" here mints
+  # BUG_BUG_001 — which is what it did on the first attempt.
+  id_prefix: ""
+
+methodology:
+  pipeline: tdd
+  gates:
+    coverage_min: 85
+    coverage_scope: touched
+
+enforcement:
+  # Deliberately NOT strict. This repository is the one place where a gate
+  # failing is as likely to be a defect in the gate as in the work, and a
+  # blocking rule here can wedge the tool that would fix it.
+  profile: standard
+  rules:
+    # The library's own suite is green, but its coverage floor is a target
+    # rather than a fact on every file. Advisory until it is.
+    coverage.meets_floor: warn
+
+    # Second exception, for the reason the rule's own docstring gives: it is
+    # "the gate that makes every other pipeline gate mandatory", because every
+    # gate a methodology owns is an EXIT gate on a state nobody is required to
+    # pass through. At `warn` it is not a gate at all, and the record shows it:
+    # of 13 enforced merges here, only 4 carried a completed pipeline — four
+    # merged with their pipeline still in its INITIAL state, five with no
+    # pipeline record at all, including the flagship five-bug batch commit
+    # whose session record is pristine while its pipeline never left
+    # `designing` (AUD-11). A methodology that is advisory to follow is prose,
+    # which is the thing this library exists to replace.
+    pipeline.complete: block
+
+    # The exception to "deliberately not strict" above. Coding is done through
+    # the agents and the pipeline is always followed — that rule holds here
+    # too, and a library that will not run its own control has no business
+    # shipping it (ADR-001's closing note, applied to itself).
+    #
+    # The wedge hazard this block warns about is real here in a specific way:
+    # a pipeline in this repository is driven from a host session whose project
+    # root is a different repository, so an agent dispatched for this work may
+    # not be recorded against this pipeline at all. If that wedges, the defect
+    # is in the recording and gets fixed there. It is not a reason to lower the
+    # gate — a gate lowered the first time it is inconvenient was never a gate.
+    agents.design_agent_ran: block
+    agents.review_agent_ran: block
+
+    # The dogfood ruleset's layering rules (docs/guidelines/ruleset.yaml) hold
+    # at landing, as ruled for IDEA_031 A3 (DN-17). Set only after the rule was
+    # on main: a manifest naming a rule the installed build lacks does not load.
+    guidelines.mechanical_clean: block
+
+session:
+  exempt_paths:
+    - ".claude/*"
+    - ".claude/**"
+    - "MEMORY.md"
+  # Worktrees live inside the repository so the host trusts the directory it
+  # already manages and stops confirming every entry. Safe here for the reason
+  # d160d40 records: a path inside a linked worktree resolves against that
+  # worktree, so the `.claude/*` exemptions above cannot swallow its sources.
+  worktree_dir: ".claude/worktrees"
+  # A session here does not publish; see ADR-001 D18.
+  push: false
+
+commands:
+  # The python adapter defaults this to a bare `ruff check .`, which needs ruff
+  # on PATH. It is not, so the gate could not run at all and five sessions in a
+  # row recorded "lint NOT RUN" and moved on — a control nobody could execute
+  # is worse than one that is absent, because its silence reads as a pass.
+  # `uv run` resolves it from the dev group, where uv.lock pins the version.
+  lint: uv run ruff check .
+  # Same failure, same fix, for the suite itself: the adapter's bare `pytest`
+  # is not on PATH here, so `pipeline test` recorded exit 127 — command-not-
+  # found rendered as a red suite — and the test gates were reading noise
+  # (the 2026-08 audit's AUD-40 names the stranded copy of this repair).
+  test: uv run pytest
+  test_one: uv run pytest {selector}
+  coverage: uv run pytest --cov --cov-report=term-missing
+  # The scoped form (IDEA_032) arrived later and missed this repair, so
+  # `pipeline coverage --selector` fell back to the bare default and exited 127.
+  coverage_one: uv run pytest --cov --cov-report=term-missing {selector}
+
+privacy:
+  enabled: true
+  patterns: [home_paths, emails, ip_addresses, tokens, clock_times, links]
+  # The project's own public repository is the one link its documentation
+  # must carry: the install command IS that URL. A literal allow, not a
+  # marker, because the string is the same everywhere it appears and a
+  # marker exempts a place rather than a value (manifest.md, "The exemption
+  # marker").
+  allow:
+    - github.com/Mindchallenges/invariant
+  # `docs` resolves through paths.docs, which here names only docs/architecture
+  # — but everything under docs/ is committed prose where a leak becomes
+  # permanent, audits and ADRs included (the 2026-08 audit itself sat outside
+  # the scanned tree, AUD-15). The trailing-slash entry is a literal
+  # project-relative prefix, which is the engine's way of widening scope
+  # beyond what paths.* names. `memory` also carries the generated index
+  # (MEMORY.md) and `reports` carries paths.reports; both are covered by the
+  # entries below (`docs/` subsumes docs/reports — `reports` is kept explicit
+  # so the intent survives a docs reorganisation).
+  scope: [docs, memory, reports, commit_messages, "docs/"]
+
+memory:
+  managed: false
+
+# ADR-012 D4 names this repository as the first user of the boundary kind:
+# the layering the suite checked with hand-written import scans is a ruleset
+# (IDEA_031 A3 increment 9). The python ecosystem above offers the imports
+# engine its boundary rules need. No baseline: the tree has no finding.
+guidelines:
+  ruleset: docs/guidelines/ruleset.yaml

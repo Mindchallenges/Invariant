@@ -1,0 +1,99 @@
+/* Archviz diagram primitives. Every colour, size and radius is a token from tokens.css. */
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap");
+
+body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--font-sans); }
+.av-svg { display: block; font-family: var(--font-sans); overflow: visible; }
+
+/* ---- role families: one class sets stroke, fill and title colour ---- */
+.av-r-primary   { --r: var(--primary);   --rf: var(--primary-fill);   --rg: var(--primary-group);   --ri: var(--primary-ink); }
+.av-r-secondary { --r: var(--secondary); --rf: var(--secondary-fill); --rg: var(--secondary-group); --ri: var(--secondary-ink); }
+.av-r-tertiary  { --r: var(--tertiary);  --rf: var(--tertiary-fill);  --rg: var(--tertiary-group);  --ri: var(--tertiary-ink); }
+.av-r-accent    { --r: var(--accent);    --rf: var(--accent-fill);    --rg: var(--accent-group);    --ri: var(--accent-ink); }
+.av-r-neutral   { --r: var(--neutral);   --rf: var(--neutral-fill);   --rg: var(--neutral-group);   --ri: var(--neutral-ink); }
+.av-r-critical  { --r: var(--critical);  --rf: var(--critical-fill);  --rg: var(--critical-group);  --ri: var(--critical-ink); }
+
+/* ---- element nodes ---- */
+.av-shape { fill: var(--rf); stroke: var(--r); stroke-width: var(--stroke-node); }
+.av-rr { rx: var(--radius-node); }
+.av-shape-line { fill: none; stroke: var(--r); stroke-width: var(--stroke-hairline); }
+.av-dashed .av-shape { stroke-dasharray: 5 3; }
+.av-label { font-size: 12px; font-weight: 500; fill: var(--ink); }
+.av-strong { font-weight: 600; }
+.av-italic { font-style: italic; }
+.av-meta { font-family: var(--font-mono); font-size: 10px; fill: var(--ink-muted); }
+.av-code { font-family: var(--font-mono); font-size: 10.5px; fill: var(--ink); }
+.av-comp-icon rect { fill: var(--rf); stroke: var(--r); stroke-width: 1.1; }
+.av-actor { fill: var(--rf); stroke: var(--r); stroke-width: 1.8; stroke-linecap: round; }
+.av-actor path { fill: none; }
+.av-iface { fill: var(--surface); stroke: var(--r); stroke-width: 2; }
+.av-bus { fill: var(--ri); }
+.av-bus-label { font-size: 10px; font-weight: 600; fill: var(--on-strong); letter-spacing: .02em; }
+.av-solid { fill: var(--ink); }
+.av-ring { fill: none; stroke: var(--ink); stroke-width: 1.5; }
+
+/* ---- status overlay ---- */
+.av-s-proposed .av-shape, .av-s-draft .av-shape { stroke-dasharray: 5 3; }
+.av-s-risk, .av-s-open, .av-s-deprecated { --r: var(--critical); --ri: var(--critical-ink); }
+.av-s-risk .av-shape { stroke-width: var(--stroke-strong); }
+.av-s-deprecated { opacity: .45; }
+.av-ghost { opacity: .5; }
+.av-ghost .av-shape { stroke-dasharray: 4 3; fill: var(--surface); }
+.av-selected .av-shape { stroke: var(--focus-ring); stroke-width: 2.5; }
+
+/* ---- containers ---- */
+.av-container .av-frame { fill: var(--rg); stroke: var(--r); stroke-width: var(--stroke-node); rx: var(--radius-group); }
+.av-c-zone .av-frame { rx: var(--radius-zone); stroke-dasharray: 6 4; }
+.av-c-boundary .av-frame { stroke-dasharray: 8 4; }
+.av-c-band .av-frame { rx: 0; stroke-dasharray: 3 3; stroke-width: var(--stroke-hairline); }
+.av-c-lane .av-frame { rx: 0; fill: var(--neutral-group); stroke: var(--grid); stroke-width: var(--stroke-hairline); }
+.av-c-fragment .av-frame { fill: var(--accent-group); stroke: var(--accent); stroke-width: var(--stroke-hairline); rx: 0; }
+.av-frag-tag { fill: var(--accent-ink); }
+.av-frag-label { font-size: 10px; font-weight: 600; fill: var(--on-strong); }
+.av-group-label { font-size: 12px; font-weight: 600; fill: var(--ri); }
+.av-c-band .av-group-label { font-size: 10.5px; letter-spacing: .08em; }
+.av-lane-label { fill: var(--ink-muted); }
+
+/* ---- relations ---- */
+.av-edge { fill: none; stroke-width: var(--stroke-node); stroke-linejoin: round; }
+.av-c-line { stroke: var(--line); fill: var(--line); }
+.av-c-ink { stroke: var(--ink); fill: var(--ink); }
+.av-c-primary { stroke: var(--primary); fill: var(--primary); }
+.av-c-tertiary { stroke: var(--tertiary); fill: var(--tertiary); }
+.av-c-neutral { stroke: var(--neutral); fill: var(--neutral); }
+.av-c-accent { stroke: var(--accent); fill: var(--accent); }
+path.av-edge { fill: none; }
+.av-d-dashed { stroke-dasharray: 6 4; }
+.av-d-dotted { stroke-dasharray: 1.5 3.5; stroke-linecap: round; stroke-width: 1.8; }
+.av-d-strong { stroke-width: var(--stroke-strong); }
+.av-d-hairdash { stroke-dasharray: 4 4; stroke-width: var(--stroke-hairline); }
+.av-mk-stroke { fill: none !important; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.av-mk-fill { stroke: none !important; }
+.av-mk-hollow { fill: var(--canvas) !important; stroke-width: 1.3; }
+.av-edge-label { font-size: 10px; fill: var(--ink-muted); paint-order: stroke; stroke: var(--canvas); stroke-width: 3px; stroke-linejoin: round; }
+.av-edge-label.av-ink { fill: var(--ink); }
+
+/* ---- chrome: frame, toolbar, legend, tooltip ---- */
+.av-figure { margin: 0; }
+.av-frame-box { border: 1px solid var(--grid); border-radius: var(--radius-group); background: var(--canvas); overflow: hidden; }
+.av-toolbar { display: flex; gap: var(--space-2); align-items: center; padding: 6px var(--space-2); border-bottom: 1px solid var(--grid); background: var(--surface); }
+.av-btn { font: 500 11.5px/1 var(--font-sans); color: var(--ink); background: var(--canvas); border: 1px solid var(--grid); border-radius: var(--radius-control); padding: 6px 10px; cursor: pointer; }
+.av-btn:hover { border-color: var(--primary); color: var(--primary-ink); }
+.av-btn:focus-visible, .av-search:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.av-search { flex: 0 1 200px; font: 11.5px var(--font-sans); color: var(--ink); background: var(--canvas); border: 1px solid var(--grid); border-radius: var(--radius-control); padding: 6px 8px; }
+.av-stage { position: relative; padding: var(--space-5); }
+.av-title { font-size: 15px; font-weight: 600; line-height: 20px; margin: 0 0 var(--space-3); color: var(--ink); }
+.av-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: var(--space-2) var(--space-3); border-top: 1px solid var(--grid); background: var(--surface); font-size: 11.5px; color: var(--ink-muted); }
+.av-leg-item { display: inline-flex; align-items: center; gap: 6px; }
+.av-leg-sw { width: 16px; height: 11px; border-radius: 2px; background: var(--rf); border: 1.5px solid var(--r); }
+.av-leg-sw.av-dashed { border-style: dashed; }
+.av-caption { margin-top: var(--space-2); text-align: center; font-size: 13px; color: var(--ink-muted); }
+.av-tip { position: absolute; right: 14px; top: 14px; width: 250px; background: var(--surface); border: 1px solid var(--grid); border-radius: var(--radius-group); padding: 10px 12px; font-size: 12px; line-height: 1.45; color: var(--ink); }
+.av-tip-title { font-weight: 600; font-size: 13px; }
+.av-tip-meta { color: var(--ink-muted); font-size: 11px; }
+.av-tip-meta code { font-family: var(--font-mono); font-size: 11px; color: var(--ink); }
+.av-tip-body { margin-top: 6px; }
+.av-tip-link { display: inline-block; margin-top: 6px; color: var(--primary-ink); font-weight: 600; text-decoration: none; }
+
+/* ---- preview helpers ---- */
+.av-sheet { padding: var(--space-4); }
+.av-cap { font-size: 11px; fill: var(--ink-muted); font-family: var(--font-mono); }

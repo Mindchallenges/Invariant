@@ -1,0 +1,8999 @@
+"""The ``invariant`` command line.
+
+The CLI is the whole API. Hooks are shims that call it, agents are instructed
+to call it, and a human debugging a wedged state calls the same commands. There
+is no second path into the engine, which is what keeps "what the agent was
+told" reproducible: it is this program's output.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import re
+import shlex
+import sys
+import time
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from ..core import plan as plan_reader
+from ..core.agents import AgentSource
+from ..core.errors import GateFailure, InvariantError, ManifestError, UsageError
+from ..core.manifest import (
+    DEFAULTS,
+    MANIFEST_RELPATH,
+    Level,
+    Manifest,
+    manifest_tracking,
+    project_relative,
+)
+from ..core.rules import (
+    DOCTOR_ROW_RULES,
+    HELD_OUT_OF_STANDDOWN,
+    RuleContext,
+    always_layer_summary,
+    apply_acknowledgements,
+    baseline_summary,
+    coverage_advisory_exception,
+    evaluate,
+    get_rule,
+    grant_outcomes,
+    guideline_gate_of,
+    rules_for,
+    sweep_cadence_summary,
+)
+from ..core.steps import step_name
+from ..core.store import LOCK_TIMEOUT_SECONDS, InertStore, JsonStore
+from ..domains.pipeline import PipelineDomain, audit_line, describe_run, summarise
+from ..domains.session import (
+    LANDING_RULE,
+    Session,
+    SessionDomain,
+    name_ambiguity_message,
+    name_matches,
+)
+
+#: Absolute paths inside free text. Used only to find a session worktree an
+#: agent prompt names — every hit is checked against the live session registry
+#: before it means anything, so a loose match costs nothing.
+_ABSOLUTE_PATH = re.compile(r"/[^\s'\"`,;]+")
+
+EXIT_OK = 0
+
+#: Distinguishes "not resolved yet" from "resolved to nothing". A plain None
+#: default would re-run host detection on every access for a project whose
+#: host has no telemetry reader.
+_UNSET = object()
+
+
+# -- output helpers ----------------------------------------------------
+
+
+#: How the operator asks for the shipped version back. Printed wherever an
+#: install leaves a file alone, because a skip the operator cannot reverse is
+#: only half an improvement on a write they could not prevent.
+_OVERWRITE_LOCAL_HINT = "  pass --overwrite-local to replace them with the shipped version"
+#: Said beside a skipped agent (ADR-012 D8): an overlay survives an upgrade.
+_OVERLAY_HINT = (
+    "  to keep an agent edit, move the edit into an overlay (agents.overlays), "
+    "or a model line into agents.tiers and host.tier_map, then pass --overwrite-local"
+)
+
+
+def _because(why: str | None) -> str:
+    """The suffix naming which input a stale copy's rewrite answers to."""
+    return f" — {why}" if why else ""
+
+
+def emit(args, payload: dict, text: str = "") -> int:
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    elif text:
+        print(text)
+    return EXIT_OK
+
+
+def worth_reporting(verdict, verbose: bool) -> bool:
+    """Does this verdict earn a line on the default (non-verbose) output?
+
+    One predicate, because there were two and they drifted. `cmd_check` kept
+    its own inline copy which read `args.verbose` directly — and the `check`
+    subparser defines no such flag, so the command raised on every invocation
+    until this was pulled out. The rule now lives in one place for the same
+    reason `_changed_set` does: a second copy is how the two come to disagree
+    while each looks right on its own.
+    """
+    if verdict.verdict.skipped:
+        # A BLOCKING gate going inapplicable is reported on the default path:
+        # the project declared it must hold, and the reader is owed the fact
+        # that it did not run rather than a silence that reads exactly like a
+        # pass (BUG_020). Advisory skips stay behind --verbose, where they
+        # were, because there is nothing to act on.
+        return verdict.skipped_blocking or verbose
+    if verdict.verdict.ok:
+        return verbose
+    return True
+
+
+def report_verdicts(verdicts, args) -> None:
+    if getattr(args, "json", False):
+        return
+    verbose = getattr(args, "verbose", False)
+    for verdict in verdicts:
+        if worth_reporting(verdict, verbose):
+            print(verdict.render(), file=sys.stderr)
+
+
+def verdicts_payload(verdicts) -> list[dict]:
+    return [_verdict_payload(v) for v in verdicts]
+
+
+def _verdict_payload(v) -> dict:
+    payload = {
+        "rule": v.rule_id,
+        "level": v.level.value,
+        "ok": v.verdict.ok,
+        "skipped": v.verdict.skipped,
+        "message": v.verdict.message,
+        "detail": v.verdict.detail,
+        "fixes": list(v.verdict.fixes),
+    }
+    # Only a rule that computes findings carries them (ADR-012 D5, DN-16).
+    if v.verdict.findings is not None:
+        payload["findings"] = [dict(record) for record in v.verdict.findings]
+    return payload
+
+
+# -- context assembly --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Unplaced:
+    """A call that reached into another project and could not be placed there.
+
+    ADR-011 D7. ``reason`` is ``unowned`` (no live session worktree there
+    contains the path), ``ambiguous`` (the paths the call names land on more
+    than one session; ``sessions`` lists them as ``project:id``),
+    ``unreadable`` (that project's manifest could not be loaded; ``detail``
+    says why) or ``store`` (the path lies in another project's store, which
+    has no worktree per session, so no path there names one: ADR-014 D5).
+    ``manifest`` is the foreign project's, when it loaded, so the host adapter
+    can ask whether a read would have been evidence there.
+    """
+
+    path: Path
+    project: Path
+    reason: str
+    sessions: tuple[str, ...] = ()
+    manifest: Manifest | None = None
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class _Foreign:
+    """Another invariant project, and a read-only view of its sessions."""
+
+    root: Path
+    manifest: Manifest | None
+    sessions: SessionDomain | None
+    error: str = ""
+    #: ``root`` is a store, not a project: no path in it names a session.
+    store: bool = False
+
+
+def _paths_named_by(payload) -> list[Path]:
+    """The absolute paths a tool call names: its ``file_path``, else its brief.
+
+    The same two places :meth:`Context.resolution_for_payload` reads, in the
+    same order: a call that names a destination is about that destination,
+    and only a pathless one is read for the worktrees its prompt names.
+    """
+    tool_input = payload.get("tool_input") if isinstance(payload, Mapping) else None
+    if not isinstance(tool_input, Mapping):
+        return []
+    raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+    if raw:
+        path = Path(str(raw))
+        return [path] if path.is_absolute() else []
+    return _prompt_paths(tool_input.get("prompt"))
+
+
+def _prompt_paths(prompt) -> list[Path]:
+    """Every absolute path a brief mentions, trailing punctuation stripped."""
+    if not isinstance(prompt, str) or "/" not in prompt:
+        return []
+    return [
+        Path(found.rstrip(".,;:)]}'\"`")) for found in _ABSOLUTE_PATH.findall(prompt)
+    ]
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    resolved = path.resolve()
+    return resolved == root or root in resolved.parents
+
+
+#: The variable that names a session when no ``--id`` does: a fallback for
+#: scripts that export it, never the form the engine recommends (IDEA_042).
+SESSION_ENV = "INVARIANT_SESSION_ID"
+
+#: The help of the one ``--id`` every session-resolving command inherits. The
+#: parser-walk test finds the shared flag by it, and it says "session" because
+#: ``--id`` and ``--rule ID`` elsewhere name items and rules.
+SESSION_ID_HELP = (
+    f"session id; without it, {SESSION_ENV}, then the working directory, "
+    "names the session"
+)
+
+
+def explicit_session_id(given: str | None) -> str | None:
+    """``--id``, after refusing a variable that names a different session.
+
+    The argument outranks the variable, and the variable alone keeps working
+    as before. Both given and disagreeing is a caller holding two answers to
+    one question; picking either silently would act on a session somebody did
+    not mean, so neither is picked.
+    """
+    exported = os.environ.get(SESSION_ENV)
+    if given and exported and given != exported:
+        raise UsageError(
+            f"--id {given} and {SESSION_ENV} ({exported}) name different "
+            f"sessions; nothing was done.\n"
+            f"  Name one: keep --id {given} and unset {SESSION_ENV}, or drop "
+            f"--id."
+        )
+    return given
+
+
+class Context:
+    """Everything a command needs, assembled once."""
+
+    def __init__(
+        self,
+        cwd: Path | None = None,
+        required: bool = True,
+        session_id: str | None = None,
+        host_session_id: str | None = None,
+        manifest_start: Path | None = None,
+        probe: bool = False,
+        crossed_from: Path | None = None,
+        pipeline_lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+        manifest: Manifest | None = None,
+    ) -> None:
+        self.cwd = Path(cwd or Path.cwd())
+        #: How long this context's pipeline writers wait for the record's lock.
+        #: A hook passes the host's budget; see `HOOK_LOCK_SECONDS`.
+        self.pipeline_lock_timeout = pipeline_lock_timeout
+        #: ``manifest_start`` separates "which project governs this call" from
+        #: "where is this process standing". Hooks pass the host's project
+        #: directory here (AUD-04): the host guarantees that to its hooks,
+        #: while the process working directory can be anywhere — and resolving
+        #: the manifest from a cwd outside the project used to silently disable
+        #: every gate. ``cwd`` stays honest for the rules that ask git about
+        #: the directory the call actually runs in.
+        #: ``manifest`` is one already located from ``manifest_start``, which
+        #: the hook resolves once to decide where to start and hands down
+        #: rather than resolving the same project twice.
+        self.manifest = manifest or Manifest.locate(
+            manifest_start or self.cwd, required=required
+        )
+        #: A probe reads the real state and writes none of it. Every domain
+        #: this context builds shares this one store, so swapping it here
+        #: covers every write a hook can reach (BUG_059).
+        self.store = (InertStore if probe else JsonStore)(self.manifest.state_root)
+        #: An explicit --id, carried rather than exported. Writing it into
+        #: os.environ would work and would also outlive the command, silently
+        #: re-answering the same question for everything that ran afterwards.
+        #: It outranks INVARIANT_SESSION_ID, which stays the fallback; the two
+        #: naming different sessions is refused here, before any domain is
+        #: built, so the refusal records nothing (IDEA_042).
+        self.session_id = explicit_session_id(session_id)
+        #: The agent host's session identifier, from the hook payload. The one
+        #: attribution signal that survives the host resetting cwd between
+        #: calls — without it, concurrent sessions are indistinguishable from
+        #: the main checkout, which is exactly when attribution matters.
+        #:
+        #: A context re-rooted into another project carries none (ADR-011 D5):
+        #: ``SessionEnd`` fires in the host's own project, so a binding learned
+        #: in a foreign registry could never be marked spent.
+        self.host_session_id = None if crossed_from is not None else (
+            host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
+        )
+        #: The host's project root when this context was re-rooted into the
+        #: project a call's path names (:meth:`for_payload`); ``None`` otherwise.
+        self.crossed_from = crossed_from
+        #: Set by :meth:`for_payload` when the call reached into another
+        #: project and could not be placed there. Nothing may be recorded for
+        #: such a call, anywhere; the host adapter says so instead (ADR-011 D7).
+        self.unplaced: Unplaced | None = None
+        self._probe = probe
+        #: Resolved once and cached, because every transition reads a watermark
+        #: through it and rebuilding the reader per property access would
+        #: re-scan the transcript directory each time.
+        self._sample_source: object = _UNSET
+
+    @property
+    def sample_source(self):
+        """The concrete host reader, chosen here and nowhere else (ADR-002 D2).
+
+        This is what the protocol buys: ``core`` and ``domains`` know only
+        ``SampleSource``, and the one line that names a host lives in the CLI.
+        A host with no reader in this release resolves to ``None``, and every
+        command that *reads* the store keeps working — only ingest refuses,
+        and it says why.
+        """
+        if self._sample_source is _UNSET:
+            self._sample_source = None
+            if self.manifest.get("host.kind") == "claude_code":
+                from ..hosts.claude_code_telemetry import ClaudeCodeTranscripts
+
+                self._sample_source = ClaudeCodeTranscripts(origin=self.manifest.root)
+        return self._sample_source
+
+    @property
+    def watermarks(self):
+        """Injected into both FSM domains so their transitions carry one (D3).
+
+        Never a reason a transition can fail — see ``TranscriptWatermarks``.
+        """
+        from ..core.stats import TranscriptWatermarks
+
+        return TranscriptWatermarks(self.sample_source)
+
+    @property
+    def stats(self):
+        from ..domains.stats import StatsDomain
+
+        return StatsDomain(self.manifest, self.store, source=self.sample_source)
+
+    @property
+    def sessions(self) -> SessionDomain:
+        return SessionDomain(
+            self.manifest, self.store, watermarks=self.watermarks,
+            host_alive=_lease_host_alive if self.manifest.store is not None else None,
+        )
+
+    @property
+    def pipelines(self) -> PipelineDomain:
+        return PipelineDomain(
+            self.manifest, self.store, watermarks=self.watermarks,
+            host_instruction_files=host_instruction_files(self.manifest),
+            host_agent_plan=host_agent_plan(self.manifest),
+            lock_timeout=self.pipeline_lock_timeout,
+        )
+
+    @property
+    def items(self):
+        from ..domains.workitem import WorkItemDomain
+
+        return WorkItemDomain(self.manifest)
+
+    @property
+    def sweeps(self):
+        from ..domains.sweep import SweepDomain
+
+        return SweepDomain(self.manifest, self.store)
+
+    @property
+    def memory(self):
+        from ..domains.memorystore import MemoryStore
+
+        return MemoryStore.from_manifest(self.manifest)
+
+    def current_session(self, strict: bool = True, target=None):
+        if self.session_id:
+            return self.sessions.require(self.session_id)
+        return self.sessions.current(
+            self.cwd,
+            strict=strict,
+            target=target,
+            host_session_id=self.host_session_id,
+        )
+
+    def require_session(self):
+        session = self.current_session()
+        if session is None:
+            raise UsageError(
+                "no session is active here. Start one with 'invariant session "
+                "start <task-name>', or name one with --id <id>."
+            )
+        return session
+
+    def session_for_payload(self, payload: dict):
+        """Who this tool call belongs to, using the path the call itself names.
+
+        The path a call is aimed at is the strongest attribution signal a hook
+        ever gets: it is in the payload, it is absolute, and it does not depend
+        on the working directory the host happens to be in or on an environment
+        variable a tool call cannot carry. That is true of a *read* as much as
+        of a write, which is why post-tool-use recording resolves through here
+        too rather than by working directory alone (BUG_010). An agent dispatch
+        carries no ``file_path``, but it is not therefore pathless: a dispatch
+        whose prompt names exactly one live session's worktree is aimed at that
+        session as plainly as an edit landing inside it, so that is read as the
+        target too. It is one route with one precedence, not two.
+
+        Reading it is what lets ONE host session drive several tracks at once.
+        Without it a dispatch resolves by working directory and host identifier
+        alone, so a parent driving two sessions records every agent against
+        whichever session it happens to be bound to. The other track's pipeline
+        then shows that no agent ran, and its block-level ``agents.*_ran`` gates
+        become unsatisfiable by anything that track can do — the wedge shape
+        this project treats as an engine defect rather than a reason to force.
+
+        When that path identifies a session which has no host identifier
+        recorded — every session registered before the identifier existed — the
+        mapping is learned here, so the *next* call from the same host session
+        resolves by identifier alone and works for tool calls that carry no
+        path at all.
+        """
+        return self.resolution_for_payload(payload).session
+
+    def resolution_for_payload(self, payload: dict):
+        """:meth:`session_for_payload`, plus *how* it decided.
+
+        Callers that only need the answer use ``session_for_payload``. The
+        ``how`` matters to the evidence writers: ``origin`` returns a real
+        session and is still a guess, and evidence written on a guess is what
+        put a foreign session's agent into a pipeline that never dispatched it
+        (BUG_028). :attr:`Resolution.proven` is the question they ask.
+        """
+        from ..domains.session import Resolution
+
+        if self.session_id:
+            return Resolution(self.sessions.require(self.session_id), "explicit")
+
+        tool_input = payload.get("tool_input")
+        target = None
+        if isinstance(tool_input, Mapping):
+            raw = tool_input.get("file_path") or tool_input.get("notebook_path")
+            target = Path(str(raw)) if raw else None
+            if target is None:
+                named = self._worktree_named_in_prompt(tool_input.get("prompt"))
+                if named is not None:
+                    # A dispatch outranks the host's own binding, where a read
+                    # or an edit does not. The distinction is who acts. Reading
+                    # a peer's file is the host reaching across a boundary, and
+                    # attributing it to the peer would hide the crossing — which
+                    # is why step 2 beats step 3 there, and still does.
+                    #
+                    # A dispatch is the opposite shape: the host is not acting
+                    # on the named worktree, it is DELEGATING into it, and the
+                    # run being recorded is the delegate's. One host binding
+                    # holds one session, so it cannot represent two concurrent
+                    # delegations — a parent driving two tracks banks every
+                    # agent on whichever session it started last. That is the
+                    # wedge this route exists to close: the OTHER track's
+                    # block-level ``agents.*_ran`` gates become unsatisfiable by
+                    # anything that track can do, because the evidence was filed
+                    # under a session it does not own. Adding the route without
+                    # this precedence left it unreachable in the one case it was
+                    # written for.
+                    owner = self.sessions.by_worktree_containing(named)
+                    if owner is not None:
+                        return Resolution(owner, "prompt")
+                    target = named
+
+        resolution = self.sessions.resolve(
+            self.cwd, target=target, host_session_id=self.host_session_id
+        )
+        # Resolution only. This used to ADOPT here — bind the resolved session
+        # to the calling host — and that made ownership a side effect of asking
+        # a question. Every pre-tool-use evaluation ran it, including calls that
+        # were then DENIED, so a refused edit still claimed the session, and so
+        # did a diagnostic that never touched a file. One stray call aimed into
+        # an unowned worktree transferred a peer's session to whoever made it,
+        # silently and with no way for the real owner to reclaim it.
+        #
+        # The binding now happens in post-tool-use, where the tool provably ran.
+        # "Someone successfully edited inside this worktree" is evidence of
+        # ownership; "someone asked whether they could" is not.
+        return resolution
+
+    def for_payload(self, payload) -> Context:
+        """The context that governs this tool call (ADR-011).
+
+        Itself, unless the call names a path inside ANOTHER invariant project
+        and that path lies in exactly one live session worktree there. Then a
+        context rooted in that project, standing in that worktree, with no host
+        identifier — so enforcement and recording both happen where the work
+        is, against the registry that actually holds the session (BUG_040).
+
+        "Exactly one" is the user's ruling, applied to every path the call
+        names: a ``file_path`` is one path, and a brief may name several, so
+        every live-worktree match — the host project's included — must land on
+        the same session. A call that reaches into another project and fails
+        that test is not re-rooted and is marked :attr:`unplaced`; nothing is
+        recorded for it anywhere, because recording it here by the host's
+        binding is how a gate in this project went green on work done in that
+        one (BUG_010).
+
+        Which project a path belongs to is read off the path itself — the
+        nearest manifest above it — rather than from the oracle's index, which
+        only knows projects a host has been rooted in (ADR-011 D2). A path in
+        no invariant project is ungoverned and changes nothing.
+        """
+        if self.session_id or os.environ.get(SESSION_ENV):
+            # Step 1 outranks every path, and it names a session in the
+            # project that reads it (ADR-011 D6).
+            return self
+        paths = _paths_named_by(payload)
+        root = self.manifest.root.resolve()
+        # The project's own store is home (ADR-014 D5): its docs are read in
+        # the store's main checkout, attributed by the ordinary order and
+        # then checked against the holder of the path's unit.
+        own_store = self.manifest.store.root.resolve() if self.manifest.store else None
+
+        def at_home(path: Path) -> bool:
+            return _is_within(path, root) or (
+                own_store is not None and _is_within(path, own_store)
+            )
+
+        if all(at_home(path) for path in paths):
+            return self
+
+        owners: dict[tuple[str, str], tuple[_Foreign | None, object, Path]] = {}
+        reached: list[tuple[Path, _Foreign]] = []
+        projects: dict[Path, _Foreign | None] = {}
+        for path in paths:
+            home = self.sessions.by_worktree_containing(path)
+            if home is not None:
+                owners[("", home.id)] = (None, home, path)
+                continue
+            if at_home(path):
+                continue
+            foreign = self._foreign_project(path, projects)
+            if foreign is None:
+                continue
+            reached.append((path, foreign))
+            if foreign.sessions is None:
+                continue
+            owner = foreign.sessions.by_worktree_containing(path)
+            if owner is not None:
+                owners[(str(foreign.root), owner.id)] = (foreign, owner, path)
+
+        if not reached:
+            return self
+
+        stored = next(((p, f) for p, f in reached if f.store), None)
+        if stored is not None:
+            path, foreign = stored
+            self.unplaced = Unplaced(path=path, project=foreign.root, reason="store")
+            return self
+
+        unreadable = next(((p, f) for p, f in reached if f.sessions is None), None)
+        if unreadable is None and len(owners) == 1:
+            foreign, owner, _ = next(iter(owners.values()))
+            if foreign is None:
+                # The only session the call names is this project's own: the
+                # ordinary order already places it.
+                return self
+            return Context(
+                cwd=Path(owner.worktree),
+                manifest_start=foreign.root,
+                probe=self._probe,
+                crossed_from=root,
+                pipeline_lock_timeout=self.pipeline_lock_timeout,
+            )
+
+        if unreadable is not None:
+            path, foreign = unreadable
+            self.unplaced = Unplaced(
+                path=path, project=foreign.root, reason="unreadable",
+                detail=foreign.error,
+            )
+        elif owners:
+            labels = tuple(
+                f"{(f.root.name if f else root.name)}:{s.id}"
+                for f, s, _ in owners.values()
+            )
+            # Name the foreign side of the ambiguity: a foreign match if there
+            # is one, else the foreign path that matched nothing.
+            path, foreign = next(
+                ((p, f) for f, _, p in owners.values() if f is not None), reached[0]
+            )
+            self.unplaced = Unplaced(
+                path=path, project=foreign.root, reason="ambiguous",
+                sessions=labels, manifest=foreign.manifest,
+            )
+        else:
+            path, foreign = reached[0]
+            self.unplaced = Unplaced(
+                path=path, project=foreign.root, reason="unowned",
+                manifest=foreign.manifest,
+            )
+        return self
+
+    def _foreign_project(
+        self, path: Path, seen: dict[Path, _Foreign | None]
+    ) -> _Foreign | None:
+        """The OTHER invariant project ``path`` lies in, or ``None``.
+
+        ``None`` for a path in no project, and for one whose project shares
+        this context's state root — that registry is the one already being
+        searched. Loaded from the repository's main checkout, so a linked
+        worktree's copy of the manifest cannot move a relative ``paths.state``.
+        Looked up read-only: the question writes nothing (ADR-011 D2). A path
+        no project claims may lie in another project's store, which answers a
+        store :class:`_Foreign`: such a call is placed nowhere (ADR-014 D5).
+        """
+        from ..core import git
+        from ..core.stores import store_root_of
+
+        try:
+            found = Manifest.locate(path, required=False)
+        except ManifestError as exc:
+            start = exc.project_root
+        else:
+            start = found.root if found.located else None
+        if start is None:
+            # No project claims it; another project's store may (ADR-014 D5).
+            store = store_root_of(path)
+            if store is None:
+                return None
+            if store not in seen:
+                seen[store] = _Foreign(store, None, None, store=True)
+            return seen[store]
+        main = git.main_checkout(start)
+        project = main if main and Manifest.is_project_root(main) else start
+        if project in seen:
+            return seen[project]
+        found: _Foreign | None
+        try:
+            manifest = Manifest.locate(project)
+            if manifest.state_root == self.manifest.state_root:
+                found = None
+            else:
+                found = _Foreign(
+                    project, manifest,
+                    SessionDomain(manifest, InertStore(manifest.state_root)),
+                )
+        except InvariantError as exc:
+            found = _Foreign(project, None, None, str(exc))
+        seen[project] = found
+        return found
+
+    def _worktree_named_in_prompt(self, prompt) -> Path | None:
+        """The one live session worktree an agent prompt names, if exactly one.
+
+        Deliberately conservative. Candidate paths are matched only against
+        worktrees that are already registered and live — never against
+        arbitrary text — and the answer is discarded unless every match lands
+        on the SAME session. A brief that names two tracks, or none, resolves
+        exactly as it did before: ambiguity must fall through to the ordinary
+        order rather than pick a winner, because attributing a dispatch to the
+        wrong session is worse than not attributing it at all.
+
+        It searches THIS context's registry only. A brief naming another
+        project's worktree was placed before this ran: :meth:`for_payload`
+        re-roots the context into that project, whose registry then answers
+        here as its own (ADR-011, BUG_040).
+        """
+        found: dict[str, Path] = {}
+        for candidate in _prompt_paths(prompt):
+            owner = self.sessions.by_worktree_containing(candidate)
+            if owner is None:
+                continue
+            found[owner.id] = candidate
+            if len(found) > 1:
+                return None
+        return next(iter(found.values()), None)
+
+    def rule_context(self, payload=None, extra=None) -> RuleContext:
+        # Non-strict on purpose. Rules are evaluated on behalf of hooks, and an
+        # unidentifiable session is something the rules already model: no
+        # session means the session-scoped gates abstain. Raising here would
+        # convert "I do not know who you are" into "you may not act".
+        session = self.session_for_payload(payload or {})
+        pipeline = self.pipelines.current(session.id) if session else None
+        ambiguous = (
+            []
+            if session
+            else [
+                s.to_dict()
+                for s in self.sessions.origin_candidates(
+                    self.cwd, host_session_id=self.host_session_id
+                )
+            ]
+        )
+        return RuleContext(
+            manifest=self.manifest,
+            cwd=self.cwd,
+            session=session.to_dict() if session else None,
+            pipeline=pipeline.to_dict() if pipeline else None,
+            payload=payload or {},
+            extra=extra or {},
+            ambiguous=ambiguous,
+            host_instruction_files=host_instruction_files(self.manifest),
+            host_agent_plan=host_agent_plan(self.manifest),
+        )
+
+
+# -- init / doctor / config -------------------------------------------
+
+
+def _init_prompter(args):
+    """Who answers `init`'s docs offers: a terminal, or nobody (ADR-016 ruling H).
+
+    A seam, like ``_doctor_host_environments``: the suite replaces it to
+    drive the interactive path with a scripted prompter, so no test fakes a
+    terminal. ``None`` is a run that may not ask, and does what `init` did
+    before the offers existed.
+    """
+    from . import prompts
+
+    return prompts.TerminalPrompter() if prompts.interactive(args) else None
+
+
+def _questionnaire_prompter(args):
+    """Who answers the questionnaire's level and core questions (ADR-017 D3):
+    a terminal, or nobody.
+
+    The seam beside ``_init_prompter``, which answers the docs step. In real
+    use the two answer alike, both by ``prompts.interactive``. The suite
+    replaces each on its own, so ADR-016's docs-offer tests script the docs
+    step alone, and a run whose questionnaire is not asked writes the body
+    `init` always wrote.
+    """
+    from . import prompts
+
+    return prompts.TerminalPrompter() if prompts.interactive(args) else None
+
+
+def _host_install_prompter(args):
+    """Who answers `init`'s `host:install` question (ADR-020 D9): a terminal,
+    or nobody. The seam beside ``_init_prompter``; ``None`` installs nothing
+    unless ``--host-install`` said yes."""
+    from . import prompts
+
+    return prompts.TerminalPrompter() if prompts.interactive(args) else None
+
+
+#: The `host:install` question, asked last (ADR-020 D4, D9), and its answers.
+HOST_INSTALL_QUESTION = "Install invariant's hooks and agents in this project?"
+_HOST_INSTALL_NO = (
+    "install nothing now; 'invariant hooks install' and 'invariant agents "
+    "install' wire it later"
+)
+_HOST_INSTALL_YES = (
+    "wire this project's own .claude/, where records.hooks and records.agents "
+    "say (repo: committed; local: kept out of git)"
+)
+
+
+def _init_host_install(args) -> bool:
+    """Whether `init` installs the hooks and agents: ``--host-install``, else
+    the user's answer, default no in every mode. Nothing is installed without
+    the user saying so, and never at user level (ADR-020 ruling 8)."""
+    if getattr(args, "host_install", False):
+        return True
+    asker = _host_install_prompter(args)
+    if asker is None:
+        return False
+    answer = asker.choose(
+        HOST_INSTALL_QUESTION,
+        [("no", _HOST_INSTALL_NO), ("yes", _HOST_INSTALL_YES)],
+        "no",
+    )
+    return answer == "yes"
+
+
+def _not_installed_line() -> str:
+    from ..hosts.claude_code import INSTALL_COMMANDS
+
+    return (
+        "hooks and agents not installed (you were asked, default no); to wire "
+        "this project: " + " and ".join(INSTALL_COMMANDS)
+    )
+
+
+def _init_body(name: str, ecosystems: list[str], settings: Mapping[str, Any]) -> str:
+    """The in-repo manifest `init` writes: the project block, then each
+    top-level block of ``settings`` (ADR-017 D5), then init's own comment.
+
+    A run that asks no questionnaire passes today's settings, the profile and
+    any `paths.docs` the docs step chose (ADR-016 D4.1), so its text is the
+    text `init` has always written."""
+    import yaml
+
+    from ..core.stores import INIT_COMMENT
+
+    lines = [
+        "version: 1",
+        "",
+        "project:",
+        f"  name: {name}",
+        f"  ecosystems: [{', '.join(ecosystems)}]",
+        "",
+    ]
+    for top, value in settings.items():
+        lines += yaml.safe_dump({top: value}, sort_keys=False).splitlines()
+        lines.append("")
+    return "\n".join(lines) + "\n" + INIT_COMMENT
+
+
+def _merge_setting(settings: dict[str, Any], dotted: str, value: Any) -> None:
+    *parents, leaf = dotted.split(".")
+    node = settings
+    for part in parents:
+        node = node.setdefault(part, {})
+    node[leaf] = value
+
+
+def _init_settings(base: Mapping[str, Any], docs: _InitDocs) -> dict[str, Any]:
+    """``base`` with the docs step's in-repo choices: `paths.docs` wherever it
+    is not the load-time default (another repo path, or a new project's
+    `invariant-docs/architecture`, ADR-020 D8), `docs.onboarding` for a mode
+    that writes one."""
+    import copy
+
+    settings = copy.deepcopy(dict(base))
+    if _docs_written(docs.choice):
+        _merge_setting(settings, "paths.docs", docs.choice.docs)
+    if docs.store is None and docs.mode in ("incremental", "all_at_once"):
+        _merge_setting(settings, "docs.onboarding", docs.mode)
+    return settings
+
+
+def _docs_written(choice) -> bool:
+    """Whether `init` writes ``choice``'s `paths.docs` into the manifest: an
+    in-repo location other than the load-time default. A store's goes into
+    its block (``onboarding.place_in_store``)."""
+    return choice.kind != "store" and choice.docs != DEFAULTS["paths"]["docs"]
+
+
+def _init_docs_home(root: Path, new: bool) -> tuple[str, Path | None]:
+    """``(paths.docs, srcdir)``: where `init` puts the docs, and the docs
+    project's source directory as it resolves, which the adapters skip as
+    never the project's content (ADR-020 D8).
+
+    A new project's are the starter's, ``invariant-docs/architecture`` in
+    ``invariant-docs/``. An existing project's are what its manifest resolves,
+    so `init --force` rewrites the manifest in place (ADR-020 D2); where that
+    manifest does not load, the default `paths.docs` and the default rule.
+    """
+    from ..core import needs
+    from ..domains.docs import STARTER_DOCS, STARTER_SRCDIR
+
+    default = DEFAULTS["paths"]["docs"]
+    if new:
+        return STARTER_DOCS, root / STARTER_SRCDIR
+    try:
+        old = Manifest.locate(root)
+    except InvariantError:
+        return default, needs.resolve_srcdir(root, None, default)
+    docs = project_relative(old.get("paths.docs"), [old.root]) if old.store is None else None
+    return docs or default, needs.srcdir_of(old)
+
+
+def _init_ecosystem_settings(
+    root: Path, ecosystems: Sequence[str], docs_srcdir: Path | None = None
+) -> tuple[dict[str, Any], list[str]]:
+    """What each declared ecosystem's adapter has init write for this project
+    (`Adapter.init_settings`), with its notes.
+
+    A primary's commands are the flat `commands.*` keys and a further
+    ecosystem's are under `commands.<ecosystem>` (ADR-013 D1), so each
+    adapter names its commands bare and they are placed here. Each adapter
+    is told the docs project's source directory (``docs_srcdir``), never its
+    content.
+    """
+    from ..adapters import get_adapter
+
+    settings: dict[str, Any] = {}
+    notes: list[str] = []
+    for index, eco in enumerate(dict.fromkeys(ecosystems)):
+        found, said = get_adapter(eco, docs_srcdir=docs_srcdir).init_settings(root)
+        notes.extend(said)
+        for top, value in found.items():
+            if top == "commands" and index:
+                settings.setdefault("commands", {}).setdefault(eco, {}).update(value)
+            else:
+                settings.setdefault(top, {}).update(value)
+    return settings, notes
+
+
+def _under(settings: dict[str, Any], defaults: Mapping[str, Any]) -> dict[str, Any]:
+    """``settings`` with every key of ``defaults`` it does not already set."""
+    import copy
+
+    merged = copy.deepcopy(dict(settings))
+    for key, value in defaults.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _under(merged[key], value)
+        elif key not in merged:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _store_refusal(root: Path) -> str | None:
+    """Why `init` cannot offer a store at ``root``, or ``None`` when it can."""
+    from ..core import git
+
+    try:
+        _store_repo(root)
+    except UsageError as exc:
+        return str(exc)
+    if git.toplevel(root) != root:
+        return (
+            f"{root} is not the top level of its git repository, and a store is "
+            f"linked from there"
+        )
+    return None
+
+
+def _init_candidate(root: Path, manifest_path: Path, raw: Mapping[str, Any]) -> Manifest:
+    """``raw`` resolved as the manifest `init` would write, over the tree as it
+    stands, with the user level below."""
+    from ..core.home import load_user_config
+
+    user = load_user_config()
+    return Manifest.from_raw(
+        raw,
+        root=root,
+        path=manifest_path,
+        below=[(user.label, user.defaults)] if user.defaults else [],
+    )
+
+
+def _init_resolved(root: Path, manifest_path: Path, body: str, written: bool):
+    """The configuration `init` reports on: the project as written, or for a
+    dry run the manifest it would write over the tree as it stands, with the
+    user level below. A refusal is returned, not raised: the project is
+    initialised by the time a written run asks."""
+    import yaml
+
+    try:
+        if written:
+            return Manifest.locate(root)
+        return _init_candidate(root, manifest_path, yaml.safe_load(body) or {})
+    except InvariantError as exc:
+        return exc
+
+
+def _init_assessment(resolved):
+    """The docs assessment `init` reports (ADR-016 D4.2): ``(assessment,
+    payload)``, the assessment ``None`` when it could not run.
+
+    Reported, never raised: an assessment that cannot run is not a failed
+    `init`.
+    """
+    from ..domains import docs
+
+    if isinstance(resolved, InvariantError):
+        return None, {"error": str(resolved)}
+    try:
+        assessment = docs.assess(resolved)
+    except InvariantError as exc:
+        return None, {"error": str(exc)}
+    return assessment, assessment.to_dict()
+
+
+def _init_configuration(resolved) -> tuple[str, list | dict]:
+    """What a non-interactive `init` adds after its report (ADR-017 D9):
+    ``(text, payload)``, each core question's resolved value and provenance,
+    the payload `{"error"}` when it could not be resolved. Reported, never
+    raised, as the assessment is."""
+    from ..core import questionnaire
+
+    error = resolved if isinstance(resolved, InvariantError) else None
+    if error is None:
+        try:
+            rows = questionnaire.core_report(questionnaire.load_catalogue(), resolved)
+        except InvariantError as exc:
+            error = exc
+        else:
+            return questionnaire.render_report(rows), [row.report_dict() for row in rows]
+    return f"configuration not resolved: {error}", {"error": str(error)}
+
+
+@dataclass
+class _InitDocs:
+    """What `init`'s docs step decided (ADR-016 D4, re-housed by ADR-017 D3)."""
+
+    #: Where the docs live: a ``cli.onboarding.DocsChoice``.
+    choice: Any
+    #: The store created or linked, a ``cli.onboarding.StorePlacement``.
+    store: Any = None
+    #: How the gaps are closed; ``None`` when the offer was not made.
+    mode: str | None = None
+    #: A new project, with no manifest yet: its docs project is
+    #: ``invariant-docs/``, and a content folder is refused for it (ADR-020 D8).
+    new: bool = True
+
+
+def _init_docs_step(prompter, root: Path, docs: _InitDocs, candidate, project) -> None:
+    """ADR-016 D4.1 to D4.3 as the questionnaire's docs step, in their order
+    and with their meaning: where the docs live, the assessment of that
+    location, and how its gaps are closed.
+
+    The assessment reads the candidate configuration (``candidate``, given
+    the location chosen), as `init --dry-run` does (ADR-017 D3), and the key
+    the offer chooses is written with the rest. A store is created or linked
+    as soon as it is chosen, as before: it is the first write, the one most
+    likely to be refused, and the assessment reads the docs in it. A store
+    `init` creates gets ``project()`` at its own level.
+    """
+    from . import onboarding
+
+    if (root / docs.choice.docs).exists():
+        docs.choice = onboarding.offer_location(
+            prompter, root, docs.choice.docs, _store_refusal(root), new_project=docs.new
+        )
+    if docs.choice.kind == "store":
+        docs.store = onboarding.place_in_store(_store_repo(root), docs.choice, project())
+        try:
+            resolved = Manifest.locate(root)
+        except InvariantError as exc:
+            resolved = exc
+    else:
+        resolved = candidate(docs.choice)
+    assessment, _report = _init_assessment(resolved)
+    if assessment is not None and assessment.gaps:
+        docs.mode = onboarding.offer_onboarding(prompter, assessment)
+
+
+def _init_ask(asker, prompter, args, root: Path, manifest_path: Path, name: str,
+              ecosystems: list[str], docs: _InitDocs):
+    """ADR-017 D3.1 and D3.2: the level, then the core sections in catalogue
+    order, the docs step at its place among them. Returns ``(base, asked)``:
+    the configuration the answers were asked over, and the answers.
+
+    A flag given is an answer, checked as a typed one and not asked:
+    `--profile` (ADR-017 D5) and `--ecosystem`. A refused flag is a usage
+    error, before anything is written.
+    """
+    from ..core import questionnaire
+    from . import configure
+
+    try:
+        base = _init_candidate(
+            root,
+            manifest_path,
+            {"version": 1, "project": {"name": name, "ecosystems": ecosystems}},
+        )
+        catalogue = questionnaire.load_catalogue()
+    except InvariantError as exc:
+        raise UsageError(f"the questionnaire cannot be asked: {exc}") from exc
+    asked = configure.Asked(
+        level=configure.ask_level(asker, base), draft=questionnaire.Draft(base)
+    )
+    given: dict[str, tuple[Any, str]] = {}
+    if args.ecosystem:
+        given["project.ecosystems"] = ([args.ecosystem], "--ecosystem")
+    if args.profile is not None:
+        given["enforcement.profile"] = (args.profile, "--profile")
+
+    def candidate(choice):
+        draft = asked.draft
+        if _docs_written(choice):
+            draft = draft.placed("paths.docs", choice.docs, "repo")
+        try:
+            return draft.manifest()
+        except InvariantError as exc:
+            return exc
+
+    def docs_step(_asked) -> None:
+        if prompter is None:
+            return
+        _init_docs_step(
+            prompter,
+            root,
+            docs,
+            candidate,
+            lambda: {
+                "project": {
+                    "name": name,
+                    "ecosystems": list(asked.value("project.ecosystems", ecosystems)),
+                }
+            },
+        )
+
+    try:
+        configure.ask_sections(
+            asker,
+            catalogue,
+            asked,
+            catalogue.core,
+            given=given,
+            prefill={"project.ecosystems": (ecosystems, "detected")},
+            steps={"docs": docs_step},
+        )
+    except questionnaire.Refused as exc:
+        raise UsageError(str(exc)) from exc
+    return base, asked
+
+
+def _init_plan(asker, root: Path, base: Manifest, asked, docs: _InitDocs):
+    """ADR-017 D4, D5: the writes the answers make, over the configuration as
+    it now stands. The project block is init's own body and is not planned.
+    When the docs step made this a store project, its repo level is the
+    pointer, which init does not write: an answer aimed at it goes to this
+    repository's block in the store, saying so (D4)."""
+    from ..core import questionnaire
+    from . import configure
+
+    answers = [a for a in asked.answers if not a.key.startswith("project.")]
+    if docs.store is not None:
+        base = Manifest.locate(root)
+        moved = []
+        for answer in answers:
+            if answer.level == "repo":
+                level, note = questionnaire.route(answer.key, "repo", store_project=True)
+                if note is not None:
+                    asked.notes.append(note)
+                    asker.say(note)
+                answer = replace(answer, level=level)
+            moved.append(answer)
+        answers = moved
+    plan = questionnaire.plan(base, answers)
+    return plan, configure.say_notes(asker, plan.notes)
+
+
+def cmd_init(args) -> int:
+    from ..adapters import detect
+    from ..hosts.claude_code import ClaudeCodeHost
+    from . import configure, onboarding
+
+    root = Path(args.root or Path.cwd()).resolve()
+    manifest_path = root / ".claude" / "invariant.yaml"
+
+    if manifest_path.exists() and not args.force:
+        raise UsageError(
+            f"{manifest_path.relative_to(root)} already exists; pass --force to "
+            f"overwrite, or edit it directly"
+        )
+    new = not manifest_path.exists()
+    mandate = {} if new else _kept_mandate(root)
+    docs_location, docs_srcdir = _init_docs_home(root, new)
+
+    ecosystems = [args.ecosystem] if args.ecosystem else detect(root, docs_srcdir=docs_srcdir)
+    name = args.name or root.name
+    profile = args.profile or DEFAULTS["enforcement"]["profile"]
+
+    # The questions (ADR-017 D3). Only an interactive run is asked anything:
+    # the level and the core sections, then the docs step (ADR-016 D4), which
+    # offers a location only where `paths.docs` exists; an absent directory
+    # gets the starter as it always has, and the existing one is never
+    # written. Nothing but a chosen store is written until the last answer.
+    # A new project's docs location is `invariant-docs/architecture`
+    # (ADR-020 D8); `--force` over an existing manifest keeps its own.
+    prompter = _init_prompter(args)
+    asker = _questionnaire_prompter(args)
+    docs = _InitDocs(onboarding.DocsChoice("reuse", docs_location), new=new)
+    asked = None
+    if asker is not None:
+        base, asked = _init_ask(
+            asker, prompter, args, root, manifest_path, name, ecosystems, docs
+        )
+        ecosystems = list(asked.value("project.ecosystems", ecosystems))
+    elif prompter is not None:
+        _init_docs_step(
+            prompter,
+            root,
+            docs,
+            lambda choice: _init_resolved(
+                root,
+                manifest_path,
+                _init_body(
+                    name, ecosystems, _init_settings({"enforcement": {"profile": profile}}, docs)
+                ),
+                written=False,
+            ),
+            lambda: {
+                "project": {"name": name, "ecosystems": ecosystems},
+                "enforcement": {"profile": profile},
+            },
+        )
+
+    # Only answers that differ from what the levels below resolve are
+    # written (ADR-017 D5); a run that asked nothing writes today's body.
+    plan, notes = (None, [])
+    if asked is not None:
+        plan, notes = _init_plan(asker, root, base, asked, docs)
+    repo_settings = (
+        {"enforcement": {"profile": profile}} if plan is None else plan.at("repo").sets
+    )
+    # What the adapters need written that their static defaults cannot know
+    # (the sphinx source directory), never over an answer given above.
+    store = docs.store
+    eco_settings, eco_notes = _init_ecosystem_settings(root, ecosystems, docs_srcdir)
+    if store is None:
+        repo_settings = _under(repo_settings, eco_settings)
+    settings = _init_settings(repo_settings, docs)
+    body = _init_body(name, ecosystems, settings)
+
+    if store is not None:
+        actions = list(store.lines)
+        docs_dir = store.root / docs.choice.docs
+    else:
+        actions = [f"write {manifest_path.relative_to(root)}"]
+        docs_dir = root / docs.choice.docs
+    # The docs starter (ADR-018 D11), ONLY where the docs directory is absent.
+    # A fresh project otherwise starts out failing its own docs-first gate with
+    # nothing to read. A directory that exists, even empty, is the project's,
+    # and `--force` does not change that: it rewrites the manifest, not the
+    # docs. The starter makes the project enforced on it (D10).
+    starter, starter_note = (
+        _init_starter(root, manifest_path, body, name, docs)
+        if not docs_dir.exists()
+        else (None, None)
+    )
+    if store is None and (starter is not None or mandate):
+        settings = _over(settings, starter.settings if starter is not None else mandate)
+        body = _init_body(name, ecosystems, settings)
+    install = _init_host_install(args)
+    host = ClaudeCodeHost(root)
+    if install:
+        actions.extend(host.plan_install())
+    else:
+        actions.append(_not_installed_line())
+    actions.append("add the state root to .gitignore")
+    actions.append("register this project in the oracle index")
+    venv = None
+    if starter is not None:
+        actions.extend(
+            f"write {_spelled_under(root, path)} (the docs project's starter)"
+            for path in starter.paths()
+        )
+        venv = {
+            "created": False,
+            "srcdir": _spelled_under(root, starter.srcdir),
+            "command": "invariant docs venv",
+        }
+        if args.dry_run or (prompter is None and asker is None):
+            actions.append(_venv_deferred(root, starter))
+    notes_after = [starter_note] if starter_note else []
+    if starter is not None and starter.note:
+        notes_after.append(starter.note)
+
+    if args.dry_run:
+        resolved = _init_resolved(root, manifest_path, body, written=False)
+        assessment, report = _init_assessment(resolved)
+        payload = {
+            "actions": actions,
+            "docs_assessment": report,
+            "notes": eco_notes + notes_after,
+            "docs_venv": venv,
+            "host_install": _host_install_payload(install),
+        }
+        text = (
+            "would:\n"
+            + "\n".join(f"  - {a}" for a in actions)
+            + "\n\n"
+            + _assessment_text(assessment, report)
+            + "".join(f"\n\n{note}" for note in eco_notes + notes_after)
+        )
+        if prompter is None:
+            listed, payload["configuration"] = _init_configuration(resolved)
+            text += f"\n\n{listed}"
+        return emit(args, payload, text)
+
+    # The writes, all after the last answer (ADR-017 D5): the store's, then
+    # the user level's, then the repository's.
+    by_hand_settings: list[dict[str, str]] = []
+    if plan is not None:
+        user = plan.at("user")
+        if user.sets or user.removes:
+            applied = configure.write_user(user)
+            if applied.action is not None:
+                actions.append(applied.action)
+            if applied.by_hand is not None:
+                by_hand_settings.append(applied.by_hand)
+        if store is not None:
+            block = plan.at("store-repo")
+            if block.sets or block.removes:
+                actions.append(store.write(block.sets, block.removes))
+    if store is not None and eco_settings:
+        actions.append(store.write(eco_settings))
+    if store is not None and starter is not None:
+        # The starter's ruleset is in the store with the docs project, so the
+        # guidelines records are the store's too (ADR-014 D9, increment 4c-2).
+        records = {"backlog": "store"}
+        if starter.ruleset is not None:
+            records["guidelines"] = "store"
+        actions.append(store.write(_over(starter.settings, {"records": records})))
+    if store is not None and docs.mode in ("incremental", "all_at_once"):
+        actions.append(store.write({"docs": {"onboarding": docs.mode}}))
+    elif docs.mode in ("incremental", "all_at_once"):
+        actions.append(f"write docs.onboarding: {docs.mode} to {MANIFEST_RELPATH}")
+
+    if store is None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(body, encoding="utf-8")
+
+    gitignore = root / ".gitignore"
+    marker = ".claude/invariant/state/"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+    if marker not in existing:
+        with gitignore.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"\n# invariant runtime state: machine-local and session-scoped\n{marker}\n"
+            )
+
+    if starter is not None:
+        from ..domains import docs as docs_domain
+
+        docs_domain.write_starter(starter)
+        # The environment needs the network, so only a run that may ask
+        # creates it (ADR-018 D4); a failure is reported, never a failed init.
+        if prompter is not None or asker is not None:
+            try:
+                docs_domain.sync_venv(starter.srcdir)
+            except InvariantError as exc:
+                venv["error"] = str(exc)
+                actions.append(
+                    f"the docs environment was not created: {exc}\n"
+                    f"    run 'invariant docs venv' once that is fixed"
+                )
+            else:
+                venv["created"] = True
+                actions.append(
+                    f"created the docs environment {_spelled_under(root, starter.srcdir)}"
+                    f"/.venv from its requirements.txt"
+                )
+
+    JsonStore(root / ".claude" / "invariant" / "state").ensure_root()
+    resolved = _init_resolved(root, manifest_path, body, written=True)
+    if install:
+        _init_install(root, resolved)
+    registration = _register_after_init(root)
+    note = (
+        f"\n\nNot registered in the oracle index: {registration['error']}\n"
+        f"  The project is initialised; 'invariant oracle projects add' retries."
+        if "error" in registration
+        else ""
+    )
+
+    assessment, report = _init_assessment(resolved)
+    if docs.mode is not None:
+        after = _init_onboarding(docs.mode, root, assessment, report)
+    else:
+        after = [_assessment_text(assessment, report)]
+    if notes:
+        after.append("\n".join(notes))
+    if eco_notes:
+        after.append("\n".join(eco_notes))
+    after.extend(notes_after)
+    # A file holding comments is never rewritten (it would lose them): what
+    # init would have written is printed to add by hand, and init carries on.
+    by_hand = store.by_hand() if store is not None else None
+    if by_hand is not None:
+        after.append("\n".join(onboarding.by_hand_lines(by_hand)))
+        by_hand_settings.append(by_hand)
+    for held in by_hand_settings:
+        if held is not by_hand:
+            after.append("\n".join(configure.by_hand_lines(held)))
+    payload = {
+        "actions": actions,
+        "ecosystems": ecosystems,
+        "oracle": registration,
+        "docs_assessment": report,
+        "store_settings_by_hand": by_hand,
+        "settings_by_hand": by_hand_settings,
+        "docs_venv": venv,
+        "host_install": _host_install_payload(install),
+    }
+    # Each core question's resolved value and where it came from (ADR-017
+    # D9), after everything else. Only where nothing was asked.
+    if prompter is None and asker is None:
+        listed, payload["configuration"] = _init_configuration(resolved)
+        after.append(listed)
+    return emit(
+        args,
+        payload,
+        "initialised:\n"
+        + "\n".join(f"  - {a}" for a in actions)
+        + (
+            "\n\nCommit these before starting a session. A session works in a "
+            "linked\nworktree, and a worktree checks out a commit — an uncommitted "
+            "manifest\nis invisible from inside one."
+            if store is None
+            else "\n\nCommit the repository's files before starting a session, "
+            "and the store's\ninvariant.yaml in the store: the manifest lives "
+            "there, not in the repository."
+        )
+        + note
+        + "".join(f"\n\n{text}" for text in after if text),
+    )
+
+
+def _host_install_payload(installed: bool) -> dict:
+    from ..hosts.claude_code import INSTALL_COMMANDS
+
+    return {"installed": installed, "commands": [] if installed else list(INSTALL_COMMANDS)}
+
+
+def _init_install(root: Path, resolved) -> None:
+    """The hooks and agents, once the user said yes, wired where the project
+    as written says (`records.hooks` and `records.agents`), so a `local`
+    project's wiring is kept out of git with its receipt (ADR-014 D11).
+
+    ``resolved`` is the project as written, or the refusal that stopped it
+    resolving; then the committed wiring of every shipped agent is
+    installed, as `init` always did, since the project is initialised by
+    the time it asks and the refusal is reported with the rest."""
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    if isinstance(resolved, InvariantError):
+        ClaudeCodeHost(root).install()
+        return
+    ClaudeCodeHost(resolved.root, manifest=resolved).install()
+
+
+def _init_starter(root: Path, manifest_path: Path, body: str, name: str, docs: _InitDocs):
+    """``(starter, note)``: the docs starter `init` writes (ADR-018 D11), or
+    ``None`` and why not.
+
+    Planned over the configuration being written, before the starter's own
+    keys are added: its need types, its assessment sections and the source
+    areas its adapters derive. In a store project that is the store's, and
+    the starter goes under the store root, where ``records.docs`` resolves
+    (ADR-016 ruling G).
+    """
+    from ..domains import docs as docs_domain
+
+    if docs.store is not None:
+        base = docs.store.root
+        try:
+            candidate = Manifest.locate(root)
+        except InvariantError as exc:
+            candidate = exc
+    else:
+        base = root
+        candidate = _init_resolved(root, manifest_path, body, written=False)
+    if isinstance(candidate, InvariantError):
+        return None, f"The docs starter was not written: the configuration does not load: {candidate}"
+    try:
+        starter = docs_domain.plan_starter(
+            candidate, project=name, base=base, docs=docs.choice.docs
+        )
+    except docs_domain.StarterNotWritten as exc:
+        return None, str(exc)
+    if docs.store is not None:
+        # A write into a store's policy with no session goes only into units
+        # nobody holds or queues for (ADR-014 D5, increment 4c-2).
+        from ..domains.session import SessionDomain
+
+        try:
+            SessionDomain(candidate).docs_write(None, starter.paths())
+        except InvariantError as exc:
+            return None, f"The docs starter was not written into the store: {exc}"
+    return starter, None
+
+
+def _kept_mandate(root: Path) -> dict[str, Any]:
+    """What `init --force` keeps of an enforced manifest it rewrites: the keys
+    that put the project under the mandate (ADR-018 D10). Rewriting the
+    manifest never moves a project back to migrating, which only the
+    reasoned route may do; ``{}`` for a manifest that is not enforced or
+    does not load."""
+    try:
+        old = Manifest.locate(root)
+    except InvariantError:
+        return {}
+    if old.store is not None or old.get("docs.needs.state") != "enforced":
+        return {}
+    needs = {"state": "enforced"}
+    if old.get("docs.needs.srcdir") is not None:
+        needs["srcdir"] = old.get("docs.needs.srcdir")
+    items = {"backend": old.get("items.backend"), "path": old.get("items.path")}
+    if old.get("items.closed_path") is not None:
+        items["closed_path"] = old.get("items.closed_path")
+    kept = {"docs": {"format": old.get("docs.format"), "needs": needs}, "items": items}
+    # The ruleset carrying the mandate's two judgement rules (ADR-018 D8, D9)
+    # is kept with them, so the pages rendered from it stay current.
+    if old.get("guidelines.ruleset") is not None:
+        kept["guidelines"] = {"ruleset": old.get("guidelines.ruleset")}
+    return kept
+
+
+def _venv_deferred(root: Path, starter) -> str:
+    """The action line naming the command that creates the docs environment."""
+    srcdir = _spelled_under(root, starter.srcdir)
+    return (
+        f"create the docs environment {srcdir}/.venv: run 'invariant docs venv' "
+        f"(only an interactive init creates it: it needs the network)"
+    )
+
+
+def _over(settings: Mapping[str, Any], extra: Mapping[str, Any]) -> dict[str, Any]:
+    """``settings`` with every key of ``extra`` written over it."""
+    import copy
+
+    merged = copy.deepcopy(dict(settings))
+    for key, value in extra.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _over(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _spelled_under(root: Path, path: Path) -> str:
+    """``path`` relative to ``root`` when it lies there, else in full."""
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _assessment_text(assessment, report: dict) -> str:
+    if assessment is None:
+        return f"docs assessment not run: {report['error']}"
+    return assessment.render()
+
+
+def _init_onboarding(mode: str, root: Path, assessment, report: dict) -> list[str]:
+    """ADR-016 D4.3 and ruling 9, after the writes: what the onboarding
+    answer says, and the all-at-once plan where the base already carries the
+    manifest, recorded from the docs as written."""
+    from . import onboarding
+
+    if mode == "not_now":
+        return ["Not now: nothing written. 'invariant docs assess' shows the gaps again."]
+    if mode != "all_at_once":
+        return []
+    if assessment is None:
+        return [f"All at once: the plan was not recorded: {report['error']}"]
+    # Reported, never raised: the project is initialised by now, and a plan
+    # refused (one already parked here, say) is not a failed `init`.
+    try:
+        ctx = Context(cwd=root)
+        if not onboarding.carries_manifest(ctx.manifest):
+            return [f"All at once: {onboarding.DEFERRED_PLAN}."]
+        return onboarding.plan_lines(onboarding.record_plan(ctx, assessment))
+    except InvariantError as exc:
+        return [f"All at once: the plan was not recorded: {exc}"]
+
+
+def _register_after_init(root: Path) -> dict:
+    """Record a freshly initialised project in the oracle's index.
+
+    Reported, never raised: by the time this runs the project IS initialised,
+    and failing the command over a user-level index would tell the operator
+    the opposite. The note names the command that retries it.
+    """
+    from ..oracle.home import oracle_home
+    from ..oracle.index import ProjectIndex
+
+    try:
+        entry, added = ProjectIndex(oracle_home()).register(
+            Manifest.locate(root), via="init"
+        )
+    except InvariantError as exc:
+        return {"error": str(exc)}
+    return {"added": added, "key": entry.key}
+
+
+def cmd_doctor(args) -> int:
+    from ..domains.docs import adoption_drift, mandate_row, plantuml_row, venv_row
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    checks: list[tuple[str, bool, str]] = []
+    # Labels of passing rows that carry a warning: shown as `warn`, never
+    # counted as a failure.
+    warned: set[str] = set()
+
+    # `doctor` is the command someone runs BECAUSE the manifest is wrong, and
+    # it used to resolve the manifest before it could report anything — so a
+    # manifest that refuses to load took out the one command that would explain
+    # it, and the operator got a single line from the argument parser's error
+    # path instead of a diagnosis. Enumerating problems is this command's whole
+    # job; being stopped by the first one is the opposite of it (BUG_050).
+    try:
+        ctx = Context(required=False, session_id=args.id)
+    except ManifestError as exc:
+        checks = [
+            ("manifest present", True, str(exc.manifest_path or Path.cwd() / MANIFEST_RELPATH)),
+            ("manifest valid", False, str(exc)),
+        ]
+        return _report_checks(args, checks)
+
+    manifest_exists = ctx.manifest.path.is_file()
+    checks.append(("manifest present", manifest_exists, str(ctx.manifest.path)))
+
+    if manifest_exists:
+        checks.append(("manifest valid", True, f"version {ctx.manifest.get('version')}"))
+        # Every value the user level supplied (ADR-014 ruling 19). It sits
+        # below the project's own settings and applies to every project on
+        # this machine, so it is named here rather than discovered. A row
+        # that informs and never fails: a default is the operator's choice.
+        checks.append(("user defaults", True, user_defaults_summary(ctx.manifest)))
+        home_row = _config_home_row(ctx.manifest)
+        if home_row is not None:
+            label, detail, warns = home_row
+            checks.append((label, True, detail))
+            if warns:
+                warned.add(label)
+        for store_row in (store_identity_row(ctx.manifest), store_privacy_row(ctx.manifest)):
+            if store_row is not None:
+                label, ok, detail, warns = store_row
+                checks.append((label, ok, detail))
+                if warns:
+                    warned.add(label)
+        state_ok = True
+        try:
+            ctx.store.ensure_root()
+        except InvariantError as exc:
+            state_ok, detail = False, str(exc)
+        else:
+            detail = str(ctx.manifest.state_root)
+        checks.append(("state root writable", state_ok, detail))
+
+        # A failing row names the remedy. "docs-first is core policy" stated
+        # the rule to an adopter whose first `pipeline advance` was about to
+        # block on it, and said nothing about how to satisfy it.
+        docs = ctx.manifest.path_for("docs")
+        checks.append(
+            (
+                "architecture docs exist",
+                docs.is_dir(),
+                str(docs)
+                + (
+                    ""
+                    if docs.is_dir()
+                    else "  missing: create the architecture docs there (invariant "
+                    "init writes the docs starter when this directory is absent), or "
+                    "set enforcement.rules.docs.read_architecture: warn"
+                ),
+            )
+        )
+
+        # The docs assessment (ADR-016 D3), asked of its rule directly as the
+        # guidelines rows are. Its level decides the row: `warn`, every
+        # profile's, prints gaps as a warning; `block` fails the row; `off`
+        # removes it. The row above is unchanged.
+        docs_row = docs_assessment_row(ctx.manifest, ctx.rule_context())
+        if docs_row is not None:
+            label, ok, detail, warns = docs_row
+            checks.append((label, ok, detail))
+            if warns:
+                warned.add(label)
+        # Copy-mode drift (ADR-016 D8, ruling 3): a row only for a project
+        # that adopted by copy, and one that warns and never fails, since a
+        # moved original is the user's to re-copy or not.
+        drift = adoption_drift(ctx.manifest)
+        if drift is not None:
+            checks.append(("docs adoption", True, drift.detail()))
+            if not drift.clean:
+                warned.add("docs adoption")
+        # The docs mandate (ADR-018 D4, D10): its state, the pinned docs
+        # environment, and PlantUML's launcher when the diagrams list it.
+        checks.append(mandate_row(ctx.manifest))
+        checks.append(venv_row(ctx.manifest))
+        plantuml = plantuml_row(ctx.manifest)
+        if plantuml is not None:
+            checks.append(plantuml)
+
+        for name in ("build", "test"):
+            configured = ctx.manifest.get(f"commands.{name}")
+            checks.append(
+                (f"commands.{name} configured", bool(configured), str(configured or "unset"))
+            )
+        # A declared adapter whose coverage is not applicable says so, by name
+        # (ADR-015 D1), rather than leaving an unset coverage command to read
+        # as something missing.
+        from ..adapters import get_adapter
+
+        for eco in ctx.manifest.declared_ecosystems:
+            adapter = get_adapter(eco)
+            if not adapter.coverage_applicable:
+                checks.append(
+                    (
+                        "coverage",
+                        True,
+                        f"not applicable ({adapter.id}): {adapter.coverage_reason}",
+                    )
+                )
+        # A command of the wrong shape still loads (ADR-017 ruling 13): this
+        # row names it, and warns, never fails. It reads the questionnaire's
+        # own check, so a typed and a hand-written command are judged alike.
+        label, detail, warns = command_shape_row(ctx.manifest)
+        checks.append((label, True, detail))
+        if warns:
+            warned.add(label)
+
+        # The adapter's own tooling, resolved the way THIS process resolves it
+        # rather than the way a shell with hand-exported variables would.
+        for label, ok, detail in get_adapter(ctx.manifest.ecosystems[0]).self_check():
+            checks.append((label, ok, detail))
+
+        host = ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
+        for label, ok, detail in host.verify():
+            checks.append((label, ok, detail))
+        # Agent drift warns and does not fail, as `agents.rendered_current`
+        # does; a refused plan stays a failing row (ADR-012, A6.4).
+        warned |= host.warned_rows
+
+        # Item statuses against the configured machine. A project whose backlog
+        # says open/investigating/fixed while the machine says filed/triaged
+        # has entries invisible to every query keyed off its own vocabulary,
+        # and nothing said so — the machine is already pluggable through
+        # methodology.extra_machines, so this is a mismatch nobody was told
+        # about rather than a missing feature.
+        try:
+            unknown: dict[str, set[str]] = {}
+            for item in ctx.items.backend.load_all():
+                if not item.status:
+                    continue
+                try:
+                    machine = ctx.items.machine(item.type)
+                except InvariantError:
+                    continue
+                if item.status not in machine.states:
+                    unknown.setdefault(item.type, set()).add(item.status)
+            detail = (
+                "; ".join(
+                    f"{kind}: {', '.join(sorted(values))}"
+                    for kind, values in sorted(unknown.items())
+                )
+                + " — not states of the configured machine; add one via "
+                "methodology.extra_machines"
+                if unknown
+                else "every item status is a state of its machine"
+            )
+            checks.append(("item statuses match their machine", not unknown, detail))
+        except InvariantError:
+            pass
+
+        # What `end_host_session` has promised in its docstring since it was
+        # written: a spent binding is a session somebody parked, and nothing
+        # told them where. Reported in the ONE command people run when they
+        # suspect they have lost something.
+        #
+        # Informational, never a failure row. `_report_checks` turns any false
+        # row into exit 1, and a parked session is this feature's designed
+        # resting state — a `doctor` that goes permanently red on every project
+        # adopting the plan is the gate that gets ignored and then switched
+        # off. Guarded like the sibling checks: a diagnosis that cannot be made
+        # must not take the diagnosis command down with it.
+        try:
+            parked = ctx.sessions.resumable(cwd=ctx.cwd)
+            checks.append(
+                (
+                    "sessions parked here",
+                    True,
+                    "; ".join(
+                        f"{s.name} ({plan_reader.progress(s.plan).describe()})"
+                        for s in parked
+                    )
+                    + " — pick one up: invariant session resume <name>"
+                    if parked
+                    else "none parked here",
+                )
+            )
+            owing = [s for s in ctx.sessions.live() if s.plan_open]
+            checks.append(
+                (
+                    "open deliverable plans",
+                    True,
+                    "; ".join(
+                        f"{s.name}: {s.plan_done_count}/{s.plan_total} done"
+                        for s in owing
+                    )
+                    if owing
+                    else "no live session has an open plan",
+                )
+            )
+        except InvariantError:
+            pass
+
+        # A standing relaxation of the coverage floor, named where an operator
+        # looks for a forgotten setting. Informational for the same reason the
+        # parked-session row is: the list is a deliberate phase state, and a
+        # doctor that stays red for a whole phase is one nobody reads.
+        advisory = coverage_advisory_exception(ctx.manifest)
+        checks.append(
+            ("coverage advisory paths", True, advisory or "none configured")
+        )
+
+        # The sweep cadence, its gates and the last sweep's age (ADR-010 D6,
+        # ruling 10). Informational like the rows above: a stale sweep is
+        # `sweep.fresh`'s warning, never a failed diagnosis.
+        try:
+            checks.append(
+                ("sweep cadence", True, sweep_cadence_summary(ctx.rule_context()))
+            )
+        except InvariantError as exc:
+            checks.append(("sweep cadence", True, f"could not be read: {exc}"))
+
+        # The guidelines ruleset (ADR-012 D3): a row, and a failing one when a
+        # configured ruleset does not load or validate. Asked of the rule
+        # itself, so `doctor` and the landing gate cannot disagree; called
+        # directly rather than through `evaluate`, because a diagnosis reports
+        # the ruleset as it is whatever level or stand-down holds the gate.
+        ruleset = get_rule("guidelines.ruleset_valid").fn(ctx.rule_context())
+        checks.append(
+            (
+                "guidelines ruleset",
+                ruleset.ok,
+                ruleset.message + (f": {ruleset.detail}" if not ruleset.ok else ""),
+            )
+        )
+        # Drift between the ruleset and what render wrote from it (ADR-012
+        # D3). The row warns, as the gate does, and never fails the diagnosis:
+        # drift alone is not a broken installation (user ruling, A2 increment
+        # 5). A refusal warns here too; a ruleset that does not load already
+        # fails the row above.
+        generated = get_rule("guidelines.generated_current").fn(ctx.rule_context())
+        checks.append(
+            (
+                "guidelines generated",
+                True,
+                generated.message
+                + "".join(f"; try: {fix}" for fix in generated.fixes),
+            )
+        )
+        if not generated.ok:
+            warned.add("guidelines generated")
+        # Always rules no instruction file's block carries (the A5 ruling D12).
+        # A row only when that is so, and one that warns: the turn index still
+        # lists them on every turn. The files are the rule context's, so the
+        # manifest's or the host adapter's default, never a name kept here.
+        always = always_layer_summary(ctx.rule_context())
+        if always is not None:
+            checks.append(("guidelines always layer", True, always))
+            warned.add("guidelines always layer")
+        # The ratchet baseline (ADR-012 D6, A3 increment 5): its counts, or a
+        # warning when it cannot be read in full. Never a failure: the gates
+        # that read it fail at the landing, and a ruleset that does not load
+        # is the row above's.
+        baseline_ok, baseline_text = baseline_summary(ctx.rule_context())
+        checks.append(("guidelines baseline", True, baseline_text))
+        if not baseline_ok:
+            warned.add("guidelines baseline")
+
+        if ctx.manifest.get("memory.managed", True) and ctx.memory.root.exists():
+            report = ctx.memory.check()
+            checks.append(
+                (
+                    "memory store clean",
+                    report.clean,
+                    (
+                        f"{report.count} memories, "
+                        f"{len(report.problems())} problem(s)"
+                    ),
+                )
+            )
+
+    # Machine-wide, so outside the manifest block: an installed oracle agent
+    # names an absolute interpreter, and an editable install can move. Reads
+    # the plist only; launchd is not asked.
+    agent = _oracle_installer().interpreter_check()
+    if agent is not None:
+        checks.append(("oracle agent interpreter", *agent))
+        checks.extend(_oracle_watcher_build_check())
+    checks.extend(_oracle_web_checks())
+
+    # Machine-wide too: a live claude whose own environment inherited a
+    # marker from Terminal.app (IDEA_035). It warns and never fails: the
+    # remedy is the user's, and a doctor red for it would be ignored.
+    label, ok, detail, warn = _host_environment_check(_doctor_host_environments())
+    checks.append((label, ok, detail))
+    if warn:
+        warned.add(label)
+
+    return _report_checks(args, checks, warned)
+
+
+def docs_assessment_row(
+    manifest: Manifest, rule_ctx
+) -> tuple[str, bool, str, bool] | None:
+    """`doctor`'s `docs assessment` row: (label, ok, detail, warns), or ``None``
+    when `docs.assessment` is off (ADR-016 D3)."""
+    (rule_id,) = DOCTOR_ROW_RULES
+    level = manifest.rule_level(rule_id)
+    if level is Level.OFF:
+        return None
+    verdict = get_rule(rule_id).fn(rule_ctx)
+    gapped = not verdict.ok and not verdict.skipped
+    fails = gapped and level in (Level.BLOCK, Level.ASK)
+    detail = verdict.message + (f": {verdict.detail}" if gapped else "")
+    if gapped:
+        detail += "".join(f"; try: {fix}" for fix in verdict.fixes)
+    return ("docs assessment", not fails, detail, gapped and not fails)
+
+
+def _lease_host_alive(lease: dict) -> bool | None:
+    """Is a docs-lease holder's host process running? (ADR-014 D5)
+
+    The oracle's answer, read from the attention sidecar it owns, handed to
+    the session domain as a callable: neither ``core`` nor ``domains`` imports
+    the oracle.
+    """
+    from ..oracle.scan import lease_host_alive
+
+    return lease_host_alive(lease)
+
+
+def _docs_lock_session(ctx: Context) -> Session:
+    session = ctx.current_session()
+    if session is None:
+        raise UsageError(
+            "the docs lock is a session's; no session is active here. Pass --id, "
+            "or start one with 'invariant session start <name>'."
+        )
+    return session
+
+
+def _lock_lines(out) -> list[str]:
+    lines = []
+    if out.granted:
+        lines.append(f"granted   {', '.join(out.granted)}")
+    for unit in [s["unit"] for s in out.closed if s.get("backed_off")]:
+        lines.append(f"backed off {unit} (ruling 21): it is queued again after the late unit")
+    for unit, who in sorted(out.handed.items()):
+        lines.append(f"passed    {unit} to session {who}")
+    for unit in [s["unit"] for s in out.closed if not s.get("backed_off")]:
+        lines.append(f"released  {unit}")
+    lines.append(f"held      {', '.join(out.held) or 'nothing'}")
+    if out.waiting:
+        w = out.waiting
+        lines.append(
+            f"queued    {w['unit']} at position {w['position']}, held by session "
+            f"{w['holder']}; 'invariant docs lock --wait' blocks until it passes to you"
+        )
+    if out.pending:
+        lines.append(f"then      {', '.join(out.pending)}")
+    return lines
+
+
+def cmd_docs_lock(args) -> int:
+    """Take docs-lock units in key order, or report the lease (ADR-014 D5)."""
+    ctx = Context(session_id=args.id)
+    session = _docs_lock_session(ctx)
+    domain = ctx.sessions
+    # Taking units reads the docs next, so the store is pulled first (ADR-014
+    # D7); a report of where the lease stands reads nothing and pulls nothing.
+    pull = (
+        _pull_first(ctx, "docs lock stopped: no unit was taken")
+        if args.units or args.take_over
+        else None
+    )
+    _record_pull(ctx, session.id, pull)
+    if args.take_over:
+        if args.units:
+            raise UsageError("--take-over names its one unit; drop the other arguments")
+        out = domain.docs_take_over(session.id, args.take_over, args.reason or "")
+    else:
+        out = domain.docs_lock(session.id, args.units)
+    if args.wait and out.waiting:
+        out = domain.docs_wait(session.id, args.timeout)
+        if out.waiting:
+            emit(
+                args,
+                {**out.to_dict(), "timed_out": True},
+                "\n".join(
+                    [
+                        *_lock_lines(out),
+                        (
+                            f"still queued for {out.waiting['unit']} after "
+                            f"{args.timeout:g}s; the queue keeps your place"
+                        ),
+                    ]
+                ),
+            )
+            return 1
+    return emit(
+        args,
+        {**out.to_dict(), "store_pull": pull.to_dict() if pull is not None else None},
+        "\n".join([*(pull.lines() if pull is not None else []), *_lock_lines(out)]),
+    )
+
+
+def cmd_docs_unlock(args) -> int:
+    """Release docs-lock units, or all of them; never waits (ADR-014 D5).
+
+    The release lands the store leg (D6): it fetches first, stops on a file
+    changed on both sides, and otherwise replays the span's commits on top.
+    """
+    ctx = Context(session_id=args.id)
+    session = _docs_lock_session(ctx)
+    pull, out = _release_docs(
+        ctx,
+        session.id,
+        args.units,
+        "docs unlock stopped: nothing was released, and every unit is still "
+        "held. Resolve it in the store's main checkout, then run "
+        "'invariant docs unlock' again.",
+    )
+    landing = ctx.sessions.require(session.id).landing
+    return emit(
+        args,
+        {
+            **out.to_dict(),
+            "store_pull": pull.to_dict() if pull is not None else None,
+            "landing": landing,
+        },
+        "\n".join([*(pull.lines() if pull is not None else []), *_lock_lines(out)]),
+    )
+
+
+def _release_docs(ctx: Context, session_id: str, units: Sequence[str], stopped: str):
+    """Release the session's docs-lock units as D6 lands them: ``(pull, outcome)``.
+
+    The units it would release are checked for uncommitted changes first.
+    Then, when it releases any and the store has a remote with pull on, the
+    store is fetched and, past a remote that moved, the session's commits
+    are replayed on top (5a's replay, which stops on a file changed on both
+    sides and shows both diffs, ruling 9). A stop raises with ``stopped``
+    and every unit still held; a release never waits on another session's
+    units (D5), so a held unit elsewhere does not hold the replay. ``pull``
+    is ``None`` when nothing was pulled.
+    """
+    pull = None
+    if ctx.sessions.docs_releasable(session_id, units):
+        pull = _pull_store(ctx.manifest, replay=True)
+        if pull is not None and pull.stops:
+            raise UsageError("\n".join([*pull.lines(), stopped]))
+        _record_pull(ctx, session_id, pull)
+    return pull, ctx.sessions.docs_unlock(session_id, units)
+
+
+def _docs_lock_table(ctx: Context) -> list[str]:
+    """Each held unit of the store: holder, how long, the queue (ADR-014 D5)."""
+    if ctx.manifest.store is None:
+        return []
+    try:
+        rows = ctx.sessions.docs_units()
+    except InvariantError:
+        return []
+    if not rows:
+        return [f"  docs lock  store {ctx.manifest.store.name}: no unit held"]
+    lines = [f"  docs lock  store {ctx.manifest.store.name}"]
+    for row in rows:
+        queue = ", ".join(q or "?" for q in row["queue"]) or "empty"
+        stale = f"  STALE: {row['stale']}" if row.get("stale") else ""
+        lines.append(
+            f"    {row['unit']}  held by {row['holder']} for "
+            f"{_held_for(row['held_seconds'])}; queue: {queue}{stale}"
+        )
+    return lines
+
+
+def _held_for(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+
+def cmd_docs_assess(args) -> int:
+    """The architecture docs assessment (ADR-016 D3). Read-only; exit 0
+    whatever the gaps, 2 on a configuration that does not load.
+
+    ``--plan`` records the all-at-once plan (D5, ruling 9): a parked
+    `docs`-lane session with one deliverable per undocumented area, refused
+    until the base carries the manifest.
+    """
+    from ..domains.docs import adoption_drift, assess
+    from . import onboarding
+
+    ctx = Context()
+    assessment = assess(ctx.manifest)
+    payload = assessment.to_dict()
+    text = assessment.render()
+    # Copy-mode drift under its own heading (D3, D8): absent, in text and in
+    # JSON, for a project that adopted nothing.
+    drift = adoption_drift(ctx.manifest)
+    if drift is not None:
+        payload["adoption"] = drift.to_dict()
+        text += "\n\n" + drift.render()
+    if not args.plan:
+        return emit(args, payload, text)
+    if not onboarding.carries_manifest(ctx.manifest):
+        raise UsageError(
+            f"the base does not carry the manifest: {ctx.manifest.location.relpath} is not "
+            f"committed, and a session's worktree checks out a commit. Commit "
+            f"init's files, then run 'invariant docs assess --plan' again."
+        )
+    session = onboarding.record_plan(ctx, assessment)
+    payload["plan"] = onboarding.plan_payload(session)
+    return emit(args, payload, "\n".join([text, "", *onboarding.plan_lines(session)]))
+
+
+def cmd_docs_venv(args) -> int:
+    """Create or re-sync the docs project's pinned environment (ADR-018 D4).
+
+    ``--check`` reports whether it matches ``requirements.txt`` and exits 1
+    when it does not; it creates nothing.
+    """
+    from ..domains.docs import docs_project, sync_venv, venv_state
+
+    ctx = Context()
+    srcdir = docs_project(ctx.manifest)
+    state = venv_state(srcdir) if args.check else sync_venv(srcdir)
+    payload = {
+        "srcdir": str(srcdir),
+        "venv": str(state.venv),
+        "present": state.present,
+        "in_sync": state.in_sync,
+        "requirements_sha256": state.expected,
+        "recorded_sha256": state.recorded,
+    }
+    emit(args, payload, state.describe())
+    return EXIT_OK if state.in_sync else 1
+
+
+def cmd_docs_build(args) -> int:
+    """The docs project's strict build, recorded for its tree (ADR-018 D5).
+
+    Exit 0 on a green build (or one already recorded green for this tree,
+    not built again), 1 on a failed one; the record is what
+    ``docs.builds_strict`` and ``docs.needs_traceable`` read.
+    """
+    from ..domains.docs import build_docs
+
+    ctx = Context()
+    record, built = build_docs(ctx.manifest, force=args.force)
+    payload = {**record.to_dict(), "built": built}
+    short = record.digest[:12]
+    if record.passed:
+        text = (
+            f"strict build of {record.srcdir}/ green at {short}"
+            + ("" if built else " (already recorded green; not built again)")
+        )
+    else:
+        text = "\n".join(
+            [
+                (
+                    f"strict build of {record.srcdir}/ failed at {short}: exit "
+                    f"{record.exit_code}, {len(record.diagnostics)} warning(s) or error(s)"
+                ),
+                *(f"  {line}" for line in record.diagnostics),
+            ]
+        )
+    emit(args, payload, text)
+    return EXIT_OK if record.passed else 1
+
+
+def cmd_docs_decision_new(args) -> int:
+    """Mint the next decision record page (ADR-018 D7).
+
+    The page holds one need, the record, in the first decision status; the
+    decisions it records are written on it as needs, each linked to what it
+    shapes, and the strict build is what checks them.
+    """
+    from ..domains.docs import new_decision
+
+    ctx = Context()
+    page = new_decision(ctx.manifest, args.title, dry_run=args.dry_run)
+    index = None if page.index is None else _spelled_under(ctx.manifest.root, page.index)
+    payload = {
+        "id": page.need_id,
+        "number": page.number,
+        "status": page.status,
+        "path": page.rel,
+        "index": index,
+        "dry_run": bool(args.dry_run),
+    }
+    verb = "would write" if args.dry_run else "wrote"
+    links = ctx.manifest.get("docs.needs.require_links") or []
+    owed = ", ".join(f"{r.get('from')} -> {r.get('to')}" for r in links) or "none"
+    text = "\n".join(
+        [
+            f"{verb} {page.rel}: {page.need_id} ({page.status})",
+            (
+                f"  {'would list' if args.dry_run else 'listed'} it in {index}"
+                if index
+                else "  its index's toctree globs, and lists it already"
+            ),
+            (
+                f"  next: write each decision on it as a need, {page.need_id}_D1 "
+                f"onward, linked as docs.needs.require_links asks ({owed}); then "
+                f"'invariant docs build', and declare it: 'invariant session "
+                f"decisions add {page.need_id}'"
+            ),
+        ]
+    )
+    return emit(args, payload, text)
+
+
+def cmd_docs_migrate(args) -> int:
+    """Convert Markdown ADRs to record pages, or Markdown prose to rST pages,
+    through the docs environment's pandoc (ADR-018 D14). Each page names
+    what it still owes: its unconverted constructs, which fail the strict
+    build, and the needs the converter does not invent."""
+    from ..domains.docs import migrate_adr, migrate_prose
+
+    ctx = Context()
+    root = Path(ctx.manifest.root).resolve()
+    files = [(ctx.cwd / f).resolve() for f in args.files]
+    if args.migrate_kind == "adr":
+        pages = migrate_adr(ctx.manifest, files, dry_run=args.dry_run, reader=args.reader)
+    else:
+        into = None if args.into is None else (ctx.cwd / args.into).resolve()
+        pages = migrate_prose(
+            ctx.manifest, files, into=into, dry_run=args.dry_run, reader=args.reader
+        )
+    verb = "would write" if args.dry_run else "wrote"
+    lines = []
+    for page in pages:
+        index = None if page.index is None else _spelled_under(root, page.index)
+        held = (
+            f": {page.needs[0]} and {len(page.needs) - 1} decision need(s)"
+            if page.needs
+            else ""
+        )
+        lines.append(f"{verb} {page.rel}{held} (from {page.source})")
+        if page.unconverted:
+            lines.append(
+                f"  {len(page.unconverted)} construct(s) left as .. invariant-unconverted::"
+                " — the strict build fails on each until it is rewritten:"
+            )
+            lines += [f"    {reason}" for reason in page.unconverted]
+        if index:
+            lines.append(f"  {'would list' if args.dry_run else 'listed'} it in {index}")
+        lines += [f"  note: {note}" for note in page.notes]
+        if page.element_owed:
+            lines.append(
+                "  its element needs are a deliverable: the converter invents none, "
+                "because what is an element is a design judgement"
+            )
+    links = ctx.manifest.get("docs.needs.require_links") or []
+    owed = ", ".join(f"{r.get('from')} -> {r.get('to')}" for r in links) or "none"
+    lines.append(
+        f"next: link the needs as docs.needs.require_links asks ({owed}), run "
+        "'invariant docs build', and delete each Markdown source in the same session"
+    )
+    payload = {
+        "pages": [
+            {
+                "source": page.source,
+                "path": page.rel,
+                "needs": list(page.needs),
+                "unconverted": list(page.unconverted),
+                "notes": list(page.notes),
+                "index": None if page.index is None else _spelled_under(root, page.index),
+                "element_owed": page.element_owed,
+            }
+            for page in pages
+        ],
+        "dry_run": bool(args.dry_run),
+    }
+    return emit(args, payload, "\n".join(lines))
+
+
+def cmd_session_decisions(args) -> int:
+    """The decisions this session made (ADR-018 D9): add, resolve, remove, show.
+
+    Shaped as ``session plan`` is: nested actions, every one printing the
+    whole list and the same JSON document.
+    """
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    action = args.decisions_action
+    if action == "add":
+        if args.need_id is None and args.draft is None:
+            raise UsageError(
+                "name the decision's need id, or give --draft \"<one line>\""
+            )
+        session = ctx.sessions.decisions_add(
+            session.id, need_id=args.need_id, draft=args.draft
+        )
+    elif action == "resolve":
+        session = ctx.sessions.decisions_resolve(session.id, args.n, args.need_id)
+    elif action == "remove":
+        session = ctx.sessions.decisions_remove(session.id, args.n)
+    entries = [dict(e) for e in session.decisions if isinstance(e, dict)]
+    drafts = sum(1 for e in entries if not e.get("id"))
+    lines = [
+        (
+            f"decisions for session {session.id} ({session.name}) — "
+            f"{len(entries)} declared, {drafts} draft(s)"
+        )
+    ]
+    for entry in entries:
+        if entry.get("id"):
+            was = f"  (was: {entry['draft']})" if entry.get("draft") else ""
+            lines.append(f"  {entry.get('n')}  {entry['id']}{was}")
+        else:
+            lines.append(f"  {entry.get('n')}  draft: {entry.get('draft')}")
+    if drafts:
+        lines.append(
+            "  a draft holds the landing (docs.decisions_recorded): mint its record "
+            "with 'invariant docs decision new', then 'invariant session decisions "
+            "resolve <n> <DEC_id>'"
+        )
+    elif not entries:
+        lines.append(
+            "  declare one: invariant session decisions add <DEC_id> | --draft \"<one line>\""
+        )
+    payload = {
+        "session": session.id,
+        "name": session.name,
+        "decisions": entries,
+        "drafts": drafts,
+    }
+    return emit(args, payload, "\n".join(lines))
+
+
+def cmd_docs_adopt(args) -> int:
+    """Adopt existing documentation in place or by copy (ADR-016 D7, D8).
+
+    Plans first (`domains/docs.plan_adoption`), so a refusal writes nothing.
+    By copy, the files and the receipt are written into the docs location;
+    then, either way, the settings go to the project's own level: the
+    in-repo manifest, or this repository's block in its store. A file that
+    holds comments a rewrite would drop gets the block printed to add by hand.
+    `--dry-run` says what it would write and writes nothing.
+    """
+    from ..domains.docs import RECEIPT, copy_adoption, plan_adoption
+
+    ctx = Context()
+    manifest = ctx.manifest
+    adoption = plan_adoption(
+        manifest, args.source, args.mode, cwd=ctx.cwd, force=args.force
+    )
+    _refuse_a_higher_level(manifest, adoption.setting_lines())
+    lines: list[str] = []
+    if adoption.mode == "copy":
+        lines.append(
+            f"copy {len(adoption.files)} file(s) from {adoption.source} to "
+            f"{adoption.location}; the original is never written"
+        )
+        if adoption.overwrites:
+            lines.append(f"overwrite, as --force asks: {', '.join(adoption.overwrites)}")
+        if adoption.kept:
+            lines.append(
+                "keep, though the original no longer has them: "
+                + ", ".join(adoption.kept)
+            )
+        lines.append(f"write the receipt {adoption.location / RECEIPT}")
+    settings = ", ".join(adoption.setting_lines())
+    notes = []
+    if not adoption.assessable:
+        notes.append(
+            f"{adoption.format} has no reader in this build: the sections and links "
+            f"checks report not assessable (ADR-016 ruling 10); the areas check "
+            f"still reads every file."
+        )
+    payload = {**adoption.to_dict(), "dry_run": args.dry_run}
+    if args.dry_run:
+        lines.append(f"write {settings} to {_adoption_target(manifest)}")
+        payload.update(written=None, settings_by_hand=None)
+        return emit(
+            args,
+            payload,
+            "\n".join(["would:", *(f"  - {line}" for line in lines), *notes]),
+        )
+    if adoption.mode == "copy":
+        copy_adoption(adoption)
+    result = _write_adoption_settings(manifest, adoption.settings)
+    by_hand = None
+    if result.written:
+        lines.append(f"write {settings} to {result.path}")
+    else:
+        by_hand = {"path": str(result.path), "reason": result.reason, "yaml": result.by_hand}
+        lines.append(f"not written, to add by hand: {settings} (see below)")
+        notes += [
+            f"The settings were not written: {result.reason}.",
+            f"Add these by hand to {result.path}:",
+            "",
+            str(result.by_hand).rstrip("\n"),
+        ]
+    payload.update(written=str(result.path) if result.written else None,
+                   settings_by_hand=by_hand)
+    return emit(
+        args,
+        payload,
+        "\n".join(["adopted:", *(f"  - {line}" for line in lines), *notes]),
+    )
+
+
+def _adoption_target(manifest: Manifest) -> Path:
+    """The file `docs adopt` writes its settings to: the project's own level."""
+    from ..core.stores import STORE_MANIFEST
+
+    if manifest.store is not None:
+        return manifest.store.root / STORE_MANIFEST
+    return manifest.path
+
+
+def _write_adoption_settings(manifest: Manifest, settings: dict):
+    """Write ``settings`` at the project's own level: this repository's block
+    in its store, or the in-repo manifest."""
+    from ..core.stores import write_repo_settings, write_store_settings
+
+    if manifest.store is not None:
+        return write_store_settings(manifest.store.root, manifest.store.key, repo=settings)
+    return write_repo_settings(manifest.path, settings)
+
+
+def _refuse_a_higher_level(manifest: Manifest, setting_lines: list[str]) -> None:
+    """In a store project the pointer is read above the store's block for
+    this repository, so a key it sets would silently win over what `docs
+    adopt` writes there. Refused, naming the key, before anything is written."""
+    if manifest.store is None:
+        return
+    for line in setting_lines:
+        key = line.split(":", 1)[0]
+        label = manifest.source_of(key)
+        if label.startswith("repo:"):
+            raise UsageError(
+                f"{key} is set by {label.removeprefix('repo:')}, which is read above "
+                f"the store's block for this repository, so what docs adopt "
+                f"writes there would not take effect. Remove it from that file "
+                f"first."
+            )
+
+
+def command_shape_row(manifest: Manifest) -> tuple[str, str, bool]:
+    """`doctor`'s `command shape` row (ADR-017 ruling 13): ``(label, detail,
+    warns)``, each misshapen command named with its key and what is wrong."""
+    from ..core.questionnaire import command_problems
+
+    problems = command_problems(manifest)
+    if not problems:
+        return "command shape", "every configured command is one line with its placeholders", False
+    return (
+        "command shape",
+        "; ".join(f"{key} {problem}" for key, problem in problems),
+        True,
+    )
+
+
+def user_defaults_summary(manifest: Manifest) -> str:
+    """`doctor`'s row for the user level: each value it set, or that none did."""
+    values = manifest.user_level_values()
+    if not values:
+        return "none: no value resolves from the user level"
+    label = values[0][2].removeprefix("user:")
+    return f"from {label}: " + "; ".join(f"{key} = {value!r}" for key, value, _ in values)
+
+
+def _real_host_environments() -> list[dict] | None:
+    """Every running ``claude``, its terminal and what it inherited; ``None``
+    when the process table cannot be read."""
+    from ..hosts import claude_code_launch as launch
+
+    running = launch.running_claude_processes()
+    if running is None:
+        return None
+    return [{"pid": pid, "tty": tty, "markers": launch.inherited_markers(pid)}
+            for pid, tty in running]
+
+
+def _doctor_host_environments() -> list[dict] | None:
+    """What ``doctor``'s environment row judges: each live ``claude``'s own
+    environment, never ``doctor``'s (IDEA_035). A seam, like
+    ``_oracle_names_in_use``: the suite replaces it everywhere, so no test
+    reads the process table or a real process's environment."""
+    return _real_host_environments()
+
+
+def _host_environment_check(found: list[dict] | None) -> tuple[str, bool, str, bool]:
+    """``doctor``'s ``claude window environment`` row: ``(label, ok, detail, warn)``.
+
+    It warns, naming each host by pid and terminal and the remedy, when a
+    live ``claude`` inherited ``CLAUDE_CODE_CHILD_SESSION`` or
+    ``COLORTERM=truecolor`` from Terminal.app; otherwise it passes. It never
+    fails, so it never sets the exit code. A host whose environment could not
+    be read is counted, not guessed.
+    """
+    from ..hosts.claude_code_launch import INHERITED_MARKERS, TRUECOLOR
+    from ..oracle.signals import INHERITED_REMEDY
+
+    label = "claude window environment"
+    if found is None:
+        return label, True, "the process table could not be read", False
+    if not found:
+        return label, True, "no live claude window", False
+
+    def spelled(name: str) -> str:
+        return f"{name}={TRUECOLOR}" if name == INHERITED_MARKERS[1] else name
+
+    unread = sum(1 for host in found if host.get("markers") is None)
+    tail = f"; {unread} could not be read" if unread else ""
+    polluted = [host for host in found if host.get("markers")]
+    if not polluted:
+        names = " or ".join(spelled(name) for name in INHERITED_MARKERS)
+        detail = (f"{_plural(len(found), 'live claude window')}; none inherited {names} "
+                  f"from Terminal.app{tail}")
+        return label, True, detail, False
+    parts = [
+        f"claude {host['pid']}" + (f" on {host['tty']}" if host.get("tty") else "")
+        + " inherited " + ", ".join(spelled(name) for name in host["markers"])
+        for host in polluted
+    ]
+    return (label, True,
+            "; ".join(parts) + f" from Terminal.app: {INHERITED_REMEDY}{tail}", True)
+
+
+def _oracle_watcher_build_check() -> list[tuple[str, bool, str]]:
+    """``doctor``'s ``oracle watcher build`` row, while a watcher is writing.
+
+    Fails when the watcher behind a fresh snapshot runs an older invariant
+    than the installed one (BUG_089). Reads the snapshot; asks launchd nothing.
+    """
+    from ..oracle.build import stamp
+    from ..oracle.home import oracle_home
+    from ..oracle.watcher import snapshot_status
+
+    build = _watcher_build(snapshot_status(oracle_home(), time.time()), stamp())
+    if build["text"] is None:
+        return []
+    return [("oracle watcher build", not build["older"], build["text"])]
+
+
+def _oracle_web_checks() -> list[tuple[str, bool, str]]:
+    """``doctor``'s two web rows, when the web page's agent is installed.
+
+    Like the watcher's row, it reads files and asks launchd nothing: the
+    plist, and the report the serving loop keeps, whose pid is checked alive.
+    """
+    from ..oracle.build import stamp
+    from ..oracle.home import oracle_home
+    from ..oracle.webservice import (
+        cert_ok,
+        cert_text,
+        last_action_text,
+        page_ok,
+        page_text,
+        web_status,
+    )
+
+    interpreter = _oracle_web_installer().interpreter_check()
+    if interpreter is None:
+        return []
+    status = web_status(oracle_home())
+    devices = (
+        _plural(status["devices"], "paired device") if status["devices"] is not None
+        else f"devices unreadable: {status['devices_error']}"
+    )
+    detail = (f"{page_text(status)}; {devices}; "
+              f"last action {last_action_text(status['last_action'])}")
+    rows = [("oracle web interpreter", *interpreter), ("oracle web page", page_ok(status), detail)]
+    build = _web_build(status, stamp())
+    if build["text"] is not None:
+        rows.append(("oracle web build", not build["older"], build["text"]))
+    if status["certificate"] is not None:
+        now = time.time()
+        rows.append(("oracle web certificate", cert_ok(status, now), cert_text(status, now)))
+    return rows
+
+
+def _config_home_row(manifest) -> tuple[str, str, bool] | None:
+    """``config home`` for an in-repo manifest (ADR-020 D5 as D11 amends it).
+
+    Informs, and warns only on a manifest git neither tracks nor ignores: no
+    worktree would hold it, and ``git status`` shows it. A store project's
+    cases are D5's, not built yet.
+    """
+    location = manifest.location
+    if location.kind != "repo":
+        return None
+    tracking = manifest_tracking(location.tree, location.relpath)
+    if tracking is None:
+        return None
+    rel = location.relpath
+    if tracking == "committed":
+        return "config home", f"repo: {rel}, committed (shared through the repository)", False
+    if tracking == "local":
+        local = (
+            f"repo: {rel}, local (kept out of git through .git/info/exclude; "
+            f"session isolate copies it into each worktree)"
+        )
+        return "config home", local, False
+    loose = (
+        f"repo: {rel} is untracked and not ignored, so no session worktree holds "
+        f"it; share it: git add {rel} and commit, or keep it on this machine: "
+        f"echo {rel} >> .git/info/exclude"
+    )
+    return "config home", loose, True
+
+
+def _report_checks(
+    args, checks: list[tuple[str, bool, str]], warned: Collection[str] = ()
+) -> int:
+    """Print the rows; exit 1 if any fails. A warned row passes, shown as ``warn``."""
+
+    def status(label: str, ok: bool) -> str:
+        if not ok:
+            return "FAIL"
+        return "warn" if label in warned else "ok "
+
+    lines = [f"  {status(label, ok)}  {label:<28} {detail}" for label, ok, detail in checks]
+    failed = [c for c in checks if not c[1]]
+    emit(
+        args,
+        {
+            "checks": [
+                {"check": c, "ok": o, "warn": o and c in warned, "detail": d}
+                for c, o, d in checks
+            ]
+        },
+        "\n".join(lines),
+    )
+    return 1 if failed else EXIT_OK
+
+
+# -- agents ------------------------------------------------------------
+
+
+def cmd_hooks_install(args) -> int:
+    """Install and wire the hook shims, touching nothing else.
+
+    Exists because the library gaining an event used to be unshippable to a
+    project that already had one: the shim was absent, enforcement for that
+    event was silently off, and `doctor`'s only repair was `init --force`,
+    which rewrites the manifest and discards every considered downgrade the
+    project had recorded.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    ctx = Context()
+    host = ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
+    written = host.install_hooks()
+    plan = host.wiring_plan(host.hooks_location)
+    settings = plan.settings.relative_to(plan.root).as_posix()
+    return emit(
+        args,
+        {"installed": written, "location": plan.location, "settings": settings},
+        "hook shims: " + (", ".join(written) if written else "all already current")
+        + f"\n  wired in {settings} (records.hooks: {plan.location})"
+        + (
+            ""
+            if plan.committed
+            else "\n  each path listed in .git/info/exclude; 'invariant uninstall' "
+            "takes exactly this back out"
+        )
+        + "\n  verify they actually RUN: invariant doctor",
+    )
+
+
+def cmd_uninstall(args) -> int:
+    """Remove what `init` installed, and say what is being left behind.
+
+    The right to stop using a tool is part of the operator's authority over
+    their own project, and it was the part this library made hardest: adoption
+    is one command, withdrawal was hand surgery over a settings file the
+    library had merged itself into. A tool that is easy to adopt and awkward to
+    remove is asking for a trust it has not earned yet (IDEA_004).
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    ctx = Context(required=False)
+    loaded = ctx.manifest.path.is_file() or ctx.manifest.store is not None
+    root = ctx.manifest.root if loaded else ctx.cwd
+    host = ClaudeCodeHost(root, manifest=ctx.manifest if loaded else None)
+
+    plan = host.plan_uninstall(
+        remove_assets=args.remove_assets, remove_manifest=args.remove_manifest
+    )
+    if not args.dry_run:
+        host.uninstall(
+            remove_assets=args.remove_assets, remove_manifest=args.remove_manifest
+        )
+
+    verb = "would remove" if args.dry_run else "removed"
+    lines = [f"{verb} {len(plan['shims'])} hook shim(s) from .claude/hooks/"]
+    lines += [f"    {p.name}" for p in plan["shims"]]
+    lines.append(
+        f"{verb} invariant's entries from .claude/settings.json"
+        + (f"  ({', '.join(plan['wired'])})" if plan["wired"] else "")
+        + "  — yours are untouched"
+    )
+    if plan["assets"]:
+        lines.append(f"{verb} {len(plan['assets'])} library asset(s)")
+    for label in plan["protected"]:
+        lines.append(f"  kept    {label} (edited locally — your work, not ours)")
+    if plan["manifest"] is not None:
+        lines.append(f"{verb} {plan['manifest'].name}")
+    local = plan["local"]
+    if local is not None:
+        # The local wiring's receipt (ADR-014 D11): exactly what it added.
+        if local["settings"]:
+            lines.append(
+                f"{verb} invariant's entries from {local['settings']}"
+                + (f"  ({', '.join(local['wired'])})" if local["wired"] else "")
+                + "  — yours are untouched"
+            )
+        lines.append(f"{verb} {len(local['files'])} local file(s) invariant wrote")
+        lines += [f"    {rel}" for rel in local["files"]]
+        if local["exclude"]:
+            lines.append(
+                f"{verb} invariant's {len(local['exclude'])} line(s) from .git/info/exclude"
+            )
+        for rel in local["edited"]:
+            lines.append(
+                f"  kept    {rel} (edited since it was installed — your work; its "
+                f"exclude line stays)"
+            )
+
+    # Named, always. What survives is the operator's data, and a removal that
+    # does not say what it left behind invites the reader to assume it took
+    # everything — which is the opposite of the guarantee being made.
+    lines.append("leaves")
+    if plan["manifest"] is None:
+        lines.append("    .claude/invariant.yaml            (--remove-manifest to drop it)")
+    if not args.remove_assets:
+        local_agents = local is not None and any(
+            rel.startswith(".claude/agents/") for rel in local["files"]
+        )
+        lines.append(
+            "    .claude/commands/, skills/ and any committed agents  (--remove-assets "
+            "to drop them)"
+            if local_agents
+            else "    .claude/agents/, commands/, skills/  (--remove-assets to drop them)"
+        )
+    lines.append("    the state directory, with its session records")
+    lines.append("    work items, memories and architecture docs")
+    if not args.dry_run:
+        lines.append("run 'invariant init' to come back; nothing above was destroyed")
+
+    return emit(
+        args,
+        {
+            "dry_run": args.dry_run,
+            "shims": [str(p) for p in plan["shims"]],
+            "wired": plan["wired"],
+            "assets": [str(p) for p in plan["assets"]],
+            "kept": plan["protected"],
+            "manifest": str(plan["manifest"]) if plan["manifest"] else None,
+            "local": plan["local"],
+        },
+        "\n".join(lines),
+    )
+
+
+def _asset_host(ctx: Context, verb: str):
+    """The host adapter the project's ``host.kind`` names, for an asset command.
+
+    Asset files are a host's own format and live where that host reads them,
+    so the commands that write and list them ask the manifest which host that
+    is rather than assuming one. Claude Code is the only adapter in this
+    release; any other kind is refused by name, before anything is read or
+    written.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    kind = ctx.manifest.get("host.kind")
+    if kind == "claude_code":
+        return ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
+    raise UsageError(
+        f"{verb} works through a host adapter, and this project's host.kind is "
+        f"{kind!r}, which has none in this release; 'claude_code' is the only one"
+    )
+
+
+def cmd_assets_list(args) -> int:
+    """Every host asset, what kind it is, whether it loads, and who owns it."""
+    from ..hosts import assets as A
+
+    ctx = Context()
+    host = _asset_host(ctx, "assets list")
+    roles = ctx.manifest.get("agents.roles") or {}
+    role_of = {a: role for role, agents in roles.items() for a in (agents or [])}
+
+    rows = []
+    for kind in A.KINDS:
+        if args.kind and kind.name != args.kind:
+            continue
+        for path in kind.paths(host.claude_dir):
+            identity = kind.identity(path)
+            text = path.read_text(encoding="utf-8")
+            problem = A.loadability_problem(kind, text, identity)
+            rows.append(
+                {
+                    "kind": kind.name,
+                    "name": identity,
+                    "status": f"UNLOADABLE — {problem}" if problem else "loadable",
+                    # Ownership, because a project's own file is not drift and
+                    # must never be reported as such.
+                    "owner": "library" if A.is_managed(text) else "project",
+                    "role": role_of.get(identity, ""),
+                }
+            )
+
+    width = max((len(r["name"]) for r in rows), default=1)
+    text = "\n".join(
+        f"  {r['kind']:<8} {r['name']:<{width}}  {r['status']:<12} [{r['owner']}]"
+        + (f"  ({r['role']} role)" if r["role"] else "")
+        for r in rows
+    )
+    return emit(args, {"assets": rows}, text or "  (none installed)")
+
+
+def cmd_assets_install(args) -> int:
+    """Reinstall library-shipped assets and nothing else.
+
+    Separate from ``init`` deliberately: ``init --force`` rewrites the manifest,
+    so routing a repair through it would trade a broken asset file for a
+    discarded enforcement configuration.
+    """
+    ctx = Context()
+    host = _asset_host(ctx, "assets install")
+
+    if args.dry_run:
+        plan = host.plan_assets(only=args.kind, overwrite_local=args.overwrite_local)
+        lines = [f"would install into {host.claude_dir}:"]
+        for step in plan:
+            verb = "install" if step.write else "SKIP   "
+            lines.append(
+                f"  {verb} {step.kind}:{step.identity} ({step.state})" + _because(step.why)
+            )
+        if any(not step.write for step in plan):
+            lines.append(_OVERWRITE_LOCAL_HINT)
+        if any(not step.write and step.kind == "agent" for step in plan):
+            lines.append(_OVERLAY_HINT)
+        return emit(
+            args,
+            {
+                "dry_run": True,
+                "plan": [
+                    {
+                        "kind": s.kind,
+                        "identity": s.identity,
+                        "state": s.state,
+                        "write": s.write,
+                        "target": str(s.target),
+                        "changed": s.why,
+                    }
+                    for s in plan
+                ],
+            },
+            "\n".join(lines),
+        )
+
+    result = host.install_assets(only=args.kind, overwrite_local=args.overwrite_local)
+    failures = [
+        (label, detail)
+        for label, ok, detail in host.asset_checks()
+        if not ok and "loadable" in label
+    ]
+    changed = dict(result.changed)
+    lines = [f"installed {len(result.installed)} asset(s)"]
+    lines += [f"  {i}" + _because(changed.get(i)) for i in result.installed]
+    # Named, never counted. The whole defect was an install that reported a
+    # tidy total while a file it had flattened went unmentioned; a skip nobody
+    # can see is the same fault with the opposite sign.
+    for label, why in result.skipped:
+        lines.append(f"  skipped {label} ({why})")
+    if result.skipped:
+        lines.append(_OVERWRITE_LOCAL_HINT)
+    if any(label.startswith("agent:") for label, _ in result.skipped):
+        lines.append(_OVERLAY_HINT)
+    for label, detail in failures:
+        lines.append(f"  STILL BROKEN — {label}: {detail}")
+    if not failures:
+        lines.append("  reload the host's configuration for it to pick them up")
+    emit(
+        args,
+        {
+            "installed": result.installed,
+            "changed": changed,
+            "skipped": [{"asset": a, "why": w} for a, w in result.skipped],
+            "loadable": not failures,
+        },
+        "\n".join(lines),
+    )
+    return EXIT_OK if not failures else 1
+
+
+def cmd_agents_list(args) -> int:
+    """What is installed, whether the host can load it, and who owns which role."""
+    from ..hosts import assets as A
+
+    ctx = Context()
+    host = _asset_host(ctx, "agents list")
+    roles = ctx.manifest.get("agents.roles") or {}
+    role_of = {a: role for role, agents in roles.items() for a in (agents or [])}
+
+    rows = []
+    for step in host.plan_assets(only="agent"):
+        if step.state == A.ABSENT:
+            status = "NOT INSTALLED"
+        else:
+            problem = A.loadability_problem(
+                A.BY_NAME["agent"],
+                step.target.read_text(encoding="utf-8"),
+                step.identity,
+            )
+            status = f"UNLOADABLE — {problem}" if problem else "loadable"
+        hint = host.tier_hint(host.agent_source(step.identity))
+        rows.append(
+            {
+                "agent": step.identity,
+                "status": status,
+                "role": role_of.get(step.identity, ""),
+                "tier": hint.tier,
+                "tier_from": hint.origin,
+                "mapped": hint.value,
+            }
+        )
+
+    width = max((len(r["agent"]) for r in rows), default=1)
+    text = "\n".join(
+        f"  {r['agent']:<{width}}  {r['status']}"
+        + (f"   [{r['role']} role]" if r["role"] else "")
+        + f"   {_tier_text(r)}"
+        for r in rows
+    )
+    return emit(args, {"agents": rows}, text or "  (none shipped)")
+
+
+def _tier_text(row: dict) -> str:
+    """An `agents list` row's tier, where it came from and what it maps to."""
+    if not row["tier"]:
+        return "no tier"
+    named = f"tier {row['tier']} ({row['tier_from']})"
+    return f"{named} -> {row['mapped']}" if row["mapped"] else f"{named}, not mapped"
+
+
+def cmd_agents_show(args) -> int:
+    """One library agent as the host would install it, and nothing written.
+
+    The text is the renderer's, from the neutral source and the tier hint this
+    project resolves, without the marker an install adds. ``--sections`` lists
+    the source's section anchors instead, the ids an overlay can target (ADR-012 D8).
+    """
+    ctx = Context()
+    host = _asset_host(ctx, "agents show")
+    source: AgentSource = host.agent_source(args.name)
+    if args.sections:
+        ids = list(source.section_ids())
+        return emit(args, {"agent": args.name, "sections": ids}, "\n".join(ids))
+    text = host.render(source)
+    # `emit` ends what it prints with a newline, so the text's own last one is
+    # left to it: the output is the rendered bytes, fit to redirect and diff.
+    return emit(args, {"agent": args.name, "text": text}, text.removesuffix("\n"))
+
+
+def cmd_agents_install(args) -> int:
+    """Reinstall the library agents and nothing else.
+
+    Kept separate from ``init`` deliberately. ``init --force`` rewrites the
+    manifest, so pointing an agent repair at it would trade a broken agent file
+    for a discarded enforcement configuration — a worse loss than the fault
+    being repaired.
+
+    It reads the same install plan as ``assets install``, narrowed to agents.
+    It once classified each target itself and wrote through a second writer,
+    so the two commands could only agree by keeping two copies in step.
+    """
+    from ..hosts.claude_code import CHECK_AGENTS_LOADABLE
+
+    ctx = Context()
+    host = _asset_host(ctx, "agents install")
+    agents_dir = host.claude_dir / "agents"
+
+    if args.dry_run:
+        plan = host.plan_assets(only="agent", overwrite_local=args.overwrite_local)
+        lines = [f"would install into {agents_dir}:"]
+        for step in plan:
+            verb = "install  " if step.write else "SKIP     "
+            lines.append(f"  {verb} {step.identity} ({step.state})" + _because(step.why))
+        if any(not step.write for step in plan):
+            lines.append(_OVERWRITE_LOCAL_HINT)
+            lines.append(_OVERLAY_HINT)
+        return emit(
+            args,
+            {
+                "would_install": [s.identity for s in plan if s.write],
+                "would_skip": [s.identity for s in plan if not s.write],
+                "into": str(agents_dir),
+                # Each agent's state and the input that moved, as `assets
+                # install --dry-run` carries them: the plan
+                # `agents.rendered_current` reads.
+                "plan": [
+                    {
+                        "identity": s.identity,
+                        "state": s.state,
+                        "write": s.write,
+                        "changed": s.why,
+                    }
+                    for s in plan
+                ],
+            },
+            "\n".join(lines),
+        )
+
+    result = host.install_assets(only="agent", overwrite_local=args.overwrite_local)
+    installed = [label.partition(":")[2] for label in result.installed]
+    skipped = [(label.partition(":")[2], why) for label, why in result.skipped]
+
+    checks = {
+        label: (ok, detail)
+        for label, ok, detail in host.asset_checks(
+            only="agent", repair="invariant agents install"
+        )
+    }
+    ok, detail = checks[CHECK_AGENTS_LOADABLE]
+    changed = {label.partition(":")[2]: why for label, why in result.changed}
+    lines = [f"installed {len(installed)} agent(s) into {agents_dir}"]
+    # Which input moved, for each stale copy rewritten: the library, the
+    # overlay or the renderer (the A6 ruling 1).
+    lines += [f"  updated {name}" + _because(why) for name, why in changed.items()]
+    lines += [f"  skipped {name} ({why})" for name, why in skipped]
+    if skipped:
+        lines.append(_OVERWRITE_LOCAL_HINT)
+        lines.append(_OVERLAY_HINT)
+    lines.append(f"  {detail}")
+    if ok:
+        lines.append("  reload the host's configuration for it to pick them up")
+    emit(
+        args,
+        {
+            "installed": installed,
+            "changed": changed,
+            "skipped": [name for name, _ in skipped],
+            "loadable": ok,
+        },
+        "\n".join(lines),
+    )
+    return EXIT_OK if ok else 1
+
+
+def cmd_config_show(args) -> int:
+    ctx = Context()
+    rows = list(ctx.manifest.iter_provenance())
+    if args.provenance:
+        width = max(len(k) for k, _, _ in rows)
+        text = "\n".join(f"  {k:<{width}}  {v!r:<28} [{src}]" for k, v, src in rows)
+    else:
+        text = "\n".join(f"  {k} = {v!r}" for k, v, _ in rows)
+    return emit(args, {"config": ctx.manifest.data, "provenance": ctx.manifest.provenance}, text)
+
+
+# -- store (ADR-014 D2, D4) ---------------------------------------------
+
+
+def _store_repo(start: Path | None = None) -> Path:
+    """The main checkout of the repository ``start`` (the working directory
+    by default) lies in.
+
+    A store is linked to a repository's identity, which every worktree
+    shares, so the main checkout names it: its directory is the repo form of
+    a store's name when there is no remote (ruling 14).
+    """
+    from ..core import git
+
+    cwd = Path(start or Path.cwd())
+    top = git.toplevel(cwd)
+    if top is None:
+        raise UsageError(
+            "not inside a git repository: a store is linked to a git "
+            "repository's identity"
+        )
+    main = git.main_checkout(cwd) or top
+    for root in {top, main}:
+        if (root / MANIFEST_RELPATH).is_file():
+            raise UsageError(
+                f"{root} is an in-repo project ({MANIFEST_RELPATH}). Moving its "
+                f"records to a store is 'invariant store migrate', ADR-014 "
+                f"increment 7, not built yet."
+            )
+    return main
+
+
+def _linked_lines(linked) -> list[str]:
+    from ..core.home import display_path, user_config_path
+
+    identity = linked.identity
+    return [
+        f"linked {linked.key} ({identity.source}) -> {linked.store}",
+        f"  invariant.id {identity.local_id} in the repository's local git config",
+        f"  repos entry in {display_path(user_config_path())}",
+    ]
+
+
+def cmd_store_init(args) -> int:
+    from ..core.stores import init_store
+
+    created = init_store(_store_repo(), Path(args.path) if args.path else None)
+    lines = [f"created store {created.store}"]
+    if created.note:
+        lines.append(f"  {created.note}")
+    lines += _linked_lines(created.linked)
+    lines += _indented(_ensure_store_hooks(created.store))
+    lines.append(
+        "The store's invariant.yaml is not committed: review it and commit it "
+        "in the store."
+    )
+    return emit(
+        args,
+        {
+            "store": str(created.store),
+            "note": created.note,
+            "identity": created.linked.key,
+            "local_id": created.linked.identity.local_id,
+        },
+        "\n".join(lines),
+    )
+
+
+def cmd_store_link(args) -> int:
+    from ..core.stores import link_repo, update_link
+
+    repo = _store_repo()
+    if args.update:
+        linked = update_link(repo)
+        lines = [f"re-keyed the link onto the origin {linked.key} -> {linked.store}"]
+    elif not args.path:
+        raise UsageError("store link needs the store's path, or --update")
+    else:
+        linked = link_repo(repo, Path(args.path))
+        lines = _linked_lines(linked)
+        if not linked.added:
+            lines.insert(0, "already linked; the entry, ID and index are current")
+    lines += _indented(_ensure_store_hooks(linked.store))
+    return emit(
+        args,
+        {"store": str(linked.store), "identity": linked.key, "added": linked.added},
+        "\n".join(lines),
+    )
+
+
+def cmd_store_status(args) -> int:
+    """Is this a repository linked to a store? Exit 0 when it is, else 1.
+
+    ``--quiet`` prints nothing and only answers, for a guard to run first
+    (ADR-014 D11: a user-level agent stops unless this passes).
+    """
+    try:
+        manifest = Manifest.locate(Path.cwd(), required=False)
+    except ManifestError as exc:
+        reason = f"not linked: {exc}"
+        manifest = None
+    else:
+        reason = None
+        if not manifest.located:
+            reason = "not linked: no invariant project here"
+        elif manifest.store is None:
+            reason = (
+                "not linked: an in-repo project, whose records live in the repository"
+                if manifest.path.name == MANIFEST_RELPATH.name
+                and manifest.path.parent.name == MANIFEST_RELPATH.parent.name
+                else f"not linked: {manifest.path} names no store"
+            )
+    if reason is not None or manifest is None or manifest.store is None:
+        if not args.quiet:
+            if getattr(args, "json", False):
+                print(json.dumps({"linked": False, "reason": reason}, indent=2, sort_keys=True))
+            else:
+                print(reason)
+        return 1
+    if args.quiet:
+        return EXIT_OK
+    link = manifest.store
+    identity = link.identity
+    stored = sorted(k for k, v in manifest.data["records"].items() if v == "store")
+    lines = [
+        f"repository  {manifest.root}",
+        (
+            f"identity    {identity.key} ({identity.source})"
+            + (f", local ID {identity.local_id}" if identity.local_id else "")
+        ),
+        f"store       {link.name} at {link.root} (named by the {link.via} level)",
+        f"listed as   {link.key} under store.repos",
+        "records     "
+        + (", ".join(stored) + " in the store" if stored else "all in the repository"),
+    ]
+    if link.mismatch:
+        lines.append(
+            f"note        the origin {identity.origin} is not the linked key; "
+            f"run 'invariant store link --update'"
+        )
+    return emit(
+        args,
+        {
+            "linked": True,
+            "repository": str(manifest.root),
+            "identity": identity.key,
+            "source": identity.source,
+            "store": str(link.root),
+            "via": link.via,
+            "key": link.key,
+            "records": stored,
+            "mismatch": link.mismatch,
+        },
+        "\n".join(lines),
+    )
+
+
+def store_identity_row(manifest: Manifest) -> tuple[str, bool, str, bool] | None:
+    """`doctor`'s row for a store project's identity (ADR-014 D4), with
+    whether it warns; ``None`` for a project with no store."""
+    link = manifest.store
+    if link is None:
+        return None
+    identity = link.identity
+    if link.mismatch:
+        return (
+            "repo identity",
+            True,
+            (
+                f"the origin {identity.origin} is not linked; this repository is "
+                f"linked as {link.key}, so a remote was added after the link. Run "
+                f"'invariant store link --update' to key the link on the origin"
+            ),
+            True,
+        )
+    return (
+        "repo identity",
+        True,
+        (
+            f"{identity.key} ({identity.source}), store {link.name} at {link.root}, "
+            f"named by the {link.via} level"
+        ),
+        False,
+    )
+
+
+# -- a store's sync (ADR-014 D7) ------------------------------------------
+
+
+def _pull_store(
+    manifest: Manifest,
+    *,
+    explicit: bool = False,
+    replay: bool = False,
+    held: Sequence[str] = (),
+):
+    """Pull the project's store as ``sync`` says, or ``None`` when nothing ran.
+
+    Never from a hook: a hook must never wait on the network (D7). An
+    in-repo project has no store, and a store with pull at start off is not
+    pulled implicitly.
+    """
+    if manifest.store is None:
+        return None
+    from ..core import storesync
+
+    out = storesync.pull(
+        manifest.store.root,
+        storesync.settings(manifest),
+        explicit=explicit,
+        replay=replay,
+        held=held,
+    )
+    return None if out.state == "off" else out
+
+
+def _pull_first(ctx: Context, stopped: str):
+    """The pull session start, resume and ``docs lock`` run before anything
+    else (D7). A pull that must stop (diverged, offline under ``sync.offline:
+    stop``, a fast-forward over uncommitted changes) refuses the command with
+    ``stopped`` saying what did not happen."""
+    pull = _pull_store(ctx.manifest)
+    if pull is not None and pull.stops:
+        raise UsageError("\n".join([*pull.lines(), stopped]))
+    return pull
+
+
+def _pull_lines(pull) -> list[str]:
+    return [] if pull is None else [f"  {line}" for line in pull.lines()]
+
+
+def _record_pull(ctx: Context, session_id: str, pull) -> None:
+    if pull is not None:
+        ctx.sessions.record_store_pull(session_id, pull.record)
+
+
+def _stdin_is_terminal() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def cmd_store_pull(args) -> int:
+    """Pull the project's store now, ``--replay`` replaying past a divergence (D7)."""
+    ctx = Context(session_id=args.id)
+    if ctx.manifest.store is None:
+        raise UsageError(
+            "this project keeps its records in its repository (an in-repo "
+            "project), so it has no store to pull"
+        )
+    held = []
+    if args.replay:
+        held = [f"{row['unit']} (session {row['holder']})" for row in ctx.sessions.docs_units()]
+    pull = _pull_store(ctx.manifest, explicit=True, replay=args.replay, held=held)
+    session = ctx.current_session()
+    if session is not None:
+        _record_pull(ctx, session.id, pull)
+    emit(args, pull.to_dict(), "\n".join(pull.lines()))
+    return 1 if pull.stops else EXIT_OK
+
+
+def cmd_store_clone(args) -> int:
+    """The first clone of a store on this machine (D7, ruling 18).
+
+    Cloned into a staging directory, shown (every command the store declares,
+    with its provenance label, the lanes and the repos it serves), and moved
+    into place and registered only once the operator confirms. Declined, the
+    staging copy is removed and nothing is registered.
+    """
+    import secrets
+    import shutil
+
+    from ..core import git as gitq
+    from ..core import storesync
+    from ..core.home import invariant_home, load_user_config
+    from ..core.stores import STORES_DIR, register_repos
+
+    remote = args.remote.strip()
+    if args.path:
+        target = Path(args.path).expanduser().resolve()
+        if target.exists() and (not target.is_dir() or any(target.iterdir())):
+            raise UsageError(f"{target} already exists and is not empty; nothing was cloned")
+    else:
+        parent = invariant_home() / STORES_DIR
+        naming = load_user_config().store_naming
+        names = [storesync.clone_name(remote, naming)]
+        if naming == "repo":
+            names.append(storesync.clone_name(remote, "url"))
+        free = [parent / name for name in dict.fromkeys(names) if not (parent / name).exists()]
+        if not free:
+            raise UsageError(
+                f"{', '.join(str(parent / n) for n in dict.fromkeys(names))} already "
+                f"exist; pass --path to clone the store elsewhere. Nothing was cloned."
+            )
+        target = free[0]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = target.parent / f".clone-{secrets.token_hex(4)}"
+    try:
+        cloned, said = gitq.clone(remote, staging, args.timeout)
+        if not cloned:
+            raise UsageError(f"could not clone {remote}: {said}. Nothing was registered.")
+        try:
+            found = storesync.declared(staging, target.name)
+            register_repos(found.repos, target, dry_run=True)
+        except ManifestError as exc:
+            raise UsageError(f"{exc}. Nothing was registered.") from exc
+        lines = [f"store {remote}, to be cloned into {target}", "  commands it declares:"]
+        lines += [f"    {key} = {value}  ({label})" for key, value, label in found.commands] or [
+            "    none"
+        ]
+        lines.append("  lanes it names (methodology.extra_machines):")
+        lines += [f"    {lane}  ({label})" for lane, label in found.lanes] or ["    none"]
+        lines.append("  repositories it serves, to be registered in the user config:")
+        lines += [f"    {key}" for key in found.repos] or ["    none"]
+        payload = {
+            "remote": remote,
+            "store": str(target),
+            "commands": [
+                {"key": k, "command": v, "label": label} for k, v, label in found.commands
+            ],
+            "lanes": [{"lane": lane, "label": label} for lane, label in found.lanes],
+            "repos": found.repos,
+        }
+        asked = False
+        if args.yes:
+            confirmed = True
+        elif _stdin_is_terminal() and not getattr(args, "json", False):
+            asked = True
+            print("\n".join(lines))
+            lines = []
+            answer = input("Clone it into place and register these repositories? [y/N] ")
+            confirmed = answer.strip().lower() in ("y", "yes")
+        else:
+            confirmed = False
+        if not confirmed:
+            lines.append(
+                "declined: the staging copy is removed and nothing is registered"
+                + ("" if asked else " (pass --yes to confirm without a terminal)")
+            )
+            emit(args, {**payload, "registered": [], "cloned": False}, "\n".join(lines))
+            return 1
+        staging.rename(target)
+        added = register_repos(found.repos, target)
+        lines += _ensure_store_hooks(target)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+    lines.append(f"cloned into {target}; registered {', '.join(added) or 'nothing new'}")
+    lines.append("Later pulls are automatic at session start, resume and docs lock (sync).")
+    return emit(args, {**payload, "registered": added, "cloned": True}, "\n".join(lines))
+
+
+# -- a store's privacy screen (ADR-014 D8) ---------------------------------
+
+
+def _screen_build() -> tuple[str, str]:
+    """The interpreter, and the directory holding this build's package, that
+    a store's hooks run: the build that installed them."""
+    import invariant
+
+    return os.path.abspath(sys.executable), str(Path(invariant.__file__).resolve().parent.parent)
+
+
+def _ensure_store_hooks(root: Path) -> list[str]:
+    """Install or repair the store's privacy hooks; what changed, or why not."""
+    from ..core import storescan
+
+    python, source = _screen_build()
+    done = storescan.install_hooks(Path(root), python, source)
+    name = Path(root).name
+    lines = []
+    if done.written:
+        lines.append(f"store {name}: privacy hooks installed ({', '.join(done.written)})")
+    if done.problem:
+        lines.append(f"store {name}: privacy hooks not installed: {done.problem}")
+    return lines
+
+
+def cmd_store_push(args) -> int:
+    """Publish the store once every outgoing commit passes its screen (D8).
+
+    Run from a repository linked to a store, or from inside the store itself,
+    where no repository's configuration resolves and the store's own level
+    gives the ``sync`` settings.
+    """
+    from ..core import storesync
+    from ..core.stores import read_store_manifest, store_root_of
+
+    root = store_root_of(Path.cwd())
+    if root is not None:
+        top, _repos = read_store_manifest(root)
+        sync = storesync.settings_of(top.get("sync") or {})
+    else:
+        ctx = Context()
+        if ctx.manifest.store is None:
+            raise UsageError(
+                "this project keeps its records in its repository (an in-repo "
+                "project), so it has no store to push"
+            )
+        root, sync = ctx.manifest.store.root, storesync.settings(ctx.manifest)
+    notes = _ensure_store_hooks(root)
+    out = storesync.push(root, sync)
+    emit(args, out.to_dict(), "\n".join([*notes, *out.lines()]))
+    return EXIT_OK if out.published else 1
+
+
+def cmd_store_migrate(args) -> int:
+    """Move a project between its repository and a store (ADR-014 D12,
+    increment 7a; ADR-020 D3). Refused, exit 2, with nothing written."""
+    from . import migrate
+
+    if args.to == "repo":
+        raise UsageError(
+            "store migrate --to repo is not built yet: it lands with ADR-014 "
+            "increment 7b. Nothing was written."
+        )
+    payload, text = migrate.to_store(args)
+    return emit(args, payload, text)
+
+
+def cmd_store_hook(args) -> int:
+    """The store's privacy screen as its git hooks run it (D8).
+
+    Quiet when clean. A finding, or anything in scope it cannot read, exits 1
+    naming each finding redacted on stderr, which refuses the commit or push.
+    """
+    from ..core import git as gitq
+    from ..core import storescan
+
+    root = gitq.toplevel(Path.cwd())
+    if root is None:
+        print("invariant: the store's privacy screen ran outside a git repository",
+              file=sys.stderr)
+        return 1
+    if args.name == "pre-push":
+        remote = args.args[0] if args.args else "origin"
+        commits, screened = storescan.pre_push(root, remote, sys.stdin.read())
+        what = f"push of {len(commits)} commit(s)"
+    elif storescan.relaxation(root).honoured:
+        return EXIT_OK
+    elif args.name == "pre-commit":
+        screened, what = storescan.scan_staged(root), "commit"
+    else:
+        what = "commit message"
+        try:
+            text = Path(args.args[0]).read_text(encoding="utf-8", errors="replace")
+        except (IndexError, OSError) as exc:
+            screened = storescan.Screened(problem=f"the message could not be read ({exc})")
+        else:
+            screened = storescan.scan_message(root, text)
+    if screened.clean:
+        return EXIT_OK
+    head = (
+        f"invariant: the store's privacy screen refused this {what} (ADR-014 D8). "
+        f"Read with the store's own privacy block:"
+    )
+    lines = [head, *screened.lines()]
+    if args.name != "pre-push":
+        lines.append(
+            "  Remove it and commit again. --no-verify skips the commit hooks; "
+            "every push screens each commit anyway."
+        )
+    print("\n".join(lines), file=sys.stderr)
+    return 1
+
+
+def store_privacy_row(manifest: Manifest) -> tuple[str, bool, str, bool] | None:
+    """`doctor`'s row for a store's privacy screen (D8), with whether it
+    warns; ``None`` for a project with no store."""
+    link = manifest.store
+    if link is None:
+        return None
+    from ..core import storescan
+    from ..core.stores import STORE_MANIFEST
+
+    label = "store privacy"
+    relax = storescan.relaxation(link.root)
+    if relax.declared and relax.remotes:
+        detail = (
+            f"privacy.store.scan: false is ignored: the store has a remote "
+            f"({', '.join(relax.remotes)}), so every commit is screened and every "
+            f"push scans the whole history: remove the key from "
+            f"{link.root / STORE_MANIFEST}"
+        )
+        return label, False, detail, False
+    problem = storescan.hooks_state(link.root)
+    if problem is not None:
+        detail = (
+            f"{problem}; 'invariant session start' or 'invariant store link "
+            f"{link.root}' installs them"
+        )
+        return label, False, detail, False
+    if relax.honoured:
+        detail = (
+            "active exception: privacy.store.scan: false, honoured while the store "
+            "has no remote, so its commits are not screened when made. Adding a "
+            "remote ends it, and the first push scans the whole history"
+        )
+        return label, True, detail, True
+    detail = (
+        f"hooks {', '.join(storescan.SCREEN_HOOKS)} reached through the store's "
+        f"core.hooksPath; every push is screened with the store's privacy block"
+    )
+    return label, True, detail, False
+
+
+# -- session -----------------------------------------------------------
+
+
+def cmd_session_start(args) -> int:
+    ctx = Context()
+    # The store is pulled before anything is registered, so a diverged store
+    # registers no session and moves no branch (ADR-014 D7).
+    commands = _command_values(ctx.manifest)
+    pull = _pull_first(ctx, "session start stopped: no session was registered")
+    changed = _commands_changed(commands, pull)
+    if pull is not None and pull.moved:
+        ctx = Context()
+    session = ctx.sessions.start(
+        args.name,
+        session_id=args.id,
+        base=args.base,
+        host_session_id=args.host_session_id or ctx.host_session_id,
+        # The escape from the refusal that stops a plan forking. The domain
+        # refuses a task name whose parked session is sitting right there and
+        # ends "add --force" — which, until this argument was passed through,
+        # named a flag the CLI did not have. A refusal whose remedy cannot be
+        # run is the same dead end as a `fixes` line naming an unwritten
+        # command, one layer up.
+        force=args.force,
+    )
+    _record_pull(ctx, session.id, pull)
+    # The store's privacy hooks kept current (ADR-014 D8): a store created or
+    # cloned by an earlier build, or a hook removed, is repaired here.
+    hooks = _ensure_store_hooks(ctx.manifest.store.root) if ctx.manifest.store else []
+    session = ctx.sessions.require(session.id)
+    plan = ctx.sessions.isolation_plan(session)
+    return emit(
+        args,
+        {
+            "session": session.to_dict(),
+            "plan": plan,
+            "store_pull": pull.to_dict() if pull is not None else None,
+            "commands_changed": changed,
+        },
+        # Line one is a CONTRACT with `hosts/claude_code`: it binds a session
+        # by parsing this command's own stdout for `session <id> (`, which is
+        # how a registration made through a shell — carrying no hook payload —
+        # gets attributed at all. Anything added here goes BELOW it.
+        f"session {session.id} ({session.name}) registered\n"
+        # The base is shown because it is CHOSEN here and read nowhere before
+        # `isolate`, where a wrong one used to surface as git's "invalid
+        # reference" on every repository whose default branch is not master.
+        f"  base: {session.base}"
+        + ("" if args.base else "  (the main checkout's branch; --base overrides)")
+        + "\n"
+        f"  next: invariant session isolate --execute\n"
+        f"        worktree {plan['worktree']}  branch {plan['branch']}\n"
+        # The name carries the id, so it is an address. Printed at the one
+        # moment the operator is looking, because the alternative route to it
+        # is remembering that `session list` exists a week later.
+        f"  resume it later with: invariant session resume {session.name}"
+        + "".join(
+            f"\n{line}"
+            for line in [*_pull_lines(pull), *_command_lines(changed), *_indented(hooks)]
+        ),
+    )
+
+
+def _indented(lines: Sequence[str]) -> list[str]:
+    return [f"  {line}" for line in lines]
+
+
+def cmd_session_isolate(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    plan = ctx.sessions.isolate(session.id, execute=args.execute)
+    if args.execute:
+        rendered = _render_local_wiring(ctx, Path(plan["worktree"]))
+        plan["rendered"] = rendered
+        text = f"isolated into {plan['worktree']} on {plan['branch']}"
+        if plan.get("manifest_copied"):
+            text += (
+                f"\n  copied this clone's local {MANIFEST_RELPATH.as_posix()} into it "
+                f"(kept out of git through .git/info/exclude)"
+            )
+        if rendered:
+            text += (
+                f"\n  rendered this clone's local {' and '.join(rendered)} into it "
+                f"(records.hooks/agents: local)"
+            )
+        return emit(args, plan, text)
+    return emit(args, plan, plan.get("command", ""))
+
+
+def _render_local_wiring(ctx: Context, worktree: Path) -> list[str]:
+    """Render the main checkout's `local` wiring into a new worktree.
+
+    A worktree holds only committed files, so a project wired `local` would
+    have no hooks and no agents there (ADR-020 D9). Only `hosts/` writes host
+    files, so the domain creates the worktree and the CLI asks the host to
+    render into it. Nothing when the clone has no local install on record.
+    """
+    if ctx.manifest.get("host.kind") != "claude_code":
+        return []
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    host = ClaudeCodeHost(ctx.manifest.root, manifest=ctx.manifest)
+    if not host.local_installed():
+        return []
+    return host.render_into(worktree)
+
+
+def cmd_session_status(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.current_session()
+    if session is None:
+        return emit(args, {"session": None}, "no session is active in this directory")
+    pipeline = ctx.pipelines.current(session.id)
+    text = [
+        f"session {session.id}  {session.name}",
+        f"  state      {session.state}",
+        f"  worktree   {session.worktree or '(none)'}",
+        f"  branch     {session.branch or '(none)'}",
+        f"  files      {len(session.files)} declared",
+        f"  pushes     {session.push_count}",
+    ]
+    if pipeline:
+        text.append(f"  pipeline   {pipeline.methodology} in {pipeline.state}")
+    # The plan, where somebody picking the session up will look for it. Only
+    # when there IS one: an unplanned session is a legitimate resting state —
+    # the same judgement `session.deliverables_complete` makes when it skips
+    # rather than fails — and a permanent "plan (none)" line on every one-line
+    # chore is a nag, which is how a line stops being read.
+    progress = plan_reader.progress(session.plan)
+    if progress.total:
+        tail = (
+            f"next: {progress.remaining[0]['title']}"
+            if progress.remaining
+            else "complete"
+        )
+        text.append(
+            f"  plan       {progress.done}/{progress.total} done — {tail}"
+        )
+    if session.resumed_count:
+        text.append(
+            f"  resumed    {session.resumed_count} host session(s) picked "
+            f"this up"
+        )
+    if session.store_pull == "stale":
+        text.append(
+            "  store pull  stale: the last pull could not reach the store's "
+            "remote, so the docs are as this machine last had them; "
+            "'invariant store pull' tries again"
+        )
+    text += _landing_lines(ctx, session)
+    # Loud, and above the fold. A held override is enforcement the operator
+    # turned off and may well have forgotten; the whole reason it is a recorded
+    # grant rather than a flag is that it can be seen and withdrawn.
+    if session.standdown:
+        held = session.standdown
+        text.append(
+            f"  STOOD DOWN  {held['reason']} "
+            f"(until this {held['until']} ends; invariant standdown --clear)"
+        )
+    for grant in session.pending_overrides:
+        reach = (
+            f"({grant.get('calls', 1)} call(s) left)"
+            if get_rule(grant["rule"]) is not None
+            else f"(guideline; one evaluation of "
+            f"{_family_gate(ctx.rule_context(), grant['rule'])}, spent by the "
+            f"pipeline advance it lets through)"
+        )
+        text.append(f"  override   {grant['rule']} — {grant['reason']} {reach}")
+    text.extend(_docs_lock_table(ctx))
+    text.extend(_debt_lines(ctx))
+    return emit(
+        args,
+        {"session": session.to_dict(), "pipeline": pipeline.to_dict() if pipeline else None},
+        "\n".join(text),
+    )
+
+
+def _debt_lines(ctx: Context) -> list[str]:
+    """The project's open step debts (ADR-021 D4), one line per step; none
+    when nothing is owed, so a project with no steps prints nothing new."""
+    from ..core import steps as steps_reader
+
+    return [
+        f"  owed       {row['step']}: {row['count']} debt(s) since "
+        f"{steps_reader.short(row['since'])}; a pass clears them: "
+        f"invariant step run {row['step']}"
+        for row in steps_reader.debt_summary(steps_reader.open_debts(ctx.store))
+    ]
+
+
+def cmd_override(args) -> int:
+    """Grant, or withdraw, a one-shot pass for a rule that fires at a hook,
+    or for one guideline in the next evaluation of its family gate.
+
+    Deliberately a top-level command rather than a flag on something. There is
+    nothing for it to be a flag ON: the call it covers is a tool call the agent
+    host makes, which carries no arguments the operator can add and no
+    environment a running host will re-read. The grant has to exist before the
+    call and be found by it (BUG_049).
+    """
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+
+    if args.clear:
+        updated = ctx.sessions.clear_override(session.id, args.rule)
+        return emit(
+            args,
+            updated.to_dict(),
+            f"withdrew any unspent override for {args.rule}",
+        )
+
+    updated = ctx.sessions.grant_override(
+        session.id, args.rule, args.reason, calls=args.calls, cwd=ctx.cwd
+    )
+    if get_rule(args.rule) is None:
+        gate = guideline_gate_of(ctx.rule_context(), args.rule) or MECHANICAL_RULE
+        level = ctx.manifest.rule_level(gate).value
+        passes = (
+            f"{args.rule}'s missing, stale or failing verdict is passed there, "
+            f"and every other guideline stands"
+            if gate == VERDICTS_RULE
+            else f"{args.rule}'s new blocker findings are passed there, and "
+            f"every other finding stands"
+        )
+        return emit(
+            args,
+            updated.to_dict(),
+            f"override granted for guideline {args.rule}\n"
+            f"  reason: {args.reason}\n"
+            f"  good for one evaluation of {gate} ({level} in this "
+            f"project): {passes}\n"
+            f"  spent by the pipeline advance it lets through, and recorded on "
+            f"this session; withdraw it with --clear",
+        )
+    level = ctx.manifest.rule_level(args.rule).value
+    return emit(
+        args,
+        updated.to_dict(),
+        f"override granted for {args.rule} ({level} in this project)\n"
+        f"  reason: {args.reason}\n"
+        f"  good for {args.calls} call(s) at a hook, then it is spent\n"
+        f"  spending it is recorded on this session; withdraw it with "
+        f"--clear",
+    )
+
+
+def cmd_standdown(args) -> int:
+    """Hold every gate for an interval, reversibly, with the hold recorded.
+
+    The per-call sibling is `invariant override`. They share a seam and are not
+    the same want: one is "let this call through", the other is "stop asking
+    for the next while".
+    """
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+
+    if args.clear:
+        updated = ctx.sessions.stand_up(session.id)
+        return emit(args, updated.to_dict(), "enforcement is back on")
+
+    pipeline = ctx.pipelines.current(session.id)
+    updated = ctx.sessions.stand_down(
+        session.id,
+        args.reason,
+        until=args.until,
+        include=args.include or (),
+        pipeline_started=pipeline.started if pipeline else None,
+    )
+    record = updated.standdown
+    ends = (
+        "when this session ends"
+        if record["until"] == "session"
+        else (
+            "when this pipeline finishes"
+            if pipeline
+            else "when a pipeline starts and finishes"
+        )
+    )
+    held_out = sorted(HELD_OUT_OF_STANDDOWN - set(record["include"]))
+    lines = [
+        f"enforcement STOOD DOWN — {record['reason']}",
+        f"  lifts {ends}, or on: invariant standdown --clear",
+    ]
+    if held_out:
+        lines.append(
+            "  still enforced: "
+            + ", ".join(held_out)
+            + "  (name it with --include to fold it in)"
+        )
+    lines.append("  every turn will say so until it lifts")
+    return emit(args, updated.to_dict(), "\n".join(lines))
+
+
+def cmd_session_transition(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    try:
+        updated = ctx.sessions.transition(
+            session.id, args.state, reason=args.reason, force=args.force, cwd=ctx.cwd,
+            run_steps=True,
+        )
+    except GateFailure as exc:
+        # The domain evaluates the machine's gates on EVERY route (AUD-05);
+        # this command's job is only to show the verdicts it was refused on.
+        report_verdicts(exc.verdicts, args)
+        if getattr(args, "json", False):
+            print(json.dumps({"advanced": False, "gates": verdicts_payload(exc.verdicts)}, indent=2))
+        _record_cli_refusal(ctx, session, exc.verdicts)
+        raise
+    _lift_cli_refusal(ctx, session)
+    return emit(
+        args,
+        updated.to_dict(),
+        "\n".join([f"session {updated.id} -> {updated.state}", *_stays_landed(ctx, updated)]),
+    )
+
+
+def _stays_landed(ctx: Context, session) -> list[str]:
+    """The store commits a forced abandon leaves landed (ADR-014 D6): there
+    is no rollback (ruling 8), so they are named and the operator decides."""
+    if session.state != "abandoned" or not session.overrides:
+        return []
+    last = session.overrides[-1]
+    if last.get("rule") != LANDING_RULE or last.get("to") != "abandoned":
+        return []
+    store = ctx.manifest.store.name if ctx.manifest.store is not None else "?"
+    commits = last.get("store_commits") or []
+    return [
+        (
+            f"  its docs stay landed in store {store} at {str(last.get('store'))[:12]} "
+            f"(no rollback, ruling 8):"
+        ),
+        *[f"    {c[:12]}{c[40:]}" for c in commits],
+        *([] if commits else ["    (its spans changed nothing)"]),
+    ]
+
+
+def cmd_session_files(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    if args.action == "remove":
+        before = len(session.files)
+        updated = ctx.sessions.remove_files(session.id, args.paths)
+        dropped = before - len(updated.files)
+        return emit(
+            args,
+            updated.to_dict(),
+            f"dropped {dropped} entry(ies); {len(updated.files)} file(s) "
+            f"declared for session {updated.id}",
+        )
+    updated = ctx.sessions.add_files(session.id, args.paths)
+    return emit(
+        args,
+        updated.to_dict(),
+        f"{len(updated.files)} file(s) declared for session {updated.id}",
+    )
+
+
+def cmd_session_list(args) -> int:
+    ctx = Context()
+    sessions = ctx.sessions.list()
+    if not sessions:
+        return emit(args, {"sessions": []}, "no registered sessions")
+    # The fraction, not the checklist. This is the list somebody scans to find
+    # the session they parked, and "how far along" is the one thing that
+    # distinguishes two sessions on the same task. A session with no plan reads
+    # `-` rather than `0/0`, because those are different facts.
+    text = "\n".join(
+        [
+            f"  {s.id}  {s.state:<12} {s.name:<24} {_plan_fraction(s):<7} "
+            f"{s.worktree or ''}"
+            for s in sessions
+        ]
+        + _docs_lock_table(ctx)
+    )
+    return emit(args, {"sessions": [s.to_dict() for s in sessions]}, text)
+
+
+def cmd_session_adopt(args) -> int:
+    ctx = Context(session_id=args.id)
+    session_id = args.id
+    if not session_id:
+        current = ctx.current_session(strict=False)
+        if current is None:
+            raise UsageError(
+                "cannot tell which session to adopt from here; pass --id. "
+                "'invariant session list' shows the registered ones."
+            )
+        session_id = current.id
+    updated = ctx.sessions.adopt_host_session(
+        session_id, args.host_session_id, force=args.force
+    )
+    return emit(
+        args,
+        updated.to_dict(),
+        f"session {updated.id} now answers to this host session",
+    )
+
+
+def _landing_lines(ctx: Context, session) -> list[str]:
+    """Where the session's legs landed (ADR-014 D6), for ``session status``.
+
+    Silent for an in-repo session, which has no landing record, and for a
+    store session before anything landed or failed.
+    """
+    landing = session.landing or {}
+    state = session.landing_state
+    store = ctx.manifest.store.name if ctx.manifest.store is not None else "?"
+    failed = landing.get("failed") or {}
+    why = " ".join(str(failed.get("detail") or "").split())
+    if len(why) > 240:
+        why = why[:237] + "..."
+    finish = (
+        f"'invariant session merge' or 'invariant session resume {session.name}' "
+        f"finishes it"
+    )
+    if state == "docs_landed":
+        return [
+            (
+                f"  landing    docs landed, code pending: store {store} at "
+                f"{landing['store'][:12]}; the code lands at 'invariant session merge'"
+            )
+        ]
+    if state == "half_landed":
+        return [
+            (
+                f"  landing    half-landed: docs landed in store {store} at "
+                f"{landing['store'][:12]}; the repo merge into "
+                f"{failed.get('base') or session.base} failed: {why}"
+            ),
+            f"             {finish}; nothing is rolled back (ruling 8)",
+        ]
+    if failed and state is None:
+        return [
+            (
+                f"  landing    the repo merge into {failed.get('base') or session.base} "
+                f"failed: {why}"
+            ),
+            f"             {finish}",
+        ]
+    return []
+
+
+def cmd_session_resume(args) -> int:
+    """Pick up work a previous host session put down.
+
+    The sibling of :func:`cmd_session_adopt`, and the distinction between them
+    is which binding they replace. `adopt` claims a session that has NO owner;
+    this one replaces a **spent** binding — a host session that ended, leaving
+    a worktree, a branch, a pipeline and a plan behind. Neither may replace a
+    LIVE binding without --force, because that is the hand-over ADR-001 D19
+    forbids: work changing owner behind its owner's back.
+
+    Two properties of the OUTPUT are contracts rather than presentation.
+
+    **The success line is parsed.** `hosts/claude_code` binds a host session to
+    an invariant session by reading `session <id> (` out of the stdout of the
+    command that claimed it — a command run through a shell carries no hook
+    payload, so this text is the only evidence of which session was claimed.
+
+    **The refusals must not be parseable that way.** The same reader searches
+    the WHOLE tool response, and a host that merges streams puts stderr in it.
+    A refusal carrying `session <id> (` would bind the caller to a session it
+    just refused to give them — silently, and to the wrong one. So every
+    refusal below names sessions in the `<name>  [<state>]` shape the ambiguity
+    messages already use, which has no such sequence in it.
+    """
+    ctx = Context()
+    session = _resume_target(ctx, args)
+    # Pulled before the binding moves, so a diverged store resumes nothing
+    # (ADR-014 D7). The refusal names no session in the binding's shape.
+    commands = _command_values(ctx.manifest)
+    pull = _pull_first(ctx, "resume stopped: nothing was resumed")
+    changed = _commands_changed(commands, pull)
+    updated = ctx.sessions.resume(
+        session.id, host_session_id=ctx.host_session_id, force=args.force
+    )
+    _record_pull(ctx, updated.id, pull)
+    # A session whose repo merge failed is finished here (ADR-014 D6), after
+    # the binding moved: the line above is the host's binding contract.
+    finish, finished = _finish_landing(ctx, updated, args)
+    if finish:
+        updated = ctx.sessions.require(updated.id)
+
+    progress = plan_reader.progress(updated.plan)
+    if not progress.total:
+        headline = "no deliverables recorded"
+        # An unplanned session resumed is the moment the plan is worth
+        # recording: whatever is left is in somebody's head right now, and this
+        # is the last point before it is in a commit instead.
+        second = 'record what is left: invariant session plan add "<deliverable>"'
+    else:
+        headline = f"{progress.done}/{progress.total} deliverables done"
+        second = (
+            f"next: {progress.remaining[0]['title']}"
+            if progress.remaining
+            else "every deliverable is done; land it: invariant session review"
+        )
+    emit(
+        args,
+        {
+            "session": updated.to_dict(),
+            "plan": _plan_payload(updated),
+            "commands_changed": changed,
+            "finished": finished if finish else None,
+        },
+        "\n".join(
+            [
+                f"session {updated.id} ({updated.name}) resumed — {headline}",
+                f"  {second}",
+                (
+                    f"  worktree {updated.worktree or '(not isolated yet)'}"
+                    f"   branch {updated.branch or '(none)'}"
+                ),
+                (
+                    "  it binds to this host session on the next tool call; "
+                    "confirm with: invariant session status"
+                ),
+                *_pull_lines(pull),
+                *_command_lines(changed),
+                *finish,
+            ]
+        ),
+    )
+    return 1 if finish and not finished else EXIT_OK
+
+
+def _finish_landing(ctx: Context, session, args) -> tuple[list[str], bool]:
+    """Finish a session whose repo merge failed (ADR-014 D6): ``(lines, done)``.
+
+    Nothing to finish gives no lines. A finish refused, or failing again,
+    leaves the record as it was and says why, so the resumed session stays
+    half-landed and ``session merge`` can be run once the cause is fixed.
+    """
+    if not (session.landing or {}).get("failed"):
+        return [], False
+    try:
+        text, _performed, after = _land_repo(ctx, session, args, force=False)
+    except InvariantError as exc:
+        reason = str(exc).splitlines()
+        state = (
+            "still half-landed"
+            if ctx.sessions.require(session.id).landing_state == "half_landed"
+            else "its repo merge is still not landed"
+        )
+        return [
+            f"  {state}: the finish of its failed merge stopped:",
+            *[f"    {line}" for line in reason if line.strip()],
+        ], False
+    return [
+        f"  finished the half-landed merge: {text.splitlines()[-1]}",
+        *[f"  {line}" for line in _after_merge_lines(ctx, after)],
+    ], True
+
+
+# -- ruling 22: a pulled store that changes a command (ADR-014 D7) -------------
+
+
+def _command_values(manifest) -> dict[str, Any]:
+    """Every resolved ``commands.*`` value: what the gates would run now."""
+    return {
+        key: value
+        for key, value, _source in manifest.iter_provenance()
+        if key.startswith("commands.")
+    }
+
+
+def _commands_changed(before: dict[str, Any], pull) -> list[dict[str, Any]]:
+    """Each ``commands.*`` value a pull that moved the store changed, old and
+    new (ruling 22). Read from the configuration resolved again after the
+    pull, so a store value the repository's own level overrides changes
+    nothing that runs, and is not named."""
+    if pull is None or not pull.moved:
+        return []
+    after = _command_values(Context().manifest)
+    return [
+        {"key": key, "old": before.get(key), "new": after.get(key)}
+        for key in sorted(set(before) | set(after))
+        if before.get(key) != after.get(key)
+    ]
+
+
+def _command_lines(changed: list[dict[str, Any]]) -> list[str]:
+    """Ruling 22's lines: it names the change, and never blocks."""
+    if not changed:
+        return []
+
+    def shown(value: Any) -> str:
+        return "(unset)" if value is None else repr(value)
+
+    return [
+        "  the store's pull changed a command the gates run (ruling 22); now in force:",
+        *[
+            f"    {c['key']}: {shown(c['old'])} -> {shown(c['new'])}"
+            for c in changed
+        ],
+    ]
+
+
+def _resume_target(ctx, args):
+    """Which session `resume` was asked for, or a refusal that says why not.
+
+    `--id` is accepted alongside the name because every ambiguity message in
+    this library tells the caller to pass it, and a subcommand that then
+    rejected it would make that advice a dead end. When both are given they
+    must AGREE: silently preferring one would let a copied-and-half-edited
+    command resume a session the caller did not name.
+    """
+    if args.id:
+        session = ctx.sessions.require(args.id)
+        if args.name and not name_matches(session.name, session.id, args.name):
+            raise UsageError(
+                f"--id names {session.name}, which does not answer to "
+                f"{args.name!r}.\n"
+                f"  Name it one way or the other, not two ways that disagree."
+            )
+        return session
+
+    if not args.name:
+        raise UsageError(
+            "name the session to resume.\n"
+            "  invariant session list   shows what is registered here\n"
+            "  invariant session resume <name>   takes a name, a bare task "
+            "slug, or an id"
+        )
+
+    session, candidates = ctx.sessions.resolve_name(args.name)
+    if session is not None:
+        return session
+    if candidates:
+        raise UsageError(f"{args.name!r} — {name_ambiguity_message(candidates)}")
+    raise UsageError(
+        f"no session answers to {args.name!r}.\n"
+        "  invariant session list   shows what is registered here\n"
+        "  invariant session start <task-name>   begins a new one"
+    )
+
+
+def _real_handoff_launcher():
+    from ..hosts.claude_code_launch import TerminalLauncher
+
+    return TerminalLauncher()
+
+
+def _handoff_launcher():
+    """The launcher `session handoff` uses. The one seam a test replaces."""
+    return _real_handoff_launcher()
+
+
+def _real_handoff_closer():
+    from .host_close import DetachedCloser
+
+    return DetachedCloser()
+
+
+def _handoff_closer():
+    """The closer that ends the launching host after a handoff. A seam, like
+    `_handoff_launcher`: the suite replaces it everywhere, so no test signals
+    a process (IDEA_009)."""
+    return _real_handoff_closer()
+
+
+def _real_handoff_watch():
+    from ..hosts.claude_code_launch import ProcessTableWatch
+
+    return ProcessTableWatch()
+
+
+def _handoff_successor():
+    """The watch that proves a handoff started a live successor (BUG_075). A
+    seam, like `_handoff_launcher`: the suite replaces it everywhere, so no
+    test waits on the process table, and a test that wants a launch to count
+    says so."""
+    return _real_handoff_watch()
+
+
+def _launch_successor(launch, plan, after: str = "") -> int:
+    """Launch ``plan`` and return the pid of the live successor it started.
+
+    Terminal accepting the script is not a launch: the window's shell can
+    still run nothing, as a tty-cut line did (BUG_075). Sessions of the same
+    name already running are read first and never counted. On any failure the
+    launch file is removed, so a window that opens late runs nothing rather
+    than contradicting the failure just reported, and the error carries the
+    command to run by hand. The caller signals nothing either way. ``after``
+    is the caller's own sentence about what the failure leaves, such as the
+    handoff's "the note is recorded".
+    """
+    watch = _handoff_successor()
+    before = watch.running(plan.name)
+    try:
+        _handoff_launcher().launch(plan)
+        pid = watch.wait_for(plan.name, exclude=before)
+    except BaseException:
+        plan.discard()
+        raise
+    if pid is None:
+        plan.discard()
+        raise InvariantError(
+            f"the launch did not start a successor: no claude with "
+            f"--name {plan.name} --remote-control {plan.name} is running "
+            f"{launch.SUCCESSOR_GRACE_SECONDS}s after it appeared, or it never "
+            f"appeared within {launch.SUCCESSOR_TIMEOUT_SECONDS}s. "
+            f"{after + ' ' if after else ''}Run it by hand:\n"
+            f"    {plan.by_hand}"
+        )
+    return pid
+
+
+def _open_claude_window(name: str, prompt: str | None, cwd, token: str | None = None,
+                        after: str = ""):
+    """The one way invariant opens a new Claude window: ``(plan, successor pid)``.
+
+    A new macOS Terminal window in ``cwd`` running ``claude --name <name>
+    --remote-control <name> [prompt]``, with the prompt carried in the launch
+    file as one argument, the host markers and any inherited claim token
+    unset, and ``token`` set when the caller recorded a note to claim. It
+    counts once a successor is seen alive (BUG_075). ``session handoff``, the
+    dashboard's terminal step and ``oracle start-session`` all come through
+    here, and IDEA_029's hand-off will too, with a prepared prompt. Refused,
+    with the line to run by hand, off macOS; refused without ``claude`` on
+    PATH. Nothing here records or ends anything.
+    """
+    from ..hosts import claude_code_launch as launch
+
+    if launch.host_platform() != "darwin":
+        preview = launch.plan_launch(launch.CLAUDE_BINARY, name, prompt, cwd, token,
+                                     stage=False)
+        raise InvariantError(
+            "opening a Terminal window needs macOS. Run it by hand:\n"
+            f"    {preview.by_hand}"
+        )
+    claude = launch.resolve_claude()
+    if claude is None:
+        raise InvariantError(f"no claude on PATH to start; {launch.CLAUDE_BINARY} was not found")
+    plan = launch.plan_launch(claude, name, prompt, cwd, token)
+    return plan, _launch_successor(launch, plan, after)
+
+
+def _close_launching_host(launch, keep_open: bool) -> tuple[dict, str]:
+    """After a successful launch, schedule the end of the host that ran it.
+
+    Returns the JSON `close` document and the one line the output carries.
+    Every route that does not schedule says why and leaves the session open:
+    `--keep-open`, no usable `CLAUDE_PID`, or a pid that does not name a
+    `claude` process now. The closer checks the name again at kill time.
+    """
+    close = {"scheduled": False, "pid": None, "delay": None}
+    if keep_open:
+        return close, "  left this session open (--keep-open)"
+    raw = os.environ.get(launch.HOST_PID_ENV)
+    pid = launch.host_pid(os.environ)
+    if pid is None:
+        why = (
+            f"{launch.HOST_PID_ENV} is not set"
+            if not (raw or "").strip()
+            else f"{launch.HOST_PID_ENV}={raw!r} names no process"
+        )
+        return close, f"  leaving this session open: {why}, so there is no claude to end"
+    close["pid"] = pid
+    closer = _handoff_closer()
+    name = closer.process_name(pid)
+    if not launch.is_claude_process_name(name):
+        what = name or "no running process"
+        return close, (
+            f"  leaving this session open: {launch.HOST_PID_ENV} {pid} names "
+            f"{what}, not claude"
+        )
+    delay = launch.CLOSE_DELAY_SECONDS
+    closer.close(pid, delay)
+    close.update({"scheduled": True, "delay": delay})
+    return close, (
+        f"  this session ends in {delay}s: SIGTERM to claude (pid {pid}), then its "
+        f"Terminal tab closes if only its shell is left; --keep-open keeps it next time"
+    )
+
+
+def _dismiss_handoff(args) -> int:
+    """`session handoff --dismiss`: retire the note the greeting is showing.
+
+    Takes no note, name or id — it acts on what an unbound greeting here
+    offers, which is the latest fresh note, and naming anything else would be
+    a second selector over the same list. Like the handoff, it never prints
+    ``session <id> (``: it claims nothing.
+    """
+    stray = [
+        flag
+        for flag, value in (
+            ("--note", args.note),
+            ("--name", args.name),
+            ("--id", args.id),
+            ("--keep-open", args.keep_open),
+        )
+        if value
+    ]
+    if stray:
+        raise UsageError(
+            f"--dismiss retires the latest fresh note here and takes no "
+            f"{', '.join(stray)}"
+        )
+    ctx = Context()
+    if args.dry_run:
+        session, entry = ctx.sessions.dismissable_handoff(ctx.cwd)
+        verb = "would dismiss"
+    else:
+        resolution = ctx.sessions.resolve(ctx.cwd, host_session_id=ctx.host_session_id)
+        by = resolution.session.id if resolution.proven and resolution.session else None
+        session, entry = ctx.sessions.dismiss_handoff(
+            ctx.cwd, session_id=by, host_session_id=ctx.host_session_id
+        )
+        verb = "dismissed"
+    result = {
+        "dismissed": not args.dry_run,
+        "dry_run": bool(args.dry_run),
+        "session": session.id,
+        "session_name": session.name,
+        "name": entry.get("name"),
+        "note": entry.get("note"),
+    }
+    return emit(
+        args,
+        result,
+        "\n".join(
+            [
+                f"{verb} handoff {entry.get('name')} from {session.name}:",
+                f"    {entry.get('note')}",
+            ]
+        ),
+    )
+
+
+def cmd_session_handoff(args) -> int:
+    """Hand the work to a fresh host session, in one command.
+
+    Records the note on the session, then opens a new Terminal window in the
+    MAIN checkout running ``claude --name <slug> --remote-control <slug>
+    "<note>"``. The order of the steps is the design:
+
+    1. **Vet the note and settle the name first.** Both are refusals that must
+       happen before anything is written or launched — a note with personal
+       data in it is not recorded, and a session nobody can name is not
+       started. `--dry-run` runs exactly these, so it refuses what the real run
+       would.
+    2. **Refuse what cannot launch**, still before writing: another host kind,
+       a platform without Terminal, no `claude` on PATH. A refusal leaves no
+       trace; the non-macOS one prints the command to run by hand.
+    3. **Record, then launch.** If the launch fails the note is already on
+       the record, and the greeting of whatever session starts next shows it —
+       which is the fallback for a lost prompt argument, too.
+    4. **A launch succeeds only once a successor is seen alive** (BUG_075):
+       a new process whose argv carries ``--name <slug> --remote-control
+       <slug>``, still running after a grace period. Without one the launch
+       failed, whatever Terminal answered: exit non-zero, nothing signalled.
+    5. **End the old host, last, and only after a launch that succeeded**
+       (IDEA_009). The output is printed first; the launching `claude`
+       (`CLAUDE_PID`) is sent SIGTERM `CLOSE_DELAY_SECONDS` later, by a
+       detached closer that checks the pid is still the same `claude` before
+       it signals, and once Claude has exited closes its Terminal tab under
+       the panel Close's rules (BUG_100). `--keep-open` opts out; a dry run, a refusal and a failed
+       launch never get here, and a missing or foreign pid is reported and
+       left alone.
+
+    The launched line carries the claim token naming the note just recorded,
+    so the new host's first `session start` / `session resume` consumes that
+    note (IDEA_008). A dry run and the by-hand line on another platform carry
+    none: nothing was recorded, so there is no note to name.
+
+    The output never prints ``session <id> (``: that sequence is the binding
+    contract `session start` and `session resume` own (see their docstrings),
+    and a handoff claims nothing.
+    """
+    from ..core import git
+    from ..domains.session import handoff_name, handoff_token
+    from ..hosts import claude_code_launch as launch
+
+    if args.dismiss:
+        return _dismiss_handoff(args)
+    if not args.note:
+        raise UsageError(
+            "session handoff needs --note \"<line>\" to hand off, or --dismiss "
+            "to retire the latest fresh note without acting on it"
+        )
+
+    ctx = Context(session_id=args.id)
+    explicit = args.id or os.environ.get(SESSION_ENV)
+    if explicit:
+        session = ctx.sessions.require(explicit)
+    else:
+        resolution = ctx.sessions.resolve(
+            ctx.cwd, host_session_id=ctx.host_session_id
+        )
+        session = (
+            resolution.session
+            if resolution.proven
+            else ctx.sessions.handoff_candidate(ctx.cwd, ctx.host_session_id)
+        )
+    if session is None:
+        raise UsageError(
+            "no session to record a handoff on: none is registered at or above "
+            "this directory.\n"
+            "  Name one: invariant session handoff --note \"...\" --id <id>"
+        )
+
+    vetted = ctx.sessions.vet_handoff_note(args.note)
+    name = handoff_name(vetted, name=args.name)
+    if not name:
+        raise UsageError(
+            "the note has no 'next:' item to name the new session after.\n"
+            "  Add one — next: <what the next session is for> — or name it: "
+            "--name <slug>"
+        )
+
+    main_checkout = git.main_checkout(ctx.manifest.root) or ctx.manifest.root
+    claude = launch.resolve_claude()
+    note = _with_debts(ctx, vetted)
+    plan = launch.plan_launch(
+        claude or launch.CLAUDE_BINARY, name, note, main_checkout, stage=False
+    )
+    result = {
+        "session": session.id,
+        "session_name": session.name,
+        "name": name,
+        "note": note,
+        "argv": list(plan.argv),
+        "cwd": plan.cwd,
+        "shell_line": plan.shell_line,
+        "by_hand": plan.by_hand,
+        "launch_file": None,
+        "applescript": plan.applescript,
+        "token": None,
+        "dry_run": bool(args.dry_run),
+        "successor": None,
+        "close": {"scheduled": False, "pid": None, "delay": None},
+    }
+
+    if args.dry_run:
+        lines = [
+            (
+                f"handoff {name} from {session.name} [{session.state}] — dry run, "
+                "nothing recorded or launched"
+            ),
+            f"  command:     {plan.by_hand}",
+            f"  typed:       {plan.shell_line}",
+            (
+                f"  a real run writes the command to a private launch file "
+                f"(mode 0600, under {launch.launch_dir()}), which removes "
+                f"itself as claude starts"
+            ),
+            "  applescript:",
+            *[f"    {line}" for line in plan.applescript.splitlines()],
+            (
+                f"  a real run sets {launch.HANDOFF_ENV}=<session>:<recorded-at> "
+                f"before claude, so the new session claims this note"
+            ),
+            (
+                "  --keep-open: a real run leaves this session open"
+                if args.keep_open
+                else (
+                    f"  a real run then ends this session: SIGTERM to "
+                    f"{launch.HOST_PID_ENV} after {launch.CLOSE_DELAY_SECONDS}s, "
+                    f"then its Terminal tab, unless --keep-open"
+                )
+            ),
+        ]
+        if claude is None:
+            lines.append(
+                f"  note: {launch.CLAUDE_BINARY} is not on PATH; a real run "
+                f"refuses until it is"
+            )
+        return emit(args, result, "\n".join(lines))
+
+    kind = ctx.manifest.get("host.kind")
+    if kind != "claude_code":
+        raise UsageError(
+            f"session handoff starts a Claude Code session, and this project's "
+            f"host.kind is {kind!r}, not 'claude_code'"
+        )
+    if claude is None:
+        raise UsageError(
+            f"{launch.CLAUDE_BINARY} is not on PATH, so there is nothing to "
+            f"launch. Install Claude Code, or put it on PATH, and run the "
+            f"handoff again; nothing was recorded."
+        )
+    if launch.host_platform() != "darwin":
+        raise UsageError(
+            "session handoff opens a new window through macOS Terminal, and "
+            "this is not macOS; nothing was recorded. Run it by hand:\n"
+            f"  {plan.by_hand}"
+        )
+
+    # The project's `session.before_handoff` steps run last of the refusals,
+    # in the main checkout, before the note is recorded (ADR-021 D2), and a
+    # failing `session.after_merge` step holds a merged session's handoff
+    # (ruling 2, D5): either refuses with nothing recorded or launched. A
+    # step owed here is a debt, so the debts the note carries are read again.
+    _handoff_steps(ctx, session, main_checkout, args)
+    note = _with_debts(ctx, vetted)
+    result["note"] = note
+    result["argv"] = list(launch.plan_launch(claude, name, note, main_checkout, stage=False).argv)
+
+    updated = ctx.sessions.record_handoff(session.id, note, name)
+    token = handoff_token(updated.id, updated.handoffs[-1]["at"])
+    plan, successor = _open_claude_window(
+        name, note, main_checkout, token=token,
+        after="This session stays open, and the note is recorded.",
+    )
+    result.update(
+        {
+            "token": token,
+            "shell_line": plan.shell_line,
+            "by_hand": plan.by_hand,
+            "launch_file": plan.launch_file,
+            "applescript": plan.applescript,
+        }
+    )
+    result["successor"] = {"pid": successor}
+    close, close_line = _close_launching_host(launch, args.keep_open)
+    result["close"] = close
+    return emit(
+        args,
+        result,
+        "\n".join(
+            [
+                f"handed off as {name}",
+                f"  recorded on {updated.name} [{updated.state}]",
+                f"  opened a new Terminal window in {plan.cwd}:",
+                f"    {plan.shell_line}",
+                f"  successor claude is running as {name} (pid {successor})",
+                close_line,
+            ]
+        ),
+    )
+
+
+def _with_debts(ctx: Context, note: str) -> str:
+    """``note`` with the project's open step debts after it, on the same line
+    (ADR-021 D4), so the next session starts knowing them. Only the step,
+    the count and the commit ride it, never a run's output."""
+    from ..core import steps as steps_reader
+
+    owed = steps_reader.debts_line(steps_reader.open_debts(ctx.store))
+    return f"{note} · {owed}" if owed else note
+
+
+def _handoff_steps(ctx: Context, session, main_checkout, args) -> None:
+    """Run the steps due at ``session.before_handoff``, then judge them and
+    the ``session.after_merge`` steps' hold, which are never run here; a
+    blocking verdict refuses the handoff before anything is recorded."""
+    from ..core import steps as steps_reader
+    from ..domains.steps import StepsDomain
+
+    before = steps_reader.due(ctx.manifest, steps_reader.BEFORE_HANDOFF)
+    held = steps_reader.due(ctx.manifest, steps_reader.AFTER_MERGE)
+    if not before and not held:
+        return
+    if before:
+        StepsDomain(ctx.manifest, ctx.store).run_due(
+            steps_reader.BEFORE_HANDOFF, session=session.to_dict(), cwd=Path(main_checkout)
+        )
+    due = [*before, *held]
+    rule_ctx = RuleContext(
+        manifest=ctx.manifest, cwd=Path(main_checkout), session=session.to_dict(),
+        pipeline=_pipeline_dict(ctx, session.id),
+    )
+    verdicts = evaluate([step.rule_id for step in due], rule_ctx)
+    report_verdicts(verdicts, args)
+    if any(v.blocks for v in verdicts):
+        _record_cli_refusal(ctx, session, verdicts)
+        raise GateFailure(
+            "a project step refused the handoff — nothing was recorded or "
+            "launched",
+            verdicts=verdicts,
+        )
+
+
+def _pipeline_dict(ctx: Context, session_id: str) -> dict | None:
+    pipeline = ctx.pipelines.current(session_id)
+    return pipeline.to_dict() if pipeline else None
+
+
+def cmd_session_plan(args) -> int:
+    """The deliverable set this session owes: add, tick, untick, drop, show.
+
+    **Nested subparsers rather than `session files`' flat `action` + positional
+    shape**, because the argument shapes genuinely differ where that command's
+    do not: `files` takes a list of paths for both of its actions, while `add`
+    takes one free-text title, three actions take an integer, and `show` takes
+    nothing. Flattened, the parser could only accept a string and the command
+    would hand-roll the type check — so `plan done abc` would reach the domain
+    and come back as "no deliverable 'abc' in session …", a report about the
+    plan for what is a malformed command. One function still serves all five,
+    so the dispatch stays in one place.
+
+    `add` takes exactly ONE positional, so a lost quote is a usage error rather
+    than a truncated title. That is the same failure the domain's own length
+    bound catches from the other direction — a shell handing a whole list over
+    as one argument — and both refusals are cheaper than a plan entry that
+    silently says half of what was meant.
+
+    Every action prints the WHOLE plan, and the same JSON document. A mutation
+    that reported only itself would leave the caller re-running `show` to see
+    the numbering it just changed, and two output shapes for one subcommand is
+    two things for a consumer to parse.
+    """
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    action = args.plan_action
+    if action == "add":
+        session = ctx.sessions.plan_add(session.id, args.title)
+    elif action == "done":
+        session = ctx.sessions.plan_done(session.id, args.n)
+    elif action == "reopen":
+        session = ctx.sessions.plan_reopen(session.id, args.n)
+    elif action == "remove":
+        session = ctx.sessions.plan_remove(session.id, args.n)
+    return emit(args, _plan_payload(session), _plan_text(session))
+
+
+def _plan_payload(session) -> dict:
+    """The plan as a machine reads it.
+
+    ``planned`` and ``complete`` are SEPARATE keys and neither is derivable
+    from the other by a consumer that only has one. ``planned`` is "a checklist
+    exists"; ``complete`` is "and nothing on it is open". Collapsed into a
+    single flag, a session that never recorded a plan is indistinguishable from
+    one that finished its plan — so a reviewer switching mode on it either
+    defers the merge forever on every project that does not keep checklists, or
+    passes every unplanned session as finished. ``core.plan.progress`` is where
+    the distinction is computed, once, for exactly this reason.
+    """
+    progress = plan_reader.progress(session.plan)
+    return {
+        "session": session.id,
+        "name": session.name,
+        "plan": plan_reader.entries(session.plan),
+        "total": progress.total,
+        "done": progress.done,
+        "next": progress.remaining[0]["title"] if progress.remaining else None,
+        "planned": progress.total > 0,
+        "complete": progress.complete,
+    }
+
+
+def _plan_text(session) -> str:
+    """The plan as a person reads it.
+
+    The entries come from ``core.plan.render_lines`` rather than from a second
+    renderer here. There will be another caller — the state a host injects at
+    the top of a turn — and two renderings of one list is two chances for the
+    numbers printed to disagree with the numbers the commands take.
+    """
+    progress = plan_reader.progress(session.plan)
+    lines = [
+        (
+            f"plan for session {session.id} ({session.name}) — "
+            f"{progress.done}/{progress.total} done"
+        )
+    ]
+    lines += [f"  {line}" for line in plan_reader.render_lines(session.plan)]
+    if progress.remaining:
+        lines.append(f"  next: {progress.remaining[0]['title']}")
+    elif not progress.total:
+        lines.append(
+            '  record what is owed: invariant session plan add "<deliverable>"'
+        )
+    return "\n".join(lines)
+
+
+def _plan_fraction(session) -> str:
+    """`2/5`, or `-` where no plan was ever recorded."""
+    total = session.plan_total
+    return f"{session.plan_done_count}/{total}" if total else "-"
+
+
+def cmd_session_sync(args) -> int:
+    """Rebase this session's branch onto its base, from inside its worktree.
+
+    What `session.branch_is_current` names as its fix. The model has always
+    said "rebase onto the local base after every commit"; until this command
+    existed, saying it was all anything did.
+
+    **Every refusal runs before git does**, in the same shape as
+    `cmd_session_merge`: a validation that runs after an irreversible step is a
+    report, not a gate, and a rebase rewrites commits.
+
+    **It refuses to run outside the session's own worktree**, which is the
+    mirror of `session.ff_merge_target`'s reasoning one command over. `git
+    rebase` acts on whatever HEAD the calling tree has checked out, so run from
+    the main checkout it rebases the BASE branch onto itself, reports success
+    and exits zero — the invisible-success shape this library exists to catch.
+    The same argument makes a detached HEAD a refusal: the branch this session
+    owns is what must move, and HEAD is what would.
+
+    **A conflict is reported, never resolved.** The rebase is aborted, which
+    puts the commits back exactly where they were, and the operator is left
+    with the decision. Resolving a conflict is a judgement about two people's
+    intent, and a program that guesses at it produces a merge nobody reviewed.
+    """
+    import subprocess
+
+    from ..core import git
+
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+
+    if not session.branch:
+        raise UsageError(
+            f"session {session.name} owns no branch, so there is nothing to "
+            f"rebase.\n  invariant session isolate --execute  creates one"
+        )
+
+    # Where the caller is standing, answered by the domain rather than by a
+    # second path comparison here: `by_worktree_containing` is what every other
+    # caller asks, and it already excludes a stranded worktree.
+    here = ctx.sessions.by_worktree_containing(ctx.cwd)
+    if here is None or here.id != session.id:
+        where = session.worktree or "(this session never isolated)"
+        raise UsageError(
+            f"a rebase acts on the branch the CALLING tree has checked out, "
+            f"and this is not session {session.name}'s worktree.\n"
+            f"  Run it from: {where}\n"
+            f"  Run from anywhere else it rebases a different branch and "
+            f"exits zero, which is the same invisible success "
+            f"session.ff_merge_target refuses at the merge."
+        )
+
+    branch = git.current_branch(ctx.cwd)
+    if branch != session.branch:
+        raise UsageError(
+            f"this worktree has {branch or 'a detached HEAD'} checked out, not "
+            f"{session.branch}. A rebase moves HEAD's branch, so it would move "
+            f"the wrong one.\n  git switch {session.branch}"
+        )
+
+    # Uncommitted work in TRACKED files is what `git rebase` itself refuses on,
+    # and asking first buys a message that names the way out. Untracked files
+    # are deliberately not counted: git only minds them when a replayed commit
+    # would overwrite one, and refusing on scratch files would make this
+    # command unusable in the tree it is meant to be run from.
+    dirty = git.changed_files(ctx.cwd)
+    if dirty:
+        listed = ", ".join(str(path) for path in dirty[:5])
+        raise UsageError(
+            f"{len(dirty)} file(s) carry uncommitted changes: {listed}\n"
+            f"  A rebase replays commits, so it refuses to run over work that "
+            f"is not in one.\n"
+            f"  Commit them, or set them aside with 'git stash', then retry."
+        )
+
+    # The same helper and the same argument order as `session.branch_is_current`
+    # reads, so the number this command acts on and the number that gate
+    # reports cannot disagree.
+    behind = git.commits_ahead(ctx.cwd, session.base, session.branch)
+    if behind == 0:
+        return emit(
+            args,
+            {"rebased": False, "behind": 0, "branch": session.branch},
+            f"{session.branch} already carries everything on {session.base}",
+        )
+
+    proc = subprocess.run(
+        ["git", "rebase", session.base],
+        cwd=str(ctx.cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        abort = subprocess.run(
+            ["git", "rebase", "--abort"],
+            cwd=str(ctx.cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        raise UsageError(
+            f"the rebase onto {session.base} stopped: "
+            f"{detail[-1] if detail else 'git said nothing'}\n"
+            + (
+                "  It was aborted, so the branch and its commits are exactly "
+                "as they were.\n"
+                if abort.returncode == 0
+                else "  The abort ALSO failed; check 'git status' before "
+                "anything else.\n"
+            )
+            + "  Resolve it by hand — a conflict is a decision about two "
+            "people's intent, and this command will not guess at one."
+        )
+
+    return emit(
+        args,
+        {
+            "rebased": True,
+            "behind": behind,
+            "branch": session.branch,
+            "base": session.base,
+        },
+        f"{session.branch} rebased onto {session.base} — it was {behind} "
+        f"commit(s) behind and now carries everything on it",
+    )
+
+
+def cmd_session_reap(args) -> int:
+    ctx = Context()
+    reaped = ctx.sessions.reap_stranded(dry_run=args.dry_run)
+    verb = "would abandon" if args.dry_run else "abandoned"
+    text = (
+        "\n".join(f"  {verb} {s.id} ({s.name}) — worktree and branch both gone"
+                   for s in reaped)
+        or "  nothing to reap"
+    )
+    return emit(args, {"reaped": [s.id for s in reaped]}, text)
+
+
+def cmd_session_review(args) -> int:
+    """Evaluate the review gates, and advance if they hold.
+
+    Documented in two places and implemented in none — the CLI rejected it as
+    an unknown subcommand while `CLAUDE.md` and the CLI reference both told
+    people to run it. A doc-promised check that was never written is the exact
+    thing this library exists to make impossible, so it is written rather than
+    deleted from the docs.
+
+    The gates themselves live in the domain's ``_advance`` now, where every
+    route — including the generic ``session transition`` — runs them. This
+    command used to carry its own copy of the gate list, which is exactly how
+    the generic path came to have none (AUD-05).
+    """
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+
+    machine = ctx.sessions.machine
+    if not machine.can(session.state, "reviewed"):
+        legal = ", ".join(machine.next_states(session.state)) or "(none)"
+        raise UsageError(
+            f"session {session.id} is {session.state!r}; review is not legal "
+            f"from there.\n  Legal from {session.state!r}: {legal}"
+        )
+
+    try:
+        ctx.sessions.transition(
+            session.id, "reviewed", reason=args.reason or "review gates evaluated",
+            force=args.force, cwd=ctx.cwd,
+        )
+    except GateFailure as exc:
+        report_verdicts(exc.verdicts, args)
+        _record_cli_refusal(ctx, session, exc.verdicts)
+        raise GateFailure(
+            "the review gates refused this session", verdicts=exc.verdicts
+        ) from None
+    _lift_cli_refusal(ctx, session)
+    return emit(
+        args,
+        {"session": session.id},
+        f"session {session.id} reviewed",
+    )
+
+
+def cmd_session_merge(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    text, performed, after = _land_repo(ctx, session, args, force=args.force)
+    lines = [text, *_after_merge_lines(ctx, after)]
+    if args.force:
+        lines += _unrun_after_merge_lines(ctx)
+    return emit(
+        args,
+        {"steps": performed, "verified": True, "after_merge": after},
+        "\n".join(lines),
+    )
+
+
+def _unrun_after_merge_lines(ctx: Context) -> list[str]:
+    """A forced merge runs no ``session.after_merge`` step, and each one
+    that blocks then holds teardown and handoff until it runs (fail closed,
+    ADR-001 D25): say so, naming the run that releases it."""
+    from ..core import steps as steps_reader
+
+    return [
+        f"forced: step {step.name} did not run after the merge; teardown and "
+        f"handoff wait until 'invariant step run {step.name}' passes or exits owed"
+        for step in steps_reader.due(ctx.manifest, steps_reader.AFTER_MERGE)
+        if ctx.manifest.rule_level(step.rule_id).value == "block"
+    ]
+
+
+def _after_merge_lines(ctx: Context, runs: list[dict]) -> list[str]:
+    """What each ``session.after_merge`` run did, and what a failing one
+    holds (ADR-021 ruling 2, D5). The merge stands whichever it did."""
+    from ..core import steps as steps_reader
+
+    lines = []
+    for record in runs:
+        code = record["exit_code"]
+        how = f"exit {code}" if code is not None else "no exit"
+        last = steps_reader.last_line(record["tail"])
+        lines.append(
+            f"after merge, step {record['name']}: {record['outcome']} at "
+            f"{steps_reader.short(record['commit'])} ({how})" + (f": {last}" if last else "")
+        )
+        if record["outcome"] == steps_reader.OWED:
+            lines.append("  owed: recorded as a debt, which the next pass of this step clears")
+        elif record["outcome"] == steps_reader.FAIL:
+            level = ctx.manifest.rule_level(steps_reader.rule_id(record["name"])).value
+            lines.append(
+                f"  the merge stands; teardown and handoff wait until "
+                f"'invariant step run {record['name']}' passes or exits owed"
+                if level == "block"
+                else f"  the merge stands, and a {level} step holds nothing"
+            )
+    return lines
+
+
+def _land_repo(
+    ctx: Context, session, args, *, force: bool
+) -> tuple[str, list[str], list[dict]]:
+    """Land the session: its store leg first, then its repo leg (ADR-014 D6).
+
+    ``session merge`` runs it, and ``session resume`` runs it to finish a
+    session whose repo merge failed. Returns the line to print, the git
+    steps performed and the ``session.after_merge`` runs, which an unforced
+    landing runs once the session is ``merged`` (ADR-021 D2). Raises, having merged nothing, on a refusal before git
+    runs; a repo merge that fails is recorded first (a store project only),
+    so the session is half-landed and finished by running this again.
+    """
+    import subprocess
+
+    from ..core import git
+
+    if not session.branch:
+        raise UsageError(f"session {session.id} has no branch to merge")
+
+    main = git.main_checkout(ctx.cwd)
+    if main is None:
+        raise UsageError("not inside a git repository")
+
+    # Checked BEFORE the merge runs, not after. This used to advance git and
+    # then refuse the transition, leaving the branch merged and the record
+    # still reading `isolated` — git and the registry disagreeing, which is the
+    # phantom-session class arrived at from the other end. A validation that
+    # runs after the irreversible step is not a gate, it is a report.
+    if not ctx.sessions.machine.can(session.state, "merged"):
+        legal = ", ".join(ctx.sessions.machine.next_states(session.state)) or "(none)"
+        raise UsageError(
+            f"session {session.id} is {session.state!r}; a merge is not legal "
+            f"from there, and nothing has been merged.\n"
+            f"  Legal from {session.state!r}: {legal}\n"
+            f"  Walk it forward first: invariant session transition <state> "
+            f"--id {session.id}"
+        )
+
+    # The gates the machine declares for this edge, evaluated BEFORE the merge.
+    #
+    # They were declared and never read: this command checked only that the
+    # edge existed, so `merged`'s entry gates were decoration. The merge runs
+    # git through a subprocess rather than a tool call, so the pre-tool-use
+    # hook never sees it either — between the two, the irreversible step was
+    # the least guarded one in the lifecycle.
+    #
+    # The list comes from the domain (`pending_gates`), not from a copy here:
+    # the transition after the merge evaluates the same list inside
+    # `_advance`, so what is asked before the irreversible step and what the
+    # machine holds every other route to cannot drift apart (AUD-05).
+    # The project's `session.before_merge` steps run first, in the worktree,
+    # and are recorded, so the gates below read their runs (ADR-021 D3). A
+    # forced merge runs none: it passes their gates as it passes any.
+    if not force:
+        ctx.sessions.run_steps(session, "merged", cwd=ctx.cwd)
+    verdicts = ctx.sessions.pending_gates(session, "merged", cwd=ctx.cwd)
+    blocking = [v for v in verdicts if v.blocks]
+    if blocking and not force:
+        report_verdicts(verdicts, args)
+        _record_cli_refusal(ctx, session, verdicts)
+        raise GateFailure(
+            "the merge gates refused this session — nothing has been merged",
+            verdicts=verdicts,
+        )
+
+    # Finishing a half-landed session: the store must still hold what the
+    # record says landed (D6), else the two values are shown and nothing moves.
+    finishing = bool((session.landing or {}).get("failed"))
+    if finishing:
+        _check_store_landing(ctx, session, force)
+
+    # The store leg lands first (ruling 8): units still held are released as
+    # `docs unlock` releases them, and a stop there merges nothing.
+    lines: list[str] = []
+    if ctx.manifest.store is not None and ctx.sessions.open_spans(session):
+        pull, out = _release_docs(
+            ctx,
+            session.id,
+            (),
+            f"session merge stopped: nothing was merged, and every unit is still "
+            f"held. Resolve it in the store's main checkout, then run "
+            f"'invariant session merge --id {session.id}' again.",
+        )
+        if out.closed:
+            lines += [*(pull.lines() if pull is not None else []), *_lock_lines(out)]
+        session = ctx.sessions.require(session.id)
+
+    head = git.resolve_commit(main, session.branch)
+    already = finishing and git.branch_is_merged_into(main, session.branch, session.base)
+    performed: list[str] = []
+    if not already:
+        # Run from the main checkout, never from the branch's own worktree:
+        # that merges the branch into itself and the follow-up push pushes an
+        # unchanged target, with both commands exiting zero.
+        steps = [
+            (["git", "switch", session.base], main),
+            (["git", "merge", "--ff-only", session.branch], main),
+        ]
+        for command, cwd in steps:
+            proc = subprocess.run(
+                command, cwd=str(cwd), capture_output=True, text=True, check=False
+            )
+            performed.append(" ".join(command))
+            if proc.returncode != 0:
+                detail = f"{' '.join(command)} failed: {proc.stderr.strip()}"
+                raise UsageError(
+                    "\n".join(
+                        [
+                            *lines,
+                            detail,
+                            f"Rebase onto {session.base} first, then retry.",
+                            *_merge_failed_lines(ctx, session, detail, head),
+                        ]
+                    )
+                )
+
+    if not git.branch_is_merged_into(main, session.branch, session.base):
+        raise UsageError(
+            f"{session.branch} still is not contained in {session.base} after a "
+            f"merge that reported success — verify with 'git branch --contains'"
+        )
+
+    ctx.sessions.record_repo_landed(session.id, git.resolve_commit(main, session.base))
+    # Force travels through: the pre-flight above was forced past these same
+    # gates, and the domain records the override rather than re-refusing a
+    # merge that has already happened.
+    merged = ctx.sessions.transition(
+        session.id, "merged", reason="ff-merge verified", force=force,
+        cwd=ctx.cwd,
+    )
+    _lift_cli_refusal(ctx, session)
+    # A `store migrate` session completes its move once its repository leg
+    # has landed: the committed wiring is wired locally only now (ADR-020 D3).
+    from . import migrate
+
+    moved = migrate.finish(ctx, merged, main)
+    # The project's `session.after_merge` steps run now, in the main checkout
+    # at the merged commit (ADR-021 D2). The merge stands whatever they do: a
+    # failing `block` one holds teardown and the handoff through its rule
+    # (ruling 2, D5). A forced landing runs none, as a forced edge runs none.
+    after = [] if force else ctx.sessions.run_after_merge(merged, cwd=main)
+    verb = "already merged" if already else "merged"
+    return (
+        "\n".join(
+            [
+                *lines,
+                f"{verb} {session.branch} into {session.base} (containment verified)",
+                *moved,
+                *_push_after_landing(ctx),
+            ]
+        ),
+        performed,
+        after,
+    )
+
+
+def _push_after_landing(ctx: Context) -> list[str]:
+    """Push the store after the landing when ``sync.push_after_landing`` is on
+    (ADR-014 D7), once its privacy screen passed every outgoing commit (D8).
+
+    Not part of the landing: the session is merged whatever the push does,
+    and a push that did not publish is named with the command that retries it.
+    """
+    if ctx.manifest.store is None:
+        return []
+    from ..core import storesync
+
+    sync = storesync.settings(ctx.manifest)
+    if not sync.push_after_landing:
+        return []
+    root = ctx.manifest.store.root
+    notes = _ensure_store_hooks(root)
+    out = storesync.push(root, sync)
+    lines = [*notes, *out.lines()]
+    if not out.published:
+        lines.append(
+            "the session is merged; push after landing did not publish the store. "
+            "'invariant store push' retries it."
+        )
+    return lines
+
+
+def _merge_failed_lines(ctx: Context, session, detail: str, head: str | None) -> list[str]:
+    """Record a failed repo merge (D6) and say what the session now is.
+
+    A store project records it on the landing record; with its docs landed
+    the session is half-landed. An in-repo project records nothing.
+    """
+    updated = ctx.sessions.record_repo_failure(session.id, detail, head)
+    if updated.landing is None:
+        return []
+    finish = (
+        f"'invariant session merge --id {session.id}' or 'invariant session "
+        f"resume {session.name}' finishes it once the cause is fixed; nothing "
+        f"is rolled back (ruling 8)."
+    )
+    if updated.landing_state == "half_landed":
+        return [
+            (
+                f"session {session.id} is half-landed: its docs landed in store "
+                f"{_landing_store_name(ctx, updated)} at {updated.landing['store'][:12]}, and its "
+                f"code did not. {finish}"
+            )
+        ]
+    return [f"the failed merge is recorded on session {session.id}. {finish}"]
+
+
+def _landing_store_name(ctx: Context, session) -> str:
+    """The store a session's docs landed in, by name: the project's, or the
+    one a ``store migrate`` session writes (ADR-014 D12)."""
+    root = ctx.sessions.store_root_of(session)
+    return root.name if root is not None else "?"
+
+
+def _check_store_landing(ctx: Context, session, force: bool) -> None:
+    """Before finishing a half-landed session, check the store still holds the
+    sha its docs landed at (D6). A mismatch stops with both values, or, forced,
+    is recorded as an override and the finish goes on."""
+    mismatch = ctx.sessions.store_landing_mismatch(session)
+    if mismatch is None:
+        return
+    recorded, now = mismatch
+    if not force:
+        raise UsageError(
+            f"session {session.id}'s record says its docs landed in store "
+            f"{_landing_store_name(ctx, session)} at {recorded}, and the store's main line "
+            f"(HEAD {now or 'unreadable'}) does not contain it: its history was "
+            f"rewritten since, by a replay or by hand. Nothing was merged.\n"
+            f"  Check the docs are on the store's main line, then finish it "
+            f"anyway with 'invariant session merge --force --id {session.id}', "
+            f"which records the override."
+        )
+    ctx.sessions.record_landing_override(session.id, recorded, now)
+
+
+def cmd_session_push(args) -> int:
+    import subprocess
+
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+
+    # `pushed`'s entry gates, read from the machine. `session.push_enabled`
+    # used to be duplicated here as a hardcoded `if`, so the policy lived
+    # twice and only the copy the machine did not own ever ran (AUD-05).
+    # Evaluated BEFORE the push, because a push is a remote event: refusing
+    # the transition after it would leave the remote changed and the record
+    # not. The gates first, then the structural check — the policy verdict
+    # ("publishing is not a session step here") is the useful refusal, and
+    # the barrier already refuses any state the edge would.
+    verdicts = ctx.sessions.pending_gates(session, "pushed", cwd=ctx.cwd)
+    blocking = [v for v in verdicts if v.blocks]
+    if blocking and not args.force:
+        report_verdicts(verdicts, args)
+        raise GateFailure("the push gates refused this push", verdicts=verdicts)
+
+    if not ctx.sessions.machine.can(session.state, "pushed") and not args.force:
+        legal = ", ".join(ctx.sessions.machine.next_states(session.state)) or "(none)"
+        raise UsageError(
+            f"session {session.id} is {session.state!r}; a push is not legal "
+            f"from there, and nothing has been pushed.\n"
+            f"  Legal from {session.state!r}: {legal}"
+        )
+
+    proc = subprocess.run(
+        ["git", "push", args.remote, session.base],
+        cwd=str(ctx.cwd),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise UsageError(f"push failed: {proc.stderr.strip()}")
+    ctx.sessions.record_push(session.id, cwd=ctx.cwd, force=args.force)
+    return emit(args, {"pushed": True}, f"pushed {session.base} to {args.remote}")
+
+
+def cmd_session_teardown(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    try:
+        updated = ctx.sessions.teardown(
+            session.id,
+            remove_worktree=not args.keep_worktree,
+            remove_branch=not args.keep_branch,
+            # Where the caller is standing, which is the evidence the occupancy
+            # precondition is built from (BUG_009). Passed rather than left to
+            # default so that the domain reads the *caller's* directory and never
+            # this process's, and so that the check is testable without a chdir.
+            cwd=ctx.cwd,
+            force=args.force,
+        )
+    except GateFailure as exc:
+        # `torn_down`'s gates, asked before anything was removed (ADR-021 D2):
+        # a project's `session.before_teardown` step among them.
+        report_verdicts(exc.verdicts, args)
+        _record_cli_refusal(ctx, session, exc.verdicts)
+        raise
+    removed = []
+    if not args.keep_worktree and session.worktree:
+        removed.append("worktree")
+    if not args.keep_branch and session.branch:
+        removed.append(f"branch {session.branch}")
+    detail = f" ({', '.join(removed)} removed)" if removed else ""
+    return emit(args, updated.to_dict(), f"session {updated.id} torn down{detail}")
+
+
+# -- pipeline ----------------------------------------------------------
+
+
+def cmd_pipeline_start(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    pipeline = ctx.pipelines.start(
+        session.id,
+        methodology=args.methodology,
+        task=args.task or "",
+        # The baseline watermark every later per-state spend is subtracted
+        # from (ADR-002 D3). Without it the first state would have a duration
+        # and no spend, because there would be no earlier reading.
+        host_session_id=session.host_session_id,
+        # The ruleset is pinned from the tree in hand, as its gate reads it.
+        session=session.to_dict(),
+        cwd=ctx.cwd,
+    )
+    lines = [f"pipeline {pipeline.methodology} started in {pipeline.state}"]
+    pin = pipeline.ruleset
+    if pin is not None and pin.get("digest"):
+        lines.append(f"  ruleset {pin['path']} pinned at {pin['digest']}")
+    elif pin is not None:
+        lines.append(
+            f"  ruleset {pin['path']} could not be loaded: {pin.get('error')}\n"
+            f"  the landing refuses it until it loads: "
+            f"invariant check guidelines.ruleset_valid"
+        )
+    lines.append("  gates here: invariant pipeline gates")
+    return emit(args, pipeline.to_dict(), "\n".join(lines))
+
+
+def cmd_pipeline_ack(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    pipeline = ctx.pipelines.acknowledge(session.id, args.rule, args.reason)
+    return emit(
+        args,
+        pipeline.to_dict(),
+        f"acknowledged {args.rule} for this pipeline\n"
+        f"  reason: {args.reason}\n"
+        f"  it will report as skipped, with that reason, until this pipeline ends",
+    )
+
+
+#: The rule a full run on a change answers to under a sweep cadence.
+FULL_RUN_RULE = "sweep.no_full_run"
+
+
+def _ask_before_a_full_run(ctx, session, kind: str) -> None:
+    """The CLI surface of ``sweep.no_full_run``, asked before anything spawns.
+
+    ``pipeline test`` and ``pipeline coverage`` with no ``--selector`` are the
+    configured whole-suite and whole-scheme commands by construction, so this
+    surface is exact and host-neutral (ADR-010 D5). A verdict that stops the
+    work refuses the command having run and recorded nothing — unless an
+    ``invariant override`` grant is held, which is spent here, at the delivery
+    surface, and recorded with surface ``cli`` like any other spend. A warning
+    is printed and the run goes ahead. ``ask`` stops it: there is nobody here
+    to ask.
+    """
+    pipeline = ctx.pipelines.current(session.id)
+    rule_ctx = RuleContext(
+        manifest=ctx.manifest,
+        cwd=ctx.cwd,
+        session=session.to_dict(),
+        pipeline=pipeline.to_dict() if pipeline else None,
+        extra={"full_run": kind},
+    )
+    verdicts = apply_acknowledgements(
+        rule_ctx.pipeline, evaluate([FULL_RUN_RULE], rule_ctx)
+    )
+    for verdict in verdicts:
+        if verdict.blocks:
+            spent = ctx.sessions.consume_override(session.id, FULL_RUN_RULE, surface="cli")
+            if spent is None:
+                print(verdict.render(), file=sys.stderr)
+                raise GateFailure(
+                    f"{FULL_RUN_RULE} refused this run; nothing was run or recorded",
+                    verdicts=verdicts,
+                )
+            print(
+                f"[override] {FULL_RUN_RULE}: passed deliberately — "
+                f"{spent.get('reason', 'overridden')}\n"
+                f"        it would have said: {verdict.verdict.message}",
+                file=sys.stderr,
+            )
+        elif verdict.warns:
+            print(verdict.render(), file=sys.stderr)
+
+
+def cmd_pipeline_coverage(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    selectors = [s for s in (args.selector or []) if s]
+    if not selectors:
+        _ask_before_a_full_run(ctx, session, "coverage")
+    result = ctx.pipelines.run_coverage(session.id, cwd=ctx.cwd, selectors=selectors)
+    lines = [
+        # Echo what was actually run. Discovery substitutes values nobody typed
+        # — a simulator id most of all — and a wrong one produces a plausible
+        # result with no sign of where it came from.
+        f"ran: {result['command']}",
+        f"suite: {describe_run(result)}",
+        f"recorded coverage for {result['files']} file(s)",
+    ]
+    for path, pct in sorted(result["coverage"].items())[:10]:
+        lines.append(f"  {path}  {pct:g}%")
+    return emit(args, result, "\n".join(lines))
+
+
+def cmd_pipeline_status(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    pipeline = ctx.pipelines.current(session.id)
+    if pipeline is None:
+        return emit(args, {"pipeline": None}, "no pipeline is running")
+    machine = ctx.pipelines.machine_for(pipeline)
+    text = [
+        f"pipeline {pipeline.methodology}  task: {pipeline.task or '(unnamed)'}",
+        f"  state   {pipeline.state}",
+        f"  legal   {', '.join(machine.next_states(pipeline.state)) or '(terminal)'}",
+    ]
+    pin = pipeline.ruleset
+    if pin is not None and pin.get("digest"):
+        text.append(f"  ruleset  {pin['path']} @ {pin['digest']}")
+    elif pin is not None:
+        text.append(f"  ruleset  {pin['path']} could not be loaded at start: {pin.get('error')}")
+    if pipeline.overrides:
+        text.append(f"  forced  {len(pipeline.overrides)} override(s) recorded")
+    audit = audit_line(pipeline.evidence)
+    if audit is not None:
+        text.append(f"  audit   {audit}")
+    return emit(args, pipeline.to_dict(), "\n".join(text))
+
+
+def cmd_pipeline_gates(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    if args.state:
+        verdicts = ctx.pipelines.evaluate_gates(
+            session.id, target=args.state, session=session.to_dict(), cwd=ctx.cwd
+        )
+        text = "\n".join(v.render() for v in verdicts) or "no gates on this transition"
+        text += f"\n\n{summarise(verdicts)}"
+        return emit(args, {"gates": verdicts_payload(verdicts)}, text)
+
+    # No target named: report per destination rather than as one list. Since
+    # the gates moved onto the outcomes they protect (BUG_037) the edges out of
+    # a state no longer owe the same things, and a flat list would say a review
+    # state owes the ship gates while hiding that the retreats owe none of
+    # them — which is the misreading the bug was reported as.
+    by_target = ctx.pipelines.evaluate_gates_by_destination(
+        session.id, session=session.to_dict(), cwd=ctx.cwd
+    )
+    blocks = []
+    for target, verdicts in by_target.items():
+        rendered = "\n".join("  " + v.render() for v in verdicts) or "  (ungated)"
+        blocks.append(f"to {target}:\n{rendered}")
+    flat = [v for verdicts in by_target.values() for v in verdicts]
+    seen: dict[str, object] = {}
+    for verdict in flat:
+        seen.setdefault(verdict.rule_id, verdict)
+    text = "\n".join(blocks) or "no transitions from here"
+    text += f"\n\n{summarise(list(seen.values()))}"
+    return emit(
+        args,
+        {
+            "by_destination": {
+                target: verdicts_payload(verdicts)
+                for target, verdicts in by_target.items()
+            },
+            "gates": verdicts_payload(list(seen.values())),
+        },
+        text,
+    )
+
+
+def cmd_pipeline_advance(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    try:
+        pipeline, verdicts = ctx.pipelines.advance(
+            session.id,
+            args.state,
+            force=args.force,
+            reason=args.reason,
+            session=session.to_dict(),
+            cwd=ctx.cwd,
+        )
+    except GateFailure as exc:
+        report_verdicts(exc.verdicts, args)
+        if getattr(args, "json", False):
+            print(json.dumps({"advanced": False, "gates": verdicts_payload(exc.verdicts)}, indent=2))
+        _record_cli_refusal(ctx, session, exc.verdicts)
+        raise
+    _lift_cli_refusal(ctx, session)
+    report_verdicts(verdicts, args)
+    _spend_guideline_overrides(ctx, session, verdicts)
+    return emit(
+        args,
+        {"advanced": True, "pipeline": pipeline.to_dict(), "gates": verdicts_payload(verdicts)},
+        f"pipeline -> {pipeline.state}  ({summarise(verdicts)})",
+    )
+
+
+#: The family gate a grant naming a pattern, boundary or cochange guideline
+#: passes for one evaluation (ADR-012 ruling 4, D12); a judgement guideline's
+#: is ``VERDICTS_RULE`` (A4.5).
+MECHANICAL_RULE = "guidelines.mechanical_clean"
+VERDICTS_RULE = "guidelines.verdicts_complete"
+
+
+def _spend_guideline_overrides(ctx, session, verdicts) -> None:
+    """Spend each guideline grant the advance that just succeeded relied on.
+
+    ADR-012 ruling 4, and manifest.md's four properties of the token. Both
+    family gates, ``guidelines.mechanical_clean`` and
+    ``guidelines.verdicts_complete``, read a live grant and name what it
+    passed in ``Verdict.overridden``; neither spends one, because asking a
+    rule must not change the world. This is the delivery surface, so the
+    grant is spent HERE, after the advance succeeded, and recorded in
+    ``session.overrides`` with surface ``cli``. One path for both gates.
+
+    Only where it decided something. At ``warn`` the gate would not have
+    stopped the advance, and a gate still failing on another guideline was
+    not passed by the grant (a forced advance went past it); in both the
+    grant is held, and said to be. Which is which is
+    ``core.rules.grant_outcomes``, the decision a landing records too
+    (A4.6), so the record and the spend cannot disagree. ``pipeline
+    gates``, ``check``, ``doctor`` and the oracle evaluate the same gates
+    and never reach this.
+    """
+    for evaluated in verdicts:
+        for outcome in grant_outcomes(evaluated):
+            if outcome.passed is None:
+                continue  # passed nothing; the gate's detail names it as unused
+            guideline = outcome.guideline
+            if not outcome.spent:
+                print(
+                    f"[override] {guideline}: held, not spent — {outcome.why}",
+                    file=sys.stderr,
+                )
+                continue
+            spent = ctx.sessions.consume_override(session.id, guideline, surface="cli")
+            if spent is None:
+                continue
+            print(
+                f"[override] {guideline}: passed deliberately — "
+                f"{spent.get('reason', 'overridden')} (spent)\n"
+                f"        it would have blocked {outcome.gate}: {outcome.passed}",
+                file=sys.stderr,
+            )
+
+
+def _family_gate(rc, guideline_id: str) -> str:
+    """The gate a grant naming ``guideline_id`` passes, as the ruleset in the
+    tree in hand says; "its family gate" when no ruleset loads there."""
+    return guideline_gate_of(rc, guideline_id) or "its family gate"
+
+
+def cmd_pipeline_test(args) -> int:
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    if not [s for s in (args.selector or []) if s]:
+        _ask_before_a_full_run(ctx, session, "test")
+    record = ctx.pipelines.run_tests(
+        session.id, phase=args.phase, selectors=args.selector, cwd=ctx.cwd
+    )
+    status = "passed" if record["passed"] else "FAILED"
+    note = f"\n  note: {record['note']}" if record["note"] else ""
+    hazards = (
+        "\n  hazards: " + ", ".join(record["hazards"]) if record["hazards"] else ""
+    )
+    return emit(
+        args,
+        record,
+        f"{status}  {describe_run(record)}{note}{hazards}",
+    )
+
+
+# -- items -------------------------------------------------------------
+
+
+def _item_fields(pairs: list[str]) -> dict[str, str]:
+    """``--field k=v`` pairs, each one honoured or refused — never dropped.
+
+    A pair without ``=`` and a key given twice used to vanish (the first) or
+    lose to its last spelling (the second) with the command exiting 0, which
+    is the silent drop BUG_074 (a) is about one layer down.
+    """
+    fields: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise UsageError(f"--field {pair!r} is not key=value; nothing was filed")
+        if key in fields:
+            raise UsageError(f"--field {key} is given twice; nothing was filed")
+        fields[key] = value
+    return fields
+
+
+def cmd_item_new(args) -> int:
+    ctx = Context()
+    fields = _item_fields(args.field or [])
+    items = ctx.items
+    try:
+        item = items.new(
+            args.type,
+            args.title,
+            fields=fields,
+            body=args.body or "",
+            section=args.section,
+            after=args.after,
+        )
+    except GateFailure as exc:
+        report_verdicts(exc.verdicts, args)
+        raise
+    _item_warnings(items)
+    return emit(args, item.to_dict(), f"{item.id}  {item.status}  {item.title}")
+
+
+def _item_warnings(items) -> None:
+    """What ``items.decisions_linked`` warned of an item write (ADR-018 D8),
+    on stderr, so ``--json`` output stays one document."""
+    for verdict in items.warnings:
+        print(verdict.render(), file=sys.stderr)
+
+
+def cmd_item_list(args) -> int:
+    ctx = Context()
+    items = ctx.items.list(item_type=args.type, status=args.status, open_only=args.open)
+    if not items:
+        return emit(args, {"items": []}, "no matching items")
+    return emit(args, {"items": [i.to_dict() for i in items]}, ctx.items.open_table()
+                if args.open else "\n".join(
+                    f"  {i.id}  {i.status:<16} {i.title}" for i in items))
+
+
+def cmd_item_show(args) -> int:
+    ctx = Context()
+    item = ctx.items.get(args.id)
+    text = [
+        f"{item.id}  [{item.type}]  {item.title}",
+        f"  status   {item.status}",
+    ]
+    if item.fields:
+        text.append("  fields   " + ", ".join(f"{k}={v}" for k, v in item.fields.items()))
+    if item.residue:
+        text.append("  owed     " + "; ".join(item.residue))
+    for n, row in enumerate(item.history):
+        text.append(("  history  " if n == 0 else " " * 11) + _history_line(row))
+    if item.body:
+        text.extend(["", item.body])
+    return emit(args, item.to_dict(), "\n".join(text))
+
+
+def cmd_item_transition(args) -> int:
+    ctx = Context()
+    items = ctx.items
+    try:
+        # The verdicts are reported by the failure path below; a clean
+        # transition has nothing to say about them.
+        item, _verdicts = items.transition(
+            args.id,
+            args.status,
+            reason=args.reason,
+            force=args.force,
+            cwd=ctx.cwd,
+            ruling=args.ruling,
+            evidence=args.evidence,
+        )
+    except GateFailure as exc:
+        report_verdicts(exc.verdicts, args)
+        raise
+    _item_warnings(items)
+    text = f"{item.id} -> {item.status}"
+    if len(item.history) > 1 and item.history[-2].get("intermediate"):
+        text += f"  (through {item.history[-2]['to']}, recorded on the ruling)"
+    return emit(args, item.to_dict(), text)
+
+
+def _history_line(row: dict) -> str:
+    """One history row as ``item show`` prints it."""
+    line = f"{row.get('from')} -> {row.get('to')}"
+    notes = []
+    if row.get("reason"):
+        notes.append(str(row["reason"]))
+    if row.get("forced"):
+        notes.append("forced")
+    if row.get("ruling"):
+        notes.append(f"ruled by {row['ruling']}")
+    if row.get("evidence"):
+        notes.append(f"evidence {str(row['evidence'])[:12]}")
+    if row.get("intermediate"):
+        notes.append("recorded on the ruling, not walked")
+    return line + (f"  ({'; '.join(notes)})" if notes else "")
+
+
+def cmd_item_residue(args) -> int:
+    ctx = Context()
+    if args.add:
+        items = ctx.items
+        try:
+            item = items.add_residue(args.id, args.add)
+        except GateFailure as exc:
+            report_verdicts(exc.verdicts, args)
+            raise
+        _item_warnings(items)
+    elif args.clear:
+        item = ctx.items.clear_residue(args.id, args.clear)
+    else:
+        item = ctx.items.get(args.id)
+    text = "\n".join(f"  - {r}" for r in item.residue) or "  (nothing owed)"
+    return emit(args, item.to_dict(), f"{item.id} residue:\n{text}")
+
+
+def cmd_item_migrate(args) -> int:
+    """Move every item into another backend, read back before it is written
+    (ADR-018 D14). The source store and the manifest are left as they are:
+    the output names the settings the migration session switches last."""
+    ctx = Context()
+    root = Path(ctx.manifest.root).resolve()
+
+    def given(value):
+        return None if value is None else (ctx.cwd / value).resolve()
+
+    done = ctx.items.migrate(
+        args.to,
+        given(args.path),
+        closed_path=given(args.closed_path),
+        dry_run=args.dry_run,
+        reader=args.reader,
+    )
+    path = _spelled_under(root, done.path)
+    closed = None if done.closed_path is None else _spelled_under(root, done.closed_path)
+    settings = {"items.backend": done.backend, "items.path": path}
+    if closed is not None and done.closed:
+        settings["items.closed_path"] = closed
+    source = ctx.manifest.get("items.path") or "docs/backlog"
+    count = len(done.open) + len(done.closed)
+    stores = f"{len(done.open)} into {path}"
+    if done.closed:
+        stores += f", {len(done.closed)} closed into {closed}"
+    elif closed is not None:
+        stores += f"; no item is closed, so {closed} is not written"
+    lines = [
+        (
+            f"{'would migrate' if args.dry_run else 'migrated'} {count} item(s) from "
+            f"{ctx.manifest.get('items.backend', 'markdown')} ({source}) to "
+            f"{done.backend}: {stores}; every one read back field for field and "
+            f"history row for row"
+        )
+    ]
+    unconverted = [
+        {"id": u.id, "path": _spelled_under(root, u.path), "line": u.line, "reason": u.reason}
+        for u in done.unconverted
+    ]
+    if done.converted:
+        lines.append(
+            f"  {len(done.converted)} body(ies) converted from Markdown to rST "
+            "(ADR-018 ruling 20), read back as converted; "
+            + (
+                f"{len(unconverted)} construct(s) left as .. invariant-unconverted::, "
+                "which fail the strict build until rewritten:"
+                if unconverted
+                else "no construct left unconverted"
+            )
+        )
+        lines += [f"    {u['path']}:{u['line']}  {u['id']}  {u['reason']}" for u in unconverted]
+        lines += [f"    note: {note}" for note in done.notes]
+    if done.kept:
+        lines.append(f"  the target held {done.kept} item(s) already, kept as they were")
+    lines.append(
+        "  the source store and the manifest are unchanged. The switch, when the "
+        "migration session makes it (delete the source store in the same session):"
+    )
+    lines += [f"    {key}: {value}" for key, value in settings.items()]
+    payload = {
+        "backend": done.backend,
+        "path": path,
+        "closed_path": closed,
+        "open": list(done.open),
+        "closed": list(done.closed),
+        "kept": done.kept,
+        "settings": settings,
+        "dry_run": done.dry_run,
+        "converted": list(done.converted),
+        "unconverted": unconverted,
+        "notes": list(done.notes),
+    }
+    return emit(args, payload, "\n".join(lines))
+
+
+# -- memory ------------------------------------------------------------
+
+
+def cmd_memory_check(args) -> int:
+    ctx = Context()
+    report = ctx.memory.check()
+    text = "\n".join(f"  {p}" for p in report.problems()) or "  clean"
+    emit(args, {"count": report.count, "problems": report.problems(),
+                "clean": report.clean},
+         f"{report.count} memories\n{text}")
+    return EXIT_OK if report.clean else 1
+
+
+def cmd_memory_index(args) -> int:
+    ctx = Context()
+    ctx.memory.regenerate_index()
+    return emit(args, {"index": str(ctx.memory.index_path)},
+                f"regenerated {ctx.memory.index_path}")
+
+
+def cmd_memory_write(args) -> int:
+    ctx = Context()
+    body = Path(args.body_file).read_text(encoding="utf-8") if args.body_file else (args.body or "")
+    path = ctx.memory.write(args.name, args.description, args.type, body)
+    if ctx.manifest.get("memory.index_generated", True):
+        ctx.memory.regenerate_index()
+    return emit(args, {"path": str(path)}, f"wrote {path.name} and regenerated the index")
+
+
+# -- stats -------------------------------------------------------------
+
+
+def cmd_stats_refresh(args) -> int:
+    ctx = Context()
+    result = ctx.stats.refresh(force=args.force)
+    return emit(
+        args,
+        result,
+        f"{result['scanned']} host session(s): {result['rebuilt']} rebuilt, "
+        f"{result['unchanged']} unchanged",
+    )
+
+
+def cmd_stats_report(args) -> int:
+    ctx = Context()
+    stats = ctx.stats
+    text = stats.render()
+    if args.write:
+        path = stats.write_report()
+        return emit(
+            args,
+            {"path": str(path), "fingerprint": stats.fingerprint()},
+            f"wrote {path}",
+        )
+    return emit(args, {"report": text, "fingerprint": stats.fingerprint()}, text)
+
+
+def cmd_stats_show(args) -> int:
+    ctx = Context()
+    stats = ctx.stats
+    record = stats.require(args.session)
+    return emit(args, record.to_dict(), stats.render_session(args.session))
+
+
+def cmd_stats_archive(args) -> int:
+    ctx = Context()
+    record = ctx.stats.archive(args.session)
+    return emit(
+        args,
+        record.to_dict(),
+        f"{record.label} is archived — it now survives the host pruning its "
+        f"transcripts, and state collection will not drop it",
+    )
+
+
+def cmd_stats_check(args) -> int:
+    ctx = Context()
+    report = ctx.stats.check()
+    text = "\n".join(f"  {p}" for p in report.problems()) or "  clean"
+    emit(
+        args,
+        {
+            "records": report.records,
+            "problems": report.problems(),
+            "clean": report.clean,
+        },
+        f"{report.records} record(s)\n{text}",
+    )
+    return EXIT_OK if report.clean else 1
+
+
+# -- sweep -------------------------------------------------------------
+
+
+def _sweep_lines(report) -> list[str]:
+    """The text form of one sweep: what ran, what is new, what was filed."""
+    rec = report.record
+    executed = rec.executed if rec.executed is not None else "?"
+    failed = rec.failed if rec.failed is not None else "?"
+    lines = [
+        f"sweep {rec.seq} on {rec.branch} at {rec.head[:12]} ({rec.ran_on}), "
+        + f"commands.{rec.command}: {executed} executed, {failed} failing"
+    ]
+    if report.dry_run:
+        lines.append("dry run: nothing written, filed or committed")
+    if report.baseline:
+        lines.append(
+            "first sweep on this branch: a baseline only, nothing filed "
+            f"({len(report.current)} finding(s) recorded)"
+        )
+        lines += [f"  {key}" for key in report.current]
+    for entry in report.filed:
+        verb = f"filed {entry['item']}" if entry["item"] else "would file"
+        lines.append(f"  {verb}  {entry['key']}  {entry['title']}")
+    for entry in report.still_broken:
+        held = f" ({entry['item']}, {entry['status']})" if entry["item"] else ""
+        flag = "  REGRESSION: its item says fixed" if entry.get("regression") else ""
+        lines.append(f"  still broken  {entry['key']}{held}{flag}")
+    lines += [f"  recovered  {key}" for key in report.recovered]
+    lines += [f"  below the floor, no previous figure  {key}" for key in report.unbaselined]
+    if report.over_cap:
+        lines.append("  more new reds than the re-run cap: filed as one suite:red")
+    if report.outside_project:
+        lines.append(f"  {report.outside_project} coverage row(s) outside the project dropped")
+    lines += [f"  note: {note}" for note in report.notes]
+    if report.privacy:
+        lines.append("NOT committed: the privacy scan found personal data")
+        lines += [f"  {finding}" for finding in report.privacy]
+    elif report.committed:
+        lines.append(f"committed {report.record_path} as {str(report.commit)[:12]}")
+    elif not report.dry_run:
+        lines.append(f"NOT committed: {report.commit_error}")
+    return lines
+
+
+def cmd_sweep_run(args) -> int:
+    ctx = Context()
+    report = ctx.sweeps.run(dry_run=args.dry_run)
+    emit(args, report.to_dict(), "\n".join(_sweep_lines(report)))
+    if report.dry_run or report.committed:
+        return EXIT_OK
+    return 1
+
+
+def cmd_sweep_status(args) -> int:
+    ctx = Context()
+    status = ctx.sweeps.status(branch=args.branch)
+    last = status["last"]
+    if last is None:
+        text = f"no sweep recorded on {status['branch'] or 'a detached HEAD'}"
+    else:
+        text = (
+            f"last sweep: {last['seq']} on {last['branch']} at {last['head'][:12]}, "
+            f"{status['age_days']} day(s) ago ({last['ran_on']})"
+        )
+    if status["cadence_days"] is None:
+        text += "\nno sweep cadence configured"
+    else:
+        text += (
+            f"\ncadence {status['cadence_days']} day(s) + {status['grace_days']} "
+            f"grace: {'OVERDUE' if status['overdue'] else 'current'}"
+        )
+        # The rule's own verdict, so `status` and every gate say one thing.
+        # Asked of the branch `status` reads, which is the one a sweep runs on.
+        fresh = evaluate(
+            ["sweep.fresh"],
+            RuleContext(
+                manifest=ctx.manifest,
+                cwd=ctx.cwd,
+                session={"base": status["branch"]} if status["branch"] else None,
+            ),
+        )[0]
+        status["fresh"] = {"ok": fresh.verdict.ok, "message": fresh.verdict.message}
+        text += "\n" + fresh.render()
+    return emit(args, status, text)
+
+
+def cmd_sweep_show(args) -> int:
+    ctx = Context()
+    record = ctx.sweeps.show(args.record, branch=args.branch)
+    if record.failing is None:
+        failing = "unreadable"
+    else:
+        failing = ", ".join(record.failing) or "none"
+    outcome = "green" if record.passed else "red"
+    lines = [
+        f"sweep {record.seq} on {record.branch} at {record.head} ({record.ran_on})",
+        f"  previous: {record.previous or '(none: a baseline)'}",
+        f"  commands.{record.command}: {record.executed} executed, "
+        + f"{record.failed} failing, {outcome}",
+        f"  failing: {failing}",
+        f"  flaky: {', '.join(record.flaky) or 'none'}",
+        f"  files measured: {len(record.files)} (floor {record.floor:g}%)",
+        f"  filed: {', '.join(f['key'] + ' ' + str(f['item']) for f in record.filed) or 'none'}",
+        f"  still broken: {', '.join(s['key'] for s in record.still_broken) or 'none'}",
+        f"  recovered: {', '.join(record.recovered) or 'none'}",
+    ]
+    return emit(args, record.to_dict(), "\n".join(lines))
+
+
+# -- guidelines (ADR-012) ---------------------------------------------
+
+
+_RENDER_STATUS = {
+    "new": "{verb} {rel}",
+    "current": "{verb} {rel}: it is current",
+    "stale": "{verb} {rel}: it was rendered from an older ruleset",
+    "edited": "{verb} {rel}: its hand edits were replaced; change the ruleset instead",
+}
+
+
+_BLOCK_STATUS = {
+    "new": "{verb} the {name} block into {rel}",
+    "current": "{verb} the {name} block in {rel}: it is current",
+    "stale": "{verb} the {name} block in {rel}: it was rendered from an older ruleset",
+    "edited": "{verb} the {name} block in {rel}: its hand edits were replaced; "
+    "change the ruleset instead",
+}
+
+
+def host_instruction_files(manifest) -> tuple[str, ...]:
+    """The host adapter's instruction files for ``manifest``'s ``host.kind``.
+
+    The default of ``guidelines.instruction_files`` (ADR-012 D3). Nothing
+    below the CLI may import a host, so the CLI supplies it on every rule
+    context it builds, to the pipeline domain whose gates read it, and to the
+    oracle's gate cache. A host kind with no adapter has no default, and then
+    only configured files carry a block.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    # Under `records.agents: local` nothing of invariant's is committed, so no
+    # managed block goes into a tracked instruction file; the always rules
+    # reach the agent through the hook context (ADR-014 D11). A project that
+    # names its files in `guidelines.instruction_files` still gets them.
+    if manifest.get("records.agents") == "local":
+        return ()
+    if manifest.get("host.kind") == "claude_code":
+        return ClaudeCodeHost.INSTRUCTION_FILES
+    return ()
+
+
+def host_agent_plan(manifest):
+    """The host adapter's agent install plan for ``manifest``'s ``host.kind``.
+
+    A callable answering one ``AgentCopy`` per library agent, which is what
+    ``agents.rendered_current`` reads (ADR-012 D8, the A6 ruling 10). It is
+    ``ClaudeCodeHost.agent_copies``, read off the plan ``agents install
+    --dry-run`` prints. Nothing below the CLI may import a host, so the CLI
+    supplies it as it supplies ``host_instruction_files``: on every rule
+    context it builds, to the pipeline domain, and to the oracle's gate cache.
+    ``None`` for a host kind with no adapter, and then the rule is N/A and no
+    landing carries it.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    if manifest.get("host.kind") == "claude_code":
+        return ClaudeCodeHost(manifest.root, manifest=manifest).agent_copies
+    return None
+
+
+def _guidelines_domain(ctx: Context):
+    """The guidelines domain over the CLI's rule context, host default included,
+    its writes into a store's policy admitted by the docs lock."""
+    return _guidelines_domain_over(ctx.rule_context(), admit=_store_policy_writes(ctx))
+
+
+def _guidelines_domain_over(rule_context, admit=None):
+    from ..domains.guidelines import GuidelinesDomain
+
+    return GuidelinesDomain(rule_context, admit=admit)
+
+
+def _store_policy_writes(ctx: Context):
+    """What admits a CLI write into a store's policy (ADR-014 D5, increment
+    4c-2): the session domain's ``docs_write`` for the session this call
+    resolves to, proven or guessed, or for none."""
+
+    def admit(paths) -> None:
+        if ctx.manifest.store is None:
+            return
+        resolution = ctx.resolution_for_payload({})
+        session = resolution.session
+        ctx.sessions.docs_write(
+            session.id if session is not None else None, paths, proven=resolution.proven
+        )
+
+    return admit
+
+
+def _block_line(block, verb: str, overwrite_local: bool) -> str:
+    if block.status == "absent":
+        return (
+            f"no {block.name} block in {block.relpath}; render --insert "
+            f"{block.name} appends one"
+        )
+    if block.status == "edited" and not overwrite_local:
+        skip = "would skip" if verb == "would write" else "skipped"
+        return (
+            f"{skip} the {block.name} block in {block.relpath}: it was edited by "
+            f"hand; move the edit into the ruleset, or render --overwrite-local "
+            f"to replace it"
+        )
+    return _BLOCK_STATUS[block.status].format(verb=verb, name=block.name, rel=block.relpath)
+
+
+def cmd_guidelines_render(args) -> int:
+    ctx = Context(session_id=args.id)
+    result = _guidelines_domain(ctx).render(
+        dry_run=args.dry_run,
+        insert=tuple(args.insert or ()),
+        overwrite_local=args.overwrite_local,
+    )
+    if result.status == "no-ruleset":
+        text = "no guidelines ruleset configured; nothing to render"
+    else:
+        verb = "would write" if args.dry_run else "wrote"
+        text = _RENDER_STATUS[result.status].format(verb=verb, rel=result.relpath)
+        text += f" (ruleset {result.ruleset})"
+        rules = (
+            [
+                _RENDER_STATUS[result.rules_status].format(verb=verb, rel=result.rules_relpath)
+                + " (the rules as needs)"
+            ]
+            if result.rules_relpath is not None
+            else []
+        )
+        text = "\n".join(
+            [text, *rules, *(_block_line(b, verb, args.overwrite_local) for b in result.blocks)]
+        )
+    return emit(args, {
+        "status": result.status,
+        "written": result.written,
+        "dry_run": args.dry_run,
+        "path": result.relpath,
+        "ruleset": result.ruleset,
+        "rules": None if result.rules_relpath is None else {
+            "path": result.rules_relpath,
+            "status": result.rules_status,
+            "written": result.written,
+        },
+        "blocks": [
+            {"path": b.relpath, "block": b.name, "status": b.status, "written": b.written}
+            for b in result.blocks
+        ],
+    }, text)
+
+
+def cmd_guidelines_show(args) -> int:
+    if args.phase is not None:
+        return _guidelines_show_phase(args)
+    if args.files or args.touched:
+        from ..domains.guidelines import SelectionRefused
+
+        raise SelectionRefused(
+            "--files and --touched select within a phase, and no phase was named",
+            "add --phase design or --phase review",
+        )
+    shown = _guidelines_domain(Context(session_id=args.id)).show()
+    text = shown.text.rstrip("\n") if shown.text is not None else (
+        "no guidelines ruleset configured; nothing to show"
+    )
+    return emit(args, {"ruleset": shown.ruleset, "text": shown.text}, text)
+
+
+def _guidelines_show_phase(args) -> int:
+    """`guidelines show --phase`: the selected rules' full text (ADR-012 D7, A5.1)."""
+    shown = _guidelines_domain(Context(session_id=args.id)).select(
+        args.phase, files=tuple(args.files or ()), touched=args.touched
+    )
+    text = shown.text.rstrip("\n") if shown.text is not None else (
+        "no guidelines ruleset configured; nothing to show"
+    )
+    return emit(args, {
+        "phase": shown.phase,
+        "phases": list(shown.phases),
+        "ruleset": shown.ruleset,
+        "rules": list(shown.rules),
+        "files": list(shown.files),
+        "text": shown.text,
+    }, text)
+
+
+_BASELINE_STATUS = {
+    "new": "{verb} {rel}",
+    "current": "{verb} {rel}: it is current",
+    "changed": "{verb} {rel}",
+}
+
+
+def cmd_guidelines_baseline(args) -> int:
+    mode = "record" if args.record else "prune"
+    result = _guidelines_domain(Context(session_id=args.id)).baseline(
+        mode=mode, rules=tuple(args.rule or ()), dry_run=args.dry_run
+    )
+    if result.status == "no-ruleset":
+        text = f"no guidelines ruleset configured; nothing to {mode}"
+    else:
+        verb = "would write" if args.dry_run else "wrote"
+        noun = "entry" if result.entries == 1 else "entries"
+        text = _BASELINE_STATUS[result.status].format(verb=verb, rel=result.relpath)
+        text += f": {result.entries} {noun} (ruleset {result.ruleset})"
+        text = "\n".join([text, *(f"  {c.describe()}" for c in result.changes)])
+    return emit(args, {
+        "mode": mode,
+        "status": result.status,
+        "written": result.written,
+        "dry_run": args.dry_run,
+        "path": result.relpath,
+        "ruleset": result.ruleset,
+        "entries": result.entries,
+        "changes": [
+            {"rule": c.rule, "path": c.path, "fingerprint": c.fingerprint,
+             "before": c.before, "after": c.after, "reason": c.reason,
+             "moved_to": c.moved_to}
+            for c in result.changes
+        ],
+    }, text)
+
+
+def _cited_line(text: str):
+    """A ``--cite`` line number as an int, or as written so the plan names it.
+
+    Not converted by argparse: a usage error would exit 2 with argparse's
+    words, and a citation that is not two integers is a shape the plan
+    refuses like any other, exit 1, naming the entry.
+    """
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+@contextlib.contextmanager
+def _refusal_as_json(args):
+    """Under ``--json``, a refused submission still prints a document.
+
+    It names each problem's entry, rule and predicate apart from the prose
+    (A4 increment 7), so a host, a script or the conformance harness can
+    tell which predicate failed, as ``pipeline advance`` prints the gates it
+    was refused on. The refusal is raised on, so the exit is still 1.
+    """
+    from ..core.rules import VerdictRefused
+
+    try:
+        yield
+    except VerdictRefused as exc:
+        if getattr(args, "json", False):
+            print(json.dumps(
+                {"recorded": [], "refused": [r.record() for r in exc.refusals]}, indent=2
+            ))
+        raise
+
+
+def _submit_verdicts(args, submission) -> int:
+    """Check and record a submission through the guidelines domain (ADR-012 D5).
+
+    The session is resolved by working directory, like every command an
+    agent calls (BUG_082 is why it is not by hook payload); the domain
+    refuses without one, and the plan without a running pipeline.
+
+    Both forms print the submission's token, ``token <hex>`` in the text
+    and ``token`` under ``--json``. That output is the link a host reads to
+    stamp the acting agent on these records (A4.8, ruling c), so its
+    spelling is a contract with ``hosts/claude_code._submission_tokens``.
+    """
+    from ..domains.guidelines import GuidelinesDomain
+
+    ctx = Context(session_id=args.id)
+    with _refusal_as_json(args):
+        result = GuidelinesDomain(ctx.rule_context(), pipelines=ctx.pipelines).submit_verdicts(
+            submission
+        )
+    noun = "verdict" if len(result.records) == 1 else "verdicts"
+    lines = [
+        (
+            f"recorded {len(result.records)} {noun} (ruleset {result.ruleset}, "
+            f"state {result.state}, token {result.token})"
+        ),
+        *(f"  {r['rule']} {r['status']}" for r in result.records),
+    ]
+    return emit(args, {
+        "recorded": list(result.records),
+        "ruleset": result.ruleset,
+        "state": result.state,
+        "token": result.token,
+    }, "\n".join(lines))
+
+
+def cmd_guidelines_verdict(args) -> int:
+    """One verdict, built into a list of one so it takes the bulk path's checks."""
+    entry: dict = {"rule": args.rule, "status": args.status}
+    if args.cite:
+        entry["citations"] = [
+            {"path": path, "lines": [_cited_line(first), _cited_line(last)]}
+            for path, first, last in args.cite
+        ]
+    if args.test:
+        entry["tests"] = list(args.test)
+    if args.na_condition is not None:
+        entry["na_condition"] = args.na_condition
+    if args.note is not None:
+        entry["note"] = args.note
+    return _submit_verdicts(args, [entry])
+
+
+def cmd_guidelines_verdicts_submit(args) -> int:
+    """A JSON list of D5 objects, recorded whole or refused whole (DN-11)."""
+    from ..core.rules import VerdictRefused
+
+    path = Path(args.file)
+    with _refusal_as_json(args):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise VerdictRefused.unreadable(
+                f"submission: {args.file} could not be read ({exc.__class__.__name__}); "
+                f"fix: name a UTF-8 JSON file"
+            ) from exc
+        try:
+            submission = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise VerdictRefused.unreadable(
+                f"submission: {args.file} is not JSON (line {exc.lineno}: {exc.msg}); "
+                f"fix: write a JSON list of verdict objects"
+            ) from exc
+    return _submit_verdicts(args, submission)
+
+
+def cmd_guidelines_verdicts_show(args) -> int:
+    """How each owed judgement guideline stands, as the gate sees it. Writes nothing.
+
+    One read, ``core.rules.read_standings``, and the gate's verdict over it,
+    so the command and ``guidelines.verdicts_complete`` cannot disagree. It
+    exits 0 whenever it can show the standings, whatever the gate would
+    say, as ``pipeline gates`` does; ``invariant check`` is the gate's exit.
+    """
+    from ..core.rules import Evaluated, standings_verdict
+
+    rc = Context(session_id=args.id).rule_context()
+    read = _guidelines_domain_over(rc).verdict_standings()
+    gate = Evaluated(VERDICTS_RULE, rc.manifest.rule_level(VERDICTS_RULE),
+                     standings_verdict(read))
+    if read.status == "no-ruleset":
+        text = "no guidelines ruleset configured; no verdict is owed"
+    elif read.status == "no-pipeline":
+        text = "no pipeline is running for this session, so no verdict is owed"
+    else:
+        where = f"(ruleset {read.ruleset}, state {read.state})"
+        lines = [
+            f"{len(read.standings)} judgement guideline(s) owed a verdict by this "
+            f"change {where}" if read.standings
+            else f"no judgement guideline is owed a verdict by this change {where}",
+            *(f"  {s.standing:<8} {s.describe()}" for s in read.standings),
+        ]
+        if read.unowed:
+            lines.append("recorded on guidelines the change no longer owes:")
+            lines.extend(f"  {u.describe()}" for u in read.unowed)
+        if read.unused:
+            lines.append("grants on judgement guidelines that pass nothing here:")
+            lines.extend(f"  {u.describe()}" for u in read.unused)
+        lines.append(gate.render())
+        text = "\n".join(lines)
+    return emit(args, {
+        "status": read.status,
+        "ruleset": read.ruleset,
+        "state": read.state,
+        "owed": [s.record() for s in read.standings],
+        "not_owed": [
+            {"rule": u.rule, "status": u.status, "recorded": u.recorded, "reason": u.reason}
+            for u in read.unowed
+        ],
+        "unused_grants": [
+            {"rule": u.rule, "reason": u.reason, "why": u.why} for u in read.unused
+        ],
+        "gate": _verdict_payload(gate),
+    }, text)
+
+
+# -- rules, checks, privacy -------------------------------------------
+
+
+def cmd_step_run(args) -> int:
+    """Run one of the project's steps by hand, and record it (ADR-021 D3).
+
+    The way a step is run again once whatever stopped it is fixed. It runs in
+    the tree its point names: the session's worktree, or the main checkout
+    for ``session.before_handoff``; with no session, the checkout here. Exits
+    0 on a pass or an owed run, 1 on a fail.
+    """
+    from ..core import steps as steps_reader
+    from ..domains.steps import StepsDomain
+
+    ctx = Context(session_id=args.id)
+    session = ctx.current_session(strict=False)
+    domain = StepsDomain(ctx.manifest, ctx.store)
+    record = domain.run(
+        args.name, session=session.to_dict() if session else None, cwd=ctx.cwd
+    )
+    line = steps_reader.last_line(record["tail"])
+    code = record["exit_code"]
+    how = f"exit {code}" if code is not None else "no exit"
+    text = [(
+        f"step {args.name}: {record['outcome']} at {steps_reader.short(record['commit'])} "
+        f"({how}, {record['duration']:.1f}s) in {record['cwd']}"
+    )]
+    if line:
+        text.append(f"  {line}")
+    if record["outcome"] == steps_reader.OWED:
+        text.append("  owed: recorded as a debt, which the next pass of this step clears")
+    if record["cleared"]:
+        text.append(f"  cleared {record['cleared']} debt(s)")
+    emit(args, {"run": record}, "\n".join(text))
+    return 1 if record["outcome"] == steps_reader.FAIL else EXIT_OK
+
+
+def cmd_step_list(args) -> int:
+    """Each declared step: its point, its level, its last outcome and debts."""
+    from ..core import steps as steps_reader
+    from ..domains.steps import StepsDomain
+
+    ctx = Context()
+    rows = StepsDomain(ctx.manifest, ctx.store).listing()
+    if not rows:
+        return emit(args, {"steps": []}, "  no steps are declared under steps")
+    width = max(len(row["name"]) for row in rows)
+    lines = []
+    for row in rows:
+        last = row["last"]
+        how = (
+            f"last {last['outcome']} at {steps_reader.short(last.get('commit'))}"
+            if last else "never run"
+        )
+        owed = f", {row['debts']} debt(s) open" if row["debts"] else ""
+        lines.append(f"  {row['name']:<{width}}  {row['level']:<5}  {row['at']}  {how}{owed}")
+    return emit(args, {"steps": rows}, "\n".join(lines))
+
+
+def cmd_rules_list(args) -> int:
+    ctx = Context()
+    rows = [
+        (spec.id, ctx.manifest.rule_level(spec.id).value, ",".join(spec.events) or "-", spec.summary)
+        for spec in rules_for(ctx.manifest)
+    ]
+    width = max(len(r[0]) for r in rows)
+    # A project's own step names where it was declared (ADR-021 D3); a
+    # registered rule's line is as it was.
+    declared = {
+        i: ctx.manifest.rule_source(i) for i, *_ in rows if step_name(i) is not None
+    }
+    text = "\n".join(
+        f"  {i:<{width}}  {lvl:<6} {ev:<14} {s}"
+        + (f"  [{declared[i]}]" if i in declared else "")
+        for i, lvl, ev, s in rows
+    )
+    return emit(args, {"rules": [
+        {"id": i, "level": lvl, "events": ev, "summary": s,
+         **({"provenance": declared[i]} if i in declared else {})}
+        for i, lvl, ev, s in rows]}, text)
+
+
+def cmd_check(args) -> int:
+    ctx = Context(session_id=args.id)
+    rule_ids = args.rules or [spec.id for spec in rules_for(ctx.manifest)]
+    verdicts = evaluate(rule_ids, ctx.rule_context())
+    verbose = getattr(args, "verbose", False)
+    text = "\n".join(
+        v.render() for v in verdicts if worth_reporting(v, verbose)
+    )
+    emit(args, {"verdicts": verdicts_payload(verdicts)}, text or "  nothing to report")
+    return 1 if any(v.blocks for v in verdicts) else EXIT_OK
+
+
+def cmd_privacy_scan(args) -> int:
+    from ..core.privacy import PrivacyScanner
+
+    ctx = Context()
+    scanner = PrivacyScanner.from_manifest(ctx.manifest)
+    findings = []
+    for typed in (Path(p) for p in args.paths):
+        # Scanned absolute, so a path-scoped allow entry compares the place
+        # the file is in the project, not the spelling relative to wherever
+        # the command was typed; reported in the spelling it was asked by.
+        absolute = typed.absolute()
+        findings += [
+            replace(f, path=typed / f.path.relative_to(absolute))
+            for f in scanner.scan_paths([absolute])
+        ]
+    text = "\n".join(f"  {f.describe(reveal=args.reveal)}" for f in findings) or "  clean"
+    emit(args, {"findings": [
+        {"pattern": f.pattern, "path": str(f.path), "line": f.line,
+         "column": f.column, "match": f.raw if args.reveal else f.redacted}
+        for f in findings]}, text)
+    return 1 if findings else EXIT_OK
+
+
+# -- state maintenance -------------------------------------------------
+
+
+def cmd_state_show(args) -> int:
+    ctx = Context()
+    if args.session:
+        session = ctx.sessions.require(args.session)
+        pipeline = ctx.pipelines.current(session.id)
+        payload = {"session": session.to_dict(),
+                   "pipeline": pipeline.to_dict() if pipeline else None}
+    else:
+        payload = {
+            "state_root": str(ctx.manifest.state_root),
+            "registry": ctx.store.read("registry.json", {"sessions": {}}),
+            "sessions": [s.to_dict() for s in ctx.sessions.list()],
+        }
+    return emit(args, payload, json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+def cmd_state_repair(args) -> int:
+    ctx = Context()
+    actions = ctx.sessions.repair(dry_run=args.dry_run)
+    text = "\n".join(f"  {a}" for a in actions) or "  nothing to repair"
+    prefix = "would repair:\n" if args.dry_run else "repaired:\n"
+    return emit(args, {"actions": actions, "dry_run": args.dry_run}, prefix + text)
+
+
+# -- oracle ------------------------------------------------------------
+#
+# The oracle's commands read and write the user-level index, not a project's
+# state, so none of them builds a Context: they work from any directory,
+# including one no manifest governs.
+
+
+def _project_index():
+    from ..oracle.home import oracle_home
+    from ..oracle.index import ProjectIndex
+
+    return ProjectIndex(oracle_home())
+
+
+def _project_line(entry) -> str:
+    return f"  {entry.name}  {entry.root}  (via {entry.via})\n      state root {entry.key}"
+
+
+def cmd_oracle_projects_list(args) -> int:
+    index = _project_index()
+    entries = index.list()
+    text = "\n".join(_project_line(e) for e in entries) or (
+        f"  no projects registered in {index.home}"
+    )
+    return emit(
+        args,
+        {"home": str(index.home), "projects": [e.to_dict() for e in entries]},
+        text,
+    )
+
+
+def cmd_oracle_projects_add(args) -> int:
+    manifest = Manifest.locate(Path(args.path) if args.path else Path.cwd())
+    entry, added = _project_index().register(manifest, via="manual")
+    verb = "registered" if added else "already registered:"
+    return emit(
+        args,
+        {"added": added, "project": entry.to_dict()},
+        f"{verb} {entry.name}\n{_project_line(entry)}",
+    )
+
+
+def cmd_oracle_projects_remove(args) -> int:
+    entry = _project_index().remove(args.key)
+    return emit(
+        args,
+        {"removed": entry.to_dict()},
+        f"removed {entry.name} from the oracle index; nothing in the project "
+        f"was touched\n{_project_line(entry)}",
+    )
+
+
+def cmd_oracle_projects_prune(args) -> int:
+    pruned = _project_index().prune(dry_run=args.dry_run)
+    verb = "would prune" if args.dry_run else "pruned"
+    text = "\n".join(
+        f"  {verb} {e.name} — no manifest at {e.root or '(no root recorded)'}"
+        for e in pruned
+    ) or "  nothing to prune"
+    return emit(
+        args,
+        {"pruned": [e.to_dict() for e in pruned], "dry_run": args.dry_run},
+        text,
+    )
+
+
+def _oracle_cache():
+    """The scan cache, with Claude Code's answers about hosts injected.
+
+    A seam, like ``_handoff_closer``: the suite replaces it, so no test reads
+    the real transcripts or asks ``ps`` about a real ``claude``. The oracle
+    defines the probe's shape and imports nothing from ``hosts/``; this is
+    where the two meet (ADR-007 D11).
+    """
+    from ..hosts.claude_code_launch import ClaudeCodeProbe
+    from ..oracle.scan import ScanCache
+
+    return ScanCache(probe=ClaudeCodeProbe())
+
+
+def _oracle_gates():
+    """The gate cache ``oracle list`` and ``oracle watch`` add detail from.
+
+    A seam beside ``_oracle_cache``, so a test can count or stall the
+    evaluations. The real one evaluates over an inert store and writes nothing.
+    """
+    from functools import partial
+
+    from ..oracle.gates import GateCache, evaluate_row
+
+    return GateCache(
+        evaluate=partial(
+            evaluate_row,
+            instruction_files_for=host_instruction_files,
+            agent_plan_for=host_agent_plan,
+        )
+    )
+
+
+def _oracle_row_lines(row: dict) -> list[str]:
+    from ..oracle.dashboard import status_flag
+    from ..oracle.recommend import row_label
+
+    signals = row["signals"]
+    # The flag column: an alert, a marker only, or nothing. One spelling with
+    # the dashboard's status column.
+    flag = status_flag(row).ljust(5)
+    said = "; ".join(f"{s['kind']}: {s['detail']}" for s in signals) or "-"
+    lines = [f"  {flag}  {row_label(row):<40} {said}"]
+    lines += _oracle_docs_lock_lines(row.get("docs_lock"))
+    advice = row["recommendation"]
+    if advice:
+        command = " ".join(advice["argv"])
+        where = f"  (in {advice['cwd']})" if advice["cwd"] else ""
+        lines.append(f"         next  {advice['label']}" + (f": {command}{where}" if command else ""))
+        if advice.get("detail"):
+            lines.append(f"               {advice['detail']}")
+    return lines
+
+
+def _oracle_docs_lock_lines(docs: dict | None) -> list[str]:
+    """A session row's docs-lock units and queue (ADR-014 D5, increment 4b)."""
+    if not docs:
+        return []
+    lines = []
+    for held in docs.get("held") or []:
+        queue = [q for q in held.get("queue") or [] if q]
+        line = f"         docs  holds {held['unit']} for {_held_for(held.get('held_seconds') or 0)}"
+        if queue:
+            line += f"; queue: {', '.join(queue)}"
+        if held.get("new"):
+            line += " (passed to it; not yet seen)"
+        if held.get("stale"):
+            line += f"; STALE: {held['stale']}"
+        lines.append(line)
+    waiting = docs.get("waiting")
+    if waiting:
+        lines.append(
+            f"         docs  queued for {waiting['unit']} at position {waiting['position']} "
+            f"behind {waiting['holder']}"
+        )
+    return lines
+
+
+def cmd_oracle_list(args) -> int:
+    """Every live session in every registered project, with its next step.
+
+    A one-shot scan: read-only over each project's state root, one error row
+    per project that cannot be read, and no Context, so it runs from anywhere.
+    The idle sessions' gates are evaluated once, for the recommendation's
+    detail, and the wait for them is bounded by the gate cache's timeout.
+    """
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    index = _project_index()
+    snapshots = scan_all(index, cache=_oracle_cache(), select=args.project)
+    now = time.time()
+    gates = _oracle_gates()
+    document = assess(snapshots, now, gates=gates.refresh(snapshots, now, wait=gates.timeout))
+    document["home"] = str(index.home)
+
+    lines: list[str] = []
+    for project in document["projects"]:
+        entry = project["project"]
+        lines.append(f"{entry['name']}  {entry['root']}  ({project['elapsed']:.2f}s)")
+        rows = project["rows"]
+        if not rows:
+            lines.append("  nothing live")
+        for row in rows:
+            lines.extend(_oracle_row_lines(row))
+    source = next((p.get("host_processes") for p in document["projects"]), None)
+    if source and not source.get("used"):
+        lines.append(f"host process records: {source.get('detail')}")
+    skew = document["oracle"]["skew"]
+    if skew is not None:
+        unread = ", ".join(document["oracle"]["unread"]) or "none"
+        lines.append(f"oracle OLDER than the installed invariant: {skew['detail']}; "
+                     f"not read: {unread}")
+    text = "\n".join(lines) or f"  no projects registered in {index.home}"
+    return emit(args, document, text)
+
+
+def _oracle_scan_document(index, cache, gates) -> dict:
+    """One in-process read of the machine: the ``oracle list --json`` document.
+
+    The gates are asked without waiting: a dashboard refreshes, so what
+    finishes after this read is the next one's detail.
+    """
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    snapshots = scan_all(index, cache=cache)
+    now = time.time()
+    document = assess(snapshots, now, gates=gates.refresh(snapshots, now, wait=0.0))
+    document["home"] = str(index.home)
+    return document
+
+
+def _real_oracle_runner():
+    from ..oracle.actions import run_subprocess
+
+    return run_subprocess
+
+
+def _oracle_runner():
+    """What a confirmed ``run`` step of the dashboard runs through.
+
+    A seam, like ``_oracle_notifier``: the suite replaces it with a recorder,
+    so no test runs a recommended command.
+    """
+    return _real_oracle_runner()
+
+
+def _oracle_launch_plan(step, stage: bool):
+    """The ``session handoff`` launch plan for a dashboard step that resumes."""
+    from ..hosts import claude_code_launch as launch
+    from ..oracle.actions import terminal_request
+
+    name, note = terminal_request(step)
+    claude = launch.resolve_claude() or launch.CLAUDE_BINARY
+    return launch.plan_launch(claude, name, note, step.cwd, stage=stage)
+
+
+def _oracle_terminal(step) -> str:
+    """Open a new host session for a dashboard ``terminal`` step.
+
+    The same launch as ``session handoff``, through ``_open_claude_window``.
+    Unlike a handoff it ends no host and records no note; the first prompt
+    asks the new session to run the step's command.
+    """
+    from ..oracle.actions import terminal_request
+
+    name, note = terminal_request(step)
+    plan, pid = _open_claude_window(name, note, step.cwd)
+    return f"opened a Terminal window: claude (pid {pid}) is running {plan.name} in {plan.cwd}"
+
+
+def _oracle_actions():
+    """The dashboard's actions, with the host facts they need injected.
+
+    The oracle names the shapes; the host markers to strip and the terminal
+    launcher are Claude Code's, joined here (ADR-007 D18).
+    """
+    from ..hosts.claude_code_launch import without_host_markers
+    from ..oracle.actions import Actions
+
+    return Actions(
+        runner=_oracle_runner(),
+        environ=lambda: os.environ,
+        strip=without_host_markers,
+        terminal=_oracle_terminal,
+        preview=lambda step: _oracle_launch_plan(step, stage=False).by_hand,
+    )
+
+
+def _real_oracle_host_seams():
+    from .host_close import claude_code_seams
+
+    return claude_code_seams()
+
+
+def _oracle_host_seams():
+    """What ``oracle close-host`` reads and does to a real Claude process.
+
+    Claude Code's per-process records and ``ps`` through its probe, ``kill
+    0``, SIGTERM, the parent chain that says whether Terminal owns the window,
+    and the AppleScript that closes its tab. A seam, like ``_handoff_closer``:
+    the suite replaces it everywhere, so no test signals a process or runs
+    ``osascript`` (IDEA_027 increment 6).
+    """
+    return _real_oracle_host_seams()
+
+
+def cmd_oracle_close_host(args) -> int:
+    """End a leftover Claude window, then close its Terminal tab, after checking again.
+
+    The panel's "Close…" runs this (ADR-009 D15). Every fact the confirm
+    showed is checked again here, and a live session listing the host in any
+    registered project refuses it. One SIGTERM, a wait, never a SIGKILL; the
+    tab is closed only once Claude has gone and only its shell is left.
+    """
+    from ..oracle.closehost import (
+        CloseRequest,
+        attention_refusal,
+        binding_refusal,
+        close_host,
+    )
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    read: list[dict] = []
+
+    def fresh() -> dict:
+        if not read:
+            snapshots = scan_all(_project_index(), cache=_oracle_cache())
+            read.append(assess(snapshots, time.time()))
+        return read[0]
+
+    def bound() -> str | None:
+        return binding_refusal(fresh(), args.host_id)
+
+    def vouched() -> str | None:
+        return attention_refusal(fresh(), args.host_id, args.pid, args.start)
+
+    request = CloseRequest(args.host_id, args.pid, args.start, args.tty)
+    lines = close_host(request, _oracle_host_seams(), bound, vouched)
+    payload = {"host_id": args.host_id, "pid": args.pid, "tty": args.tty, "lines": lines}
+    return emit(args, payload, "\n".join(lines))
+
+
+def _real_oracle_names_in_use() -> set[str]:
+    from ..hosts import claude_code_launch as launch
+    from ..oracle.scan import pid_exists
+
+    try:
+        records = launch.ClaudeCodeProbe().host_processes()
+    except (OSError, ValueError):
+        records = []
+    return launch.names_in_use(records, launch.ProcessTableWatch().table(), pid_exists)
+
+
+def _oracle_names_in_use() -> set[str]:
+    """The session names live Claude windows hold now, for ``start-session``.
+
+    Claude Code's per-process records whose process is alive, and the
+    ``--name`` and Remote Control values in the process table. A seam, like
+    ``_handoff_successor``: the suite replaces it everywhere, so no test reads
+    the real ``~/.claude`` or the process table.
+    """
+    return _real_oracle_names_in_use()
+
+
+def _start_prepare(index, selector: str, label: str | None, prompt: str | None, now: float,
+                   project: dict | None = None):
+    """What ``oracle start-session`` would start: ``(entry, result)``, nothing launched.
+
+    The one place a start is decided, for the command and the page alike
+    (ADR-009 D16). ``selector`` is matched as ``projects remove`` matches it,
+    so a path the index does not name is refused; so is a root that lost its
+    manifest and a project whose host is not Claude Code. ``label`` ``None``
+    takes the time; a blank ``prompt`` is none, and one that reads as a flag
+    is refused when the plan is built. The facts come from ``project``, one
+    project of the ``assess`` document, else from a scan of this project now.
+    """
+    from ..hosts import claude_code_launch as launch
+    from ..oracle import startsession
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    entry = index.match(selector)
+    if not entry.has_manifest:
+        raise UsageError(
+            f"{entry.name} is registered, but {entry.root or 'its root'} no longer "
+            f"carries a manifest; nothing was launched. `invariant oracle projects "
+            f"prune` drops it"
+        )
+    kind = Manifest.locate(Path(entry.root)).get("host.kind")
+    if kind != "claude_code":
+        raise UsageError(
+            f"oracle start-session starts a Claude Code session, and {entry.name}'s "
+            f"host.kind is {kind!r}, not 'claude_code'"
+        )
+    label = label if label is not None else startsession.default_label(now)
+    name = startsession.session_name(entry.name, label, _oracle_names_in_use())
+    prompt = prompt if prompt and prompt.strip() else None
+    if project is None:
+        snapshots = scan_all(index, cache=_oracle_cache(), select=entry.key)
+        projects = assess(snapshots, now)["projects"]
+        project = projects[0] if projects else {}
+    facts = startsession.start_facts(project, startsession.checkout_changes(entry.root))
+    preview = launch.plan_launch(
+        launch.resolve_claude() or launch.CLAUDE_BINARY, name, prompt, entry.root, stage=False
+    )
+    return entry, {
+        "project": entry.to_dict(),
+        "name": name,
+        "label": label,
+        "cwd": preview.cwd,
+        "argv": list(preview.argv),
+        "prompt": prompt,
+        "by_hand": preview.by_hand,
+        "facts": facts,
+        "dry_run": False,
+        "successor": None,
+    }
+
+
+def _start_launch(result: dict) -> tuple[dict, list[str]]:
+    """Open the window ``_start_prepare`` described: ``(result, lines)``.
+
+    Through ``_open_claude_window``, the one launcher, in the entry's recorded
+    root. Raises when the window did not open, with the line to run by hand.
+    """
+    name = result["name"]
+    plan, pid = _open_claude_window(name, result["prompt"], result["project"]["root"])
+    lines = [
+        f"  opened a new Terminal window in {plan.cwd}:",
+        f"    {shlex.join(plan.argv)}",
+        f"  claude is running as {name} (pid {pid}); Remote Control lists it by that name",
+    ]
+    return {**result, "argv": list(plan.argv), "successor": {"pid": pid}}, lines
+
+
+def _oracle_starter(index):
+    """The page's and the dashboard's way into ``oracle start-session``'s own path.
+
+    ``prepare`` and ``launch`` are ``_start_prepare`` and ``_start_launch``,
+    so a start from the phone or the TUI's ``n`` is decided, refused and
+    launched exactly as one from a terminal, through the same seams the suite
+    replaces (ADR-009 D16).
+    """
+    from ..oracle.startsession import Starter
+
+    def prepare(selector: str, label: str | None, prompt: str | None, project: dict) -> dict:
+        return _start_prepare(index, selector, label, prompt, time.time(), project)[1]
+
+    def launch(prepared: dict) -> str:
+        return "\n".join(_start_launch(prepared)[1])
+
+    return Starter(prepare=prepare, launch=launch)
+
+
+def cmd_oracle_start_session(args) -> int:
+    """Open a new Claude window, Remote Control on, in a registered project (ADR-009 D16).
+
+    The project is one the oracle's index names, by key, root or name; nothing
+    else is launchable. The window runs ``claude --name <name>
+    --remote-control <name> [prompt]`` in the project's recorded root, its
+    main checkout, in Claude's default permission mode. No invariant session
+    is created: Claude starts one itself, as it does in any window. Before the
+    launch it reports the two facts the confirm shows, the Claude windows
+    already open in the project and the main checkout's uncommitted changes;
+    neither blocks the start. The panel's "New session" sheet runs the same
+    two steps (``_oracle_starter``).
+    """
+    from ..hosts import claude_code_launch as launch
+    from ..oracle import startsession
+
+    entry, result = _start_prepare(_project_index(), args.project, args.name, args.prompt,
+                                   time.time())
+    result["dry_run"] = bool(args.dry_run)
+    head = [
+        f"start {result['name']} in {entry.name}"
+        + (" — dry run, nothing launched" if args.dry_run else ""),
+        *(f"  {line}" for line in startsession.fact_lines(result["facts"])),
+    ]
+    if args.dry_run:
+        lines = [*head, f"  command: {result['by_hand']}"]
+        if launch.resolve_claude() is None:
+            lines.append(
+                f"  note: {launch.CLAUDE_BINARY} is not on PATH; a real run refuses until it is"
+            )
+        return emit(args, result, "\n".join(lines))
+
+    result, opened = _start_launch(result)
+    return emit(args, result, "\n".join([*head, *opened]))
+
+
+def cmd_oracle_tui(args) -> int:
+    """The live dashboard. Needs the ``invariant[oracle]`` extra (Textual).
+
+    Reads the watcher's snapshot while it is fresh, else scans in-process
+    behind a banner. Every action is confirmed first. ``n`` starts a new
+    Claude window through ``oracle start-session``'s own two steps
+    (``_oracle_starter``), as the phone's "New session" sheet does.
+    """
+    try:
+        from ..oracle import tui
+    except ImportError as exc:
+        # Textual, or the rich it brings with it; any other failure is a bug
+        # and is not disguised as a missing extra.
+        if (exc.name or "").split(".")[0] not in ("textual", "rich"):
+            raise
+        raise UsageError(
+            "the oracle dashboard needs Textual, which ships as the [oracle] extra:\n"
+            "    pip install 'invariant[oracle]'\n"
+            "  Installed as a uv tool, add it to that environment instead:\n"
+            "    uv tool install --with textual <how invariant was installed>"
+        ) from exc
+    from ..oracle.dashboard import load
+
+    index = _project_index()
+    cache = _oracle_cache()
+    gates = _oracle_gates()
+    app = tui.OracleApp(
+        lambda: load(index.home, time.time(), lambda: _oracle_scan_document(index, cache, gates)),
+        _oracle_actions(),
+        starter=_oracle_starter(index),
+    )
+    app.run()
+    return EXIT_OK
+
+
+def _real_oracle_notifier():
+    from ..hosts.claude_code_launch import applescript_string
+    from ..oracle.notify import OsascriptNotifier
+
+    return OsascriptNotifier(quote=applescript_string)
+
+
+def _oracle_notifier():
+    """The notifier ``oracle watch`` and ``notify-test`` post through.
+
+    A seam, like ``_oracle_cache``: the suite replaces it with a recorder, so
+    no test posts a real notification. The oracle defines the notifier and
+    imports nothing from ``hosts/``; the AppleScript quoting it needs is the
+    host launcher's, handed in here (ADR-007 D13).
+    """
+    return _real_oracle_notifier()
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _oracle_tick_lines(result) -> list[str]:
+    lines = [
+        f"  ALERT  {a['project']}  {a['subject']}  {a['kind']}: {a['detail']}"
+        + ("" if a["notified"] else "  (not notified)")
+        for a in result.alerts
+    ]
+    lines.append(
+        f"tick: {_plural(result.rows, 'row')}, {_plural(len(result.alerts), 'new alert')}, "
+        f"{result.elapsed:.2f}s; snapshot {result.snapshot_path}"
+    )
+    return lines
+
+
+def cmd_oracle_watch(args) -> int:
+    """Tick: scan, write the snapshot, alert once per rising edge.
+
+    ``--once`` runs one tick and lets a failure surface as this command's
+    error. Without it the loop runs until interrupted, a failed tick is logged
+    to stderr and the next one runs, and a tick prints only when it has news
+    (with ``--json``, one line per tick).
+    """
+    from ..oracle.signals import Thresholds
+    from ..oracle.watcher import Watcher
+
+    if not args.interval > 0:
+        raise UsageError(f"--interval must be positive, not {args.interval:g}")
+    if not args.stuck_minutes > 0:
+        raise UsageError(f"--stuck-minutes must be positive, not {args.stuck_minutes:g}")
+    gates = _oracle_gates()
+    watcher = Watcher(
+        _project_index(),
+        None if args.no_notify else _oracle_notifier(),
+        interval=args.interval,
+        cache=_oracle_cache(),
+        thresholds=Thresholds(stuck_minutes=args.stuck_minutes),
+        gates=gates,
+        # One tick that exits is a one-shot like `oracle list`: it waits for
+        # the gates. The loop never does; what finishes late is the next
+        # tick's.
+        gate_wait=gates.timeout if args.once else 0.0,
+    )
+    if args.once:
+        result = watcher.tick()
+        return emit(args, result.to_dict(), "\n".join(_oracle_tick_lines(result)))
+
+    def report(result) -> None:
+        if getattr(args, "json", False):
+            print(json.dumps(result.to_dict(), sort_keys=True, default=str), flush=True)
+        elif result.alerts:
+            print("\n".join(_oracle_tick_lines(result)), flush=True)
+
+    try:
+        watcher.run(on_tick=report)
+    except KeyboardInterrupt:
+        return EXIT_OK
+    if watcher.restarting:
+        return _oracle_restart()()
+    return EXIT_OK
+
+
+def _real_oracle_restart():
+    from ..oracle.build import reexec
+
+    return reexec
+
+
+def _oracle_restart():
+    """How ``oracle watch`` and ``oracle web --wait`` run themselves again.
+
+    ``() -> exit status``: the real one replaces this process with the same
+    command from the installed code, and returns only when it could not, with
+    the status that has launchd's ``KeepAlive`` start the agent again
+    (BUG_089). A seam: the suite replaces it with a recorder, so no test
+    replaces the test runner.
+    """
+    return _real_oracle_restart()
+
+
+def _real_oracle_installer():
+    from ..oracle.launchd import LaunchdInstaller, agents_dir
+
+    return LaunchdInstaller(agents_dir(), os.getuid())
+
+
+def _oracle_installer():
+    """The LaunchAgent installer ``oracle install``, ``uninstall``, ``status`` and
+    ``doctor`` reach launchd through.
+
+    A seam, like ``_oracle_notifier``: the suite replaces it with an installer
+    over a temporary directory and a recording launchctl, so no test loads or
+    writes a real agent.
+    """
+    return _real_oracle_installer()
+
+
+def _real_oracle_web_installer():
+    from ..oracle.launchd import WEB_LABEL, LaunchdInstaller, agents_dir
+
+    return LaunchdInstaller(agents_dir(), os.getuid(), label=WEB_LABEL)
+
+
+def _oracle_web_installer():
+    """The installer for the web page's LaunchAgent, ``dev.invariant.oracle.web``.
+
+    A seam, like ``_oracle_installer``: the suite replaces it with one over
+    the same temporary directory and recording launchctl.
+    """
+    return _real_oracle_web_installer()
+
+
+def _argv_line(argv: list[str]) -> str:
+    return " ".join(argv)
+
+
+def cmd_oracle_install(args) -> int:
+    """Install the LaunchAgent that keeps ``oracle watch`` running.
+
+    ``--web`` installs the web page's agent instead (ADR-008 D15).
+    ``--dry-run`` prints the plist and the launchctl calls and changes nothing.
+    """
+    from ..oracle.home import HOME_ENV, oracle_home
+    from ..oracle.launchd import plist_for, search_path
+
+    if args.web:
+        return _install_web(args)
+    if args.port is not None:
+        raise UsageError("--port is the web page's; use it with --web")
+    interval = 5.0 if args.interval is None else args.interval
+    if not interval > 0:
+        raise UsageError(f"--interval must be positive, not {interval:g}")
+    plist = plist_for(
+        os.path.abspath(sys.executable),
+        oracle_home(),
+        interval,
+        path=search_path(),
+        pin_home=bool(os.environ.get(HOME_ENV)),
+    )
+    result = _oracle_installer().install(plist, dry_run=args.dry_run)
+    steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    if args.dry_run:
+        text = (
+            f"would write {result.plist_path}:\n{result.xml.decode()}\n"
+            f"would run:\n{steps}"
+        )
+    else:
+        verb = "replaced" if result.was_loaded else "installed"
+        text = (
+            f"{verb} the oracle agent: {result.plist_path}\n{steps}\n"
+            f"  watcher log: {plist['StandardOutPath']}"
+        )
+    return emit(args, result.to_dict(), text)
+
+
+def _install_web(args) -> int:
+    """``oracle install --web``: the agent that keeps ``oracle web --wait`` running."""
+    from ..oracle.home import HOME_ENV, oracle_home
+    from ..oracle.launchd import WEB_PROGRAMS, search_path, web_plist_for
+    from ..oracle.web import DEFAULT_PORT
+
+    if args.interval is not None:
+        raise UsageError("--interval is the watcher's; the web page has none")
+    port = _web_port(DEFAULT_PORT if args.port is None else args.port)
+    python = os.path.abspath(sys.executable)
+    plist = web_plist_for(
+        python,
+        oracle_home(),
+        port,
+        # The interpreter's own directory holds the console script an action runs.
+        path=search_path(programs=WEB_PROGRAMS, extra=(os.path.dirname(python),)),
+        pin_home=bool(os.environ.get(HOME_ENV)),
+    )
+    result = _oracle_web_installer().install(plist, dry_run=args.dry_run)
+    steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    if args.dry_run:
+        return emit(args, result.to_dict(),
+                    f"would write {result.plist_path}:\n{result.xml.decode()}\n"
+                    f"would run:\n{steps}")
+    verb = "replaced" if result.was_loaded else "installed"
+    lines = [
+        f"{verb} the oracle web page agent: {result.plist_path}",
+        steps,
+        (f"  it serves on this Mac's Tailscale address, port {port}, and waits for "
+         f"Tailscale when it is not up"),
+        f"  web log: {plist['StandardOutPath']}",
+        "  pair a device: invariant oracle web pair --name phone",
+    ]
+    if not _oracle_installer().plist_path.exists():
+        lines.append("  note: the watcher agent is not installed, so the page scans on each "
+                     "refresh and nothing notifies; 'invariant oracle install' adds it")
+    return emit(args, result.to_dict(), "\n".join(lines))
+
+
+def _uninstall_text(name: str, result, dry_run: bool) -> str:
+    steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    present = result.plist_path.exists()
+    if not result.steps and not present and not result.removed:
+        return f"the {name} is not installed; nothing to do ({result.plist_path})"
+    if dry_run:
+        return "would run:\n" + (steps or "  nothing (not loaded)") + (
+            f"\nwould remove {result.plist_path}" if present else ""
+        )
+    return "\n".join(
+        filter(None, [steps, f"  removed {result.plist_path}" if result.removed else ""])
+    )
+
+
+def _uninstall_web(dry_run: bool):
+    """Boot the web agent out, remove its plist and the serving loop's report."""
+    from ..oracle.home import oracle_home
+    from ..oracle.index import HomeStore
+    from ..oracle.webservice import WEB_STATE_FILE
+
+    result = _oracle_web_installer().uninstall(dry_run=dry_run)
+    if not dry_run:
+        # launchd's SIGTERM ends the loop before it can take its report down.
+        HomeStore(oracle_home()).delete(WEB_STATE_FILE)
+    return result
+
+
+def cmd_oracle_uninstall(args) -> int:
+    """Boot the LaunchAgents out and remove their plists; ``--web`` the page's only."""
+    web = _uninstall_web(args.dry_run)
+    web_text = _uninstall_text("oracle web page agent", web, args.dry_run)
+    if args.web:
+        return emit(args, web.to_dict(), web_text)
+    result = _oracle_installer().uninstall(dry_run=args.dry_run)
+    text = _uninstall_text("oracle agent", result, args.dry_run)
+    return emit(args, {**result.to_dict(), "web": web.to_dict()}, f"{text}\n{web_text}")
+
+
+def cmd_oracle_status(args) -> int:
+    """Whether the agent is installed and loaded, and how old the snapshot is."""
+    from ..oracle.build import stamp
+    from ..oracle.home import oracle_home
+    from ..oracle.watcher import STALE_INTERVALS, snapshot_status
+
+    agent = _oracle_installer().status()
+    snapshot = snapshot_status(oracle_home(), time.time())
+    if not agent.installed:
+        agent_line = f"not installed ({agent.plist_path})"
+    else:
+        agent_line = (
+            f"installed, {'loaded' if agent.loaded else 'NOT loaded'} ({agent.plist_path})"
+        )
+    lines = [f"  agent        {agent_line}", *_agent_lines(agent, "interpreter")]
+    if not snapshot["exists"]:
+        lines.append(f"  snapshot     no snapshot yet ({snapshot['path']})")
+    else:
+        freshness = (
+            f"STALE: older than {STALE_INTERVALS} intervals" if snapshot["stale"] else "fresh"
+        )
+        lines.append(
+            f"  snapshot     {freshness}; written {snapshot['age']:.0f}s ago, "
+            f"interval {snapshot['interval']:g}s ({snapshot['path']})"
+        )
+    installed = stamp()
+    watcher_build = _watcher_build(snapshot, installed)
+    if watcher_build["text"] is not None:
+        lines.append(f"  build        {watcher_build['text']}")
+    web, web_lines = _oracle_web_status(installed)
+    build = {"installed": installed.to_dict(), "watcher": watcher_build, "web": web.pop("build")}
+    return emit(args, {"agent": agent.to_dict(), "snapshot": snapshot, "web": web,
+                       "build": build},
+                "\n".join(lines + web_lines))
+
+
+def _watcher_build(snapshot: dict, installed) -> dict:
+    """Whether the watcher behind a fresh snapshot runs the installed invariant.
+
+    ``older`` is ``None`` when no watcher is behind the snapshot: a stale one
+    says nothing about a running process. A fresh snapshot with no stamp was
+    written by a build older than stamps, so it is older (BUG_089).
+    """
+    from ..oracle.build import behind, build_text
+
+    if not snapshot["exists"] or snapshot["stale"]:
+        return {"older": None, "text": None}
+    reported = snapshot["build"] if snapshot["build"] is not None else {}
+    skew = snapshot["skew"]
+    if behind(reported, installed) or not isinstance(skew, dict):
+        return {"older": bool(behind(reported, installed)),
+                "text": build_text(reported, installed, "the watcher")}
+    return {"older": True, "text": (f"OLDER than the installed invariant: {skew.get('detail')}; "
+                                    f"'invariant oracle install' restarts it")}
+
+
+def _web_build(page: dict, installed) -> dict:
+    """Whether the process serving the page runs the installed invariant."""
+    from ..oracle.build import behind, build_text
+
+    if not page["running"]:
+        return {"older": None, "text": None}
+    reported = page["build"] if page["build"] is not None else {}
+    return {"older": bool(behind(reported, installed)),
+            "text": build_text(reported, installed, "the page")}
+
+
+def _agent_lines(agent, label: str) -> list[str]:
+    lines = []
+    if agent.error:
+        lines.append(f"  {label:<12} {agent.error}")
+    elif agent.interpreter is not None:
+        state = "ok" if agent.interpreter_exists else "MISSING"
+        lines.append(f"  {label:<12} {state}  {agent.interpreter}")
+    return lines
+
+
+def _oracle_web_status(installed) -> tuple[dict, list[str]]:
+    """``oracle status``'s web half: the agent, the page, the devices, the last action.
+
+    The body's ``build`` is the page's build line; the caller moves it out.
+    """
+    from ..oracle.home import oracle_home
+    from ..oracle.webservice import cert_text, last_action_text, page_text, web_status
+
+    agent = _oracle_web_installer().status()
+    page = web_status(oracle_home())
+    web_build = _web_build(page, installed)
+    body = {"agent": agent.to_dict(), "page": page, "build": web_build}
+    if not agent.installed and not page["exists"]:
+        return body, [(f"  web agent    not installed ({agent.plist_path}); "
+                       f"'invariant oracle install --web' serves the page on the tailnet")]
+    loaded = "loaded" if agent.loaded else "NOT loaded"
+    state = f"installed, {loaded}" if agent.installed else "not installed"
+    port = f", port {agent.port}" if agent.port is not None else ""
+    lines = [f"  web agent    {state}{port} ({agent.plist_path})"]
+    lines += _agent_lines(agent, "web python")
+    devices = (
+        _plural(page["devices"], "paired device") if page["devices"] is not None
+        else f"cannot read: {page['devices_error']}"
+    )
+    lines.append(f"  web page     {page_text(page)}")
+    if web_build["text"] is not None:
+        lines.append(f"  web build    {web_build['text']}")
+    if page["certificate"] is not None:
+        lines.append(f"  certificate  {cert_text(page, time.time())}")
+    lines += [
+        f"  devices      {devices}",
+        f"  last action  {last_action_text(page['last_action'])}",
+    ]
+    return body, lines
+
+
+def cmd_oracle_notify_test(args) -> int:
+    """Post one notification through the same seam the watcher uses."""
+    from ..oracle.notify import Notification, NotifyError
+
+    try:
+        _oracle_notifier().notify(
+            Notification(
+                title="invariant oracle",
+                message="notify-test: oracle alerts will reach you here",
+            )
+        )
+    except NotifyError as exc:
+        raise NotifyError(
+            f"the test notification was not delivered: {exc}\n"
+            f"  On macOS, check that notifications are allowed for the app "
+            f"osascript posts as (System Settings > Notifications)."
+        ) from exc
+    return emit(args, {"sent": True}, "sent one notification")
+
+
+def _real_oracle_web_addresses():
+    from ..oracle import web
+
+    return lambda: web.discover_addresses(web.run_program)
+
+
+def _oracle_web_addresses():
+    """How ``oracle web`` finds this Mac's Tailscale addresses.
+
+    A seam, like ``_oracle_installer``: the suite replaces it with one that
+    finds no tailnet until a test names one, so no test asks the real
+    ``tailscale`` or binds a real tailnet address (ADR-008).
+    """
+    return _real_oracle_web_addresses()
+
+
+def _real_oracle_web_server():
+    from ..oracle.web import WebServer
+
+    return WebServer
+
+
+def _oracle_web_server():
+    """What ``oracle web`` listens through: ``WebServer``'s constructor.
+
+    ``(app, addresses, port, *, served=None)`` to a server. A seam: the suite
+    replaces it with ``RecordingWeb``, which binds nothing and takes the same
+    signature, so a call the real constructor would misread fails there too.
+    """
+    return _real_oracle_web_server()
+
+
+def _real_oracle_web_certificates():
+    import functools
+
+    from ..oracle import tls, web
+
+    run = functools.partial(web.run_program, timeout=tls.CERT_TIMEOUT)
+    return lambda: tls.issue(run)
+
+
+def _oracle_web_certificates():
+    """How ``oracle web`` gets its HTTPS certificate: ``() -> Issued``.
+
+    A seam, beside ``_oracle_web_addresses``: the real one asks Tailscale's
+    CLI, through stdout. The suite replaces it with a recorder that hands back
+    a test certificate or refuses, so no test asks Tailscale (IDEA_026).
+    """
+    return _real_oracle_web_certificates()
+
+
+def _real_oracle_web_wait():
+    def wait(seconds: float) -> bool:
+        time.sleep(seconds)
+        return False
+
+    return wait
+
+
+def _oracle_web_wait():
+    """How ``oracle web --wait`` pauses between looks at the tailnet.
+
+    ``(seconds) -> stop``. A seam: the suite's recorder runs a test's script
+    and then stops the loop, so no test sleeps.
+    """
+    return _real_oracle_web_wait()
+
+
+def _web_port(port: int) -> int:
+    if not 1 <= port <= 65535:
+        raise UsageError(f"--port must be between 1 and 65535, not {port}")
+    return port
+
+
+def cmd_oracle_web(args) -> int:
+    """Serve the dashboard on this Mac's Tailscale address, in the foreground.
+
+    The page and its JSON, to paired devices only, and the TUI's confirm-first
+    actions, each confirmed on the page and audited. Refuses to start with no
+    Tailscale address unless ``--allow-loopback``. ``--wait``, the agent's
+    mode, waits for one instead and follows the tailnet (ADR-008 D16).
+    """
+    import threading
+
+    from ..oracle.dashboard import load
+    from ..oracle.devices import DeviceStore
+    from ..oracle.tls import Certificates
+    from ..oracle.web import LOOPBACK, WebApp, choose_bind
+    from ..oracle.webactions import AuditLog, RemoteActions
+
+    port = _web_port(args.port)
+    if args.wait and args.allow_loopback:
+        raise UsageError("--wait waits for a Tailscale address; --allow-loopback is for a "
+                         "test in the foreground, without it")
+    addresses = (
+        [] if args.wait
+        else choose_bind(_oracle_web_addresses()(), allow_loopback=args.allow_loopback)
+    )
+    index = _project_index()
+    cache = _oracle_cache()
+    gates = _oracle_gates()
+    devices = DeviceStore(index.home)
+    # The page's reads and an action's fresh read share one scan cache.
+    reading = threading.Lock()
+
+    def scan() -> dict:
+        with reading:
+            return _oracle_scan_document(index, cache, gates)
+
+    remote = RemoteActions(_oracle_actions(), scan, AuditLog(index.home),
+                           starter=_oracle_starter(index))
+    certificates = Certificates(index.home, _oracle_web_certificates())
+
+    def listener(bound: list[str], served=None):
+        insecure = None
+        if served is None and bound != [LOOPBACK]:
+            insecure = _plain_http_warning(certificates.error)
+        app = WebApp(devices, lambda: load(index.home, time.time(), scan), bound,
+                     remote=remote, served=served, insecure=insecure)
+        return _oracle_web_server()(app, bound, port, served=served)
+
+    if args.wait:
+        return _serve_always(listener, index.home, port, certificates, cache.build, remote)
+    served = None if addresses == [LOOPBACK] else _served_once(certificates)
+    server = listener(addresses, served)
+    urls = server.start()
+    paired = len(devices.devices())
+    lines = [f"serving the oracle on {url}" for url in urls]
+    if addresses == [LOOPBACK]:
+        lines.append("  loopback only: no Tailscale address was found; this Mac alone can open it")
+    elif served is not None:
+        lines.append(f"  over HTTPS as {served.name}; its certificate expires "
+                     f"{_expires(served.not_after)}")
+    else:
+        lines.append(f"  {_plain_http_warning(certificates.error)}")
+    lines.append(
+        f"  {_plural(paired, 'paired device')}; pair one with 'invariant oracle web pair'. "
+        f"Ctrl-C stops it."
+    )
+    print("\n".join(lines), flush=True)
+    try:
+        server.serve()
+    finally:
+        server.close()
+    return EXIT_OK
+
+
+def _plain_http_warning(error: str | None) -> str:
+    return (f"PLAIN HTTP: no HTTPS certificate from Tailscale ({error or 'none yet'}). "
+            f"See 'invariant oracle status' and the guide, 'The oracle on your phone'.")
+
+
+def _expires(not_after: float) -> str:
+    from ..oracle.tls import expires_text
+
+    return expires_text(not_after)
+
+
+def _served_once(certificates):
+    """The foreground's certificate, asked for once; ``None`` means plain HTTP."""
+    from ..oracle.tls import CertError, Served
+
+    certificate = certificates.ensure()
+    if certificate is None:
+        return None
+    try:
+        return Served(certificate, certificates.context(certificate))
+    except CertError:
+        return None
+
+
+def _serve_always(listener, home, port: int, certificates, build, remote) -> int:
+    """``oracle web --wait``: serve whenever there is a tailnet, under the agent.
+
+    It runs itself again once invariant changes under it and the page's
+    running actions have finished (BUG_089).
+    """
+    from ..oracle.webservice import WebService
+
+    service = WebService(_oracle_web_addresses(), listener, home, port=port,
+                         wait=_oracle_web_wait(), certificates=certificates,
+                         build=build, remote=remote)
+    try:
+        service.run()
+    except KeyboardInterrupt:
+        return EXIT_OK
+    if service.restarting:
+        return _oracle_restart()()
+    return EXIT_OK
+
+
+def _minutes(seconds: float) -> str:
+    if seconds >= 60 and seconds % 60 == 0:
+        return _plural(int(seconds // 60), "minute")
+    return f"{seconds:g} seconds"
+
+
+def cmd_oracle_web_pair(args) -> int:
+    """Issue a one-time pairing code, and the link a phone opens to use it."""
+    from ..oracle.devices import DeviceStore, display_code
+    from ..oracle.home import oracle_home
+    from ..oracle.tls import read_certificate
+    from ..oracle.web import LOOPBACK, tailnet_addresses, url_for
+
+    port = _web_port(args.port if args.port is not None else _serving_port())
+    found = tailnet_addresses(_oracle_web_addresses()())
+    if not found and args.allow_loopback:
+        found = [LOOPBACK]
+    pairing = DeviceStore(oracle_home()).issue(args.name, ttl=args.ttl)
+    shown = display_code(pairing.code)
+    path = f"/pair?code={shown}"
+    # Once a certificate is kept, the page is served over HTTPS at its name,
+    # and nowhere else (ADR-008 D22).
+    certificate = read_certificate(oracle_home())
+    if found and found != [LOOPBACK] and certificate is not None and (
+            certificate.not_after > time.time()):
+        links = [f"https://{certificate.name}:{port}{path}"]
+    else:
+        links = [url_for(address, port, path) for address in found]
+    lines = [
+        f"pairing code for {pairing.name}: {shown}",
+        f"  it works once, for {_minutes(args.ttl)}",
+    ]
+    if links:
+        lines.append("  open on the device, while the page is served "
+                     "('invariant oracle install --web', or 'invariant oracle web'):")
+        lines.extend(f"    {link}" for link in links)
+    else:
+        lines.append(
+            "  no Tailscale address on this Mac yet; start Tailscale, run "
+            "'invariant oracle web', and open its address with /pair on the device"
+        )
+    return emit(
+        args,
+        {"code": pairing.code, "name": pairing.name, "expires": pairing.expires,
+         "links": links},
+        "\n".join(lines),
+    )
+
+
+def _serving_port() -> int:
+    """The port the page serves on: the loop's report, else the agent's, else the default."""
+    from ..oracle.home import oracle_home
+    from ..oracle.web import DEFAULT_PORT
+    from ..oracle.webservice import web_status
+
+    reported = web_status(oracle_home())["port"]
+    if isinstance(reported, int) and not isinstance(reported, bool):
+        return reported
+    installed = _oracle_web_installer().status().port
+    return installed if installed is not None else DEFAULT_PORT
+
+
+def cmd_oracle_web_devices(args) -> int:
+    """The paired devices, and how many codes are still pending."""
+    from ..oracle.devices import DeviceStore
+    from ..oracle.home import oracle_home
+
+    store = DeviceStore(oracle_home())
+    devices = store.devices()
+    pending = store.pending()
+    text = "\n".join(f"  {d.id}  {d.name}  paired {d.paired}" for d in devices) or (
+        "  no paired devices"
+    )
+    if pending:
+        text += f"\n  {_plural(pending, 'pairing code')} not yet used"
+    return emit(args, {"devices": [d.to_dict() for d in devices], "pending": pending}, text)
+
+
+def cmd_oracle_web_revoke(args) -> int:
+    """Forget one paired device; the others keep working."""
+    from ..oracle.devices import DeviceStore
+    from ..oracle.home import oracle_home
+
+    device = DeviceStore(oracle_home()).revoke(args.id)
+    return emit(
+        args,
+        {"revoked": device.to_dict()},
+        f"revoked {device.id} ({device.name}); its next request gets nothing",
+    )
+
+
+# -- host bridge -------------------------------------------------------
+
+
+#: The hook events whose payload names a tool call, and so possibly a path.
+_TOOL_EVENTS = frozenset({"pre-tool-use", "post-tool-use"})
+
+
+def cmd_hook(args) -> int:
+    from ..hosts.claude_code import (
+        DEGRADED_KEY,
+        HOOK_LOCK_SECONDS,
+        ClaudeCodeHost,
+        is_probe,
+    )
+
+    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    body: object = None
+    try:
+        body = json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
+        pass
+    host_session_id = body.get("session_id") if isinstance(body, dict) else None
+    # The manifest is resolved from the project the HOST is working in, not
+    # from wherever this process happens to be standing (AUD-04). The host
+    # guarantees CLAUDE_PROJECT_DIR to its hooks; the working directory it
+    # does not, and a hook firing with cwd outside the project used to find
+    # no manifest and return an empty verdict — every gate silently off, with
+    # evidence recording into whichever repository the cwd resolved to.
+    manifest_start: Path | None = None
+    located: Manifest | None = None
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        try:
+            found = Manifest.locate(Path(project_dir), required=False)
+        except ManifestError:
+            # A project is there and does not load: resolving from it again
+            # below raises the same refusal, which the degraded answer names.
+            manifest_start = Path(project_dir)
+        else:
+            if found.located:
+                manifest_start, located = Path(project_dir), found
+    try:
+        ctx = Context(
+            required=True,
+            host_session_id=host_session_id,
+            manifest_start=manifest_start,
+            manifest=located,
+            probe=is_probe(body),
+            pipeline_lock_timeout=HOOK_LOCK_SECONDS,
+        )
+    except InvariantError as exc:
+        # No manifest found anywhere. A shim only exists where `init` put it,
+        # so this is a misconfiguration, not an ungoverned repository — but a
+        # hook must still exit zero with valid JSON, because a pre-tool-use
+        # hook that fails is a *deny* and a missing manifest must never wedge
+        # the host. What it may not do is stay silent: an empty verdict here
+        # read as "the gate passed", and enforcement was off with no marker.
+        print(json.dumps(_hook_degraded(args.event, exc)))
+        return EXIT_OK
+    host = ClaudeCodeHost(ctx.manifest.root)
+    # The probe writes nothing anywhere (BUG_059): not the index, and not the
+    # attention sidecar, whose pid fallback would also read the process table.
+    probe = isinstance(ctx.store, InertStore)
+    try:
+        # A tool call is handled in the project its path names, when that is
+        # a live session worktree of another project (ADR-011). Everything
+        # else here — the attention sidecar, the SessionStart registration —
+        # stays with `ctx`, the host's own project, because it describes the
+        # host and the host lives where it is rooted.
+        work = (
+            ctx.for_payload(body)
+            if args.event in _TOOL_EVENTS and isinstance(body, dict)
+            else ctx
+        )
+        # What the event says before any work runs is recorded before the
+        # work: the host cancels a hook at its timeout, and a slow Stop
+        # closeout must not take the turn's end down with it (BUG_095).
+        arrival = None if probe else host.arrival_attention(args.event)
+        if arrival is not None:
+            _record_attention(
+                ctx,
+                host_session_id,
+                lambda store, hid, pid: _apply_signal(store, hid, pid, arrival),
+            )
+        response = host.handle(args.event, raw, work)
+    except Exception as exc:  # noqa: BLE001 - see below
+        # The same reasoning as the guard above, extended to the part that does
+        # the work. A pre-tool-use hook that exits non-zero is a *deny*, so any
+        # unhandled failure in here does not merely lose enforcement — it
+        # refuses every tool call in the project, including the ones that would
+        # diagnose and repair the cause. That is a deadlock, and it is strictly
+        # worse than the unenforced gate it was trying to protect.
+        #
+        # A block is a verdict, and verdicts come back as a return value. An
+        # exception is this library breaking, and this library breaking must
+        # never be spelled "the agent may not act".
+        degraded = _hook_degraded(args.event, exc)
+        if not probe:
+            error = degraded[DEGRADED_KEY]
+            _record_attention(
+                ctx,
+                host_session_id,
+                lambda store, hid, pid: store.degraded(
+                    hid, args.event, error, pid_source=pid
+                ),
+            )
+        print(json.dumps(degraded))
+        return EXIT_OK
+    if not probe:
+        if args.event == "session-start":
+            _register_on_session_start(ctx)
+        else:
+            _docs_heartbeat(work)
+        signal = host.attention
+        if signal is not None:
+            _record_attention(
+                ctx,
+                host_session_id,
+                lambda store, hid, pid: _apply_signal(store, hid, pid, signal),
+            )
+    print(json.dumps(response))
+    return EXIT_OK
+
+
+def _docs_heartbeat(ctx: Context) -> None:
+    """The hooks' heartbeat on a store's docs lease (ADR-014 D5, increment 4b).
+
+    Every hook call of a session that holds a lease refreshes it, at most once
+    a minute, so a holder whose host is working is never stale. SessionStart
+    is left out, as every write is on that path. An in-repo project costs one
+    attribute read; nothing here can change a response, and a failure is
+    swallowed: a missed heartbeat is one the next call writes.
+    """
+    if ctx.manifest.store is None:
+        return
+    try:
+        session = ctx.current_session(strict=False)
+        if session is not None:
+            ctx.sessions.docs_heartbeat(session.id)
+    except Exception:  # noqa: BLE001, S110 - see the docstring
+        pass
+
+
+# -- the attention sidecar ---------------------------------------------
+#
+# The host says what an event means for its person's attention; the oracle
+# owns the record; this is where the two meet, so the host adapter never
+# imports the oracle (ADR-007 D6). Every write goes through
+# `_record_attention`, and nothing it does can change a response.
+
+
+def _attention_process_lookup():
+    """The ``(ppid, comm)`` reader the pid fallback walks with.
+
+    A seam, like ``_handoff_closer``: the suite replaces it everywhere, so no
+    hook a test runs reads the real process table.
+    """
+    from ..hosts.claude_code_launch import parent_process
+
+    return parent_process
+
+
+def _attention_pid_source():
+    """The host pid to record, given the one already recorded (ADR-007 D7).
+
+    ``CLAUDE_PID`` when the hook inherited it — it costs nothing and is right
+    even when a resumed host kept its session id under a new process. Without
+    it, a pid already recorded stands, and only a host with none is found by
+    walking the parent chain to a ``claude`` process: one ``ps`` per hop, once
+    per host.
+    """
+    from ..hosts.claude_code_launch import find_host_pid, host_pid
+
+    def source(current: int | None) -> int | None:
+        return (
+            host_pid(os.environ)
+            or current
+            or find_host_pid(os.getppid(), _attention_process_lookup())
+        )
+
+    return source
+
+
+def _apply_signal(store, host_id: str, pid_source, signal) -> None:
+    """Apply the sidecar write an :class:`AttentionSignal` calls for."""
+    from ..hosts import claude_code as host
+
+    if signal.op == host.ATTENTION_WAITING:
+        store.wait(host_id, signal.kind, signal.message, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_ANSWERED:
+        store.answered(host_id, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_PROMPT:
+        store.prompt(host_id, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_TURN_STOPPED:
+        store.turn_stopped(host_id, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_TURN_ENDED:
+        store.turn_ended(host_id, signal.rules, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_HOST_ENDED:
+        store.host_ended(host_id)
+    elif signal.op == host.ATTENTION_BACKGROUND_STARTED:
+        for task in signal.tasks:
+            store.background_started(host_id, task, signal.kind, pid_source=pid_source)
+    elif signal.op == host.ATTENTION_BACKGROUND_DONE:
+        store.background_done(host_id, signal.tasks, pid_source=pid_source)
+
+
+def _record_attention(ctx: Context, host_session_id, write) -> None:
+    """Apply one sidecar write for ``host_session_id``, swallowing any failure.
+
+    The one guarded path every attention write takes (ADR-007 D10). Nothing
+    here reads or returns the hook's response — the one write made before it
+    is computed, a Stop's arrival, cannot see it either — so a sidecar that
+    cannot be written costs the oracle one event and never costs the host a
+    verdict, an exit status or a degraded marker. A payload with no host id
+    has no record to write.
+    """
+    if not host_session_id:
+        return
+    try:
+        from ..oracle.attention import AttentionStore
+
+        write(AttentionStore(ctx.store), host_session_id, _attention_pid_source())
+    except Exception:  # noqa: BLE001, S110 - see the docstring
+        pass
+
+
+def _bound_host(session) -> str | None:
+    """The live host session bound to ``session``, if it has one."""
+    if session is None or getattr(session, "host_ended", False):
+        return None
+    return getattr(session, "host_session_id", None) or None
+
+
+def _record_cli_refusal(ctx: Context, session, verdicts) -> None:
+    """Record a gate refusal on the sidecar of the host the session is bound to.
+
+    "Gate blocked" in the oracle means a refusal somebody actually met, never
+    a fresh evaluation by the watcher (ADR-007 D8). No pid is recorded: the
+    command may have been run by somebody other than the bound host.
+    """
+    _record_attention(
+        ctx,
+        _bound_host(session),
+        lambda store, hid, pid: store.refused(
+            hid, [v.rule_id for v in verdicts if v.blocks]
+        ),
+    )
+
+
+def _lift_cli_refusal(ctx: Context, session) -> None:
+    """A gated CLI transition went through, so its earlier refusal no longer stands."""
+    _record_attention(
+        ctx, _bound_host(session), lambda store, hid, pid: store.refusal_lifted(hid)
+    )
+
+
+def _register_on_session_start(ctx: Context) -> None:
+    """Record the project in the oracle's index the first time a host starts here.
+
+    Read first: a known project is answered by one small read and takes no
+    lock, so the common case writes nothing. Never raised and never reported:
+    the response is already computed, and this is bookkeeping for a different
+    program — a user-level index that cannot be read or written must not turn
+    a session start into a degraded one. Skipped for ``doctor``'s probe, which
+    writes nothing anywhere (BUG_059); the caller checks the inert store.
+    """
+    from ..oracle.home import oracle_home
+    from ..oracle.index import ProjectIndex
+
+    try:
+        ProjectIndex(oracle_home()).register(ctx.manifest, via="session-start")
+    except Exception:  # noqa: BLE001, S110 - see the docstring
+        pass
+
+
+def _hook_degraded(event: str, exc: Exception) -> dict:
+    """Report a broken hook as context, never as a decision."""
+    from ..hosts.claude_code import DEGRADED_KEY, EVENTS, _context_response
+
+    text = (
+        f"invariant: the {event} hook could not evaluate and was skipped — "
+        f"enforcement is OFF for this call.\n"
+        f"  {type(exc).__name__}: {exc}\n"
+        f"  Diagnose with 'invariant doctor'. Gates are not being checked "
+        f"until this is fixed."
+    )
+    response = _context_response(EVENTS.get(event, "PreToolUse"), text)
+    # A machine-readable marker, because this path exits zero with valid JSON
+    # by design — it must, or a broken library would deny every tool call in
+    # the project. That makes "the hook ran" indistinguishable from "the hook
+    # worked" to anything checking from outside, and an entire session went
+    # unenforced behind exactly that gap.
+    response[DEGRADED_KEY] = f"{type(exc).__name__}: {exc}"
+    return response
+
+
+def cmd_context(args) -> int:
+    # --id is not a convenience here. Every ambiguity message tells the caller
+    # to pass it, and 'context' is the first command they reach for after
+    # reading one; without it the advice is a dead end.
+    ctx = Context(session_id=args.id)
+    from ..hosts.claude_code import build_context
+
+    text = build_context(ctx)
+    return emit(args, {"context": text}, text)
+
+
+# -- parser ------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    # A parent carrying the global flags, attached to every leaf command as
+    # well as the root, so that `--json` works in the position a person
+    # naturally types it rather than only before the subcommand.
+    # SUPPRESS rather than a False default: the same flag is attached at every
+    # level, and a plain default would have the subparser overwrite a value the
+    # root parser already set — so `invariant --json init` would silently print
+    # text. With SUPPRESS the attribute is written only where the flag actually
+    # appeared, and the root's set_defaults survives.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS,
+        help="machine-readable output",
+    )
+    common.add_argument(
+        "--verbose", "-v", action="store_true", default=argparse.SUPPRESS
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="invariant",
+        description="Deterministic, scripted state for agent workflows.",
+        parents=[common],
+    )
+    # One `--id` for every command that resolves a session, inherited rather
+    # than declared per command, so the spelling and the help cannot drift and
+    # the parser-walk test can tell the shared flag from an item's or a new
+    # session's id. Per subcommand, not global: `invariant <command> --id <id>`
+    # is the form every message already gives, and `Bash(invariant:*)` covers
+    # it where a `INVARIANT_SESSION_ID` prefix is not (IDEA_042).
+    session_arg = argparse.ArgumentParser(add_help=False)
+    session_arg.add_argument("--id", help=SESSION_ID_HELP)
+    # Deliberately NO set_defaults(json=False) here. `parents=` copies action
+    # objects by reference, and set_defaults reaches into every action with a
+    # matching dest — so setting a default on the root would overwrite SUPPRESS
+    # on every subparser's copy of the same action, reinstating the bug above.
+    # Readers use getattr(args, "json", False) instead.
+    class _Sub(argparse._SubParsersAction):
+        """Attaches the common flags to every subparser, at every depth."""
+
+        def add_parser(self, name, **kwargs):  # type: ignore[override]
+            parents = list(kwargs.pop("parents", []))
+            if common not in parents:
+                parents.append(common)
+            created = super().add_parser(name, parents=parents, **kwargs)
+            # Register on the child too, so nested groups (`config show`) also
+            # inherit rather than silently losing the flags one level down.
+            created.register("action", "parsers", _Sub)
+            return created
+
+    parser.register("action", "parsers", _Sub)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # init / doctor / config
+    p = sub.add_parser(
+        "init", help="write a manifest; install host hooks and agents only when asked"
+    )
+    p.add_argument("--root")
+    p.add_argument("--name")
+    p.add_argument("--ecosystem")
+    p.add_argument("--profile")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--host-install",
+        action="store_true",
+        help="install invariant's hooks and agents in this project (asked, default no)",
+    )
+    p.set_defaults(func=cmd_init)
+
+    sub.add_parser(
+        "doctor", help="check the installation", parents=[session_arg]
+    ).set_defaults(func=cmd_doctor)
+
+    p = sub.add_parser(
+        "uninstall", help="remove the shims and settings entries init installed"
+    )
+    p.add_argument("--remove-assets", action="store_true",
+                   help="also remove library agents, commands and skills")
+    p.add_argument("--remove-manifest", action="store_true",
+                   help="also remove .claude/invariant.yaml")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_uninstall)
+
+    # agents — repair without touching the manifest, which is why this is not
+    # a flag on `init`.
+    kinds = [k.name for k in __import__(
+        "invariant.hosts.assets", fromlist=["KINDS"]
+    ).KINDS]
+    aset = sub.add_parser(
+        "assets", help="host assets: agents, commands, skills"
+    ).add_subparsers(dest="sub", required=True)
+    q = aset.add_parser("list", help="every asset, whether it loads, and who owns it")
+    q.add_argument("--kind", choices=kinds)
+    q.set_defaults(func=cmd_assets_list)
+    q = aset.add_parser("install", help="reinstall library-shipped assets")
+    q.add_argument(
+        "--overwrite-local",
+        action="store_true",
+        help="replace assets you have edited; without it they are skipped and named",
+    )
+    q.add_argument("--kind", choices=kinds)
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_assets_install)
+
+    agents = sub.add_parser("agents").add_subparsers(dest="sub", required=True)
+    agents.add_parser("list", help="installed agents and whether the host can load them"
+                      ).set_defaults(func=cmd_agents_list)
+    q = agents.add_parser(
+        "show", help="print a library agent as the host would install it; writes nothing"
+    )
+    q.add_argument("name")
+    q.add_argument(
+        "--sections", action="store_true", help="list the section anchors an overlay can target"
+    )
+    q.set_defaults(func=cmd_agents_show)
+    q = agents.add_parser("install", help="reinstall the library agents")
+    q.add_argument(
+        "--overwrite-local",
+        action="store_true",
+        help="replace agents you have edited; without it they are skipped and named",
+    )
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_agents_install)
+
+    p = sub.add_parser("docs").add_subparsers(dest="sub", required=True)
+    q = p.add_parser(
+        "assess", help="report the architecture docs' gaps by check (read-only)"
+    )
+    q.add_argument(
+        "--plan",
+        action="store_true",
+        help="record a parked docs-lane session planning one deliverable per gap",
+    )
+    q.set_defaults(func=cmd_docs_assess)
+    q = p.add_parser(
+        "adopt",
+        help="adopt existing documentation as the architecture docs, in place or by copy",
+    )
+    q.add_argument("source", help="the directory holding the documentation")
+    q.add_argument(
+        "--mode",
+        required=True,
+        choices=("in_place", "copy"),
+        help="in_place points paths.docs at it; copy copies it into the docs location",
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="re-copy over a copy edited since the receipt, or over files no copy wrote",
+    )
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_docs_adopt)
+    q = p.add_parser(
+        "venv",
+        help="create or re-sync the docs project's pinned environment with uv",
+    )
+    q.add_argument(
+        "--check",
+        action="store_true",
+        help="report whether it matches requirements.txt; create nothing",
+    )
+    q.set_defaults(func=cmd_docs_venv)
+    q = p.add_parser(
+        "build",
+        help="the docs project's strict build, recorded for its tree's digest",
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="build again even when this tree is already recorded green",
+    )
+    q.set_defaults(func=cmd_docs_build)
+    q = p.add_parser(
+        "lock",
+        parents=[session_arg],
+        help="take the store's docs-lock units in key order, or show the lease (ADR-014 D5)",
+    )
+    q.add_argument(
+        "units", nargs="*",
+        help="an area's name, area:<name>, file:<path>, or a store path; none shows the lease",
+    )
+    q.add_argument("--wait", action="store_true", help="block until every unit is granted")
+    q.add_argument(
+        "--timeout", type=float, default=600.0,
+        help="seconds --wait blocks before giving up, keeping the place (default 600)",
+    )
+    q.add_argument("--take-over", metavar="UNIT", help="take one unit of a stale lease over")
+    q.add_argument("--reason", help="why, for --take-over: recorded in both sessions")
+    q.set_defaults(func=cmd_docs_lock)
+    q = p.add_parser(
+        "unlock",
+        parents=[session_arg],
+        help="release docs-lock units, or all of them; refused while one has uncommitted changes",
+    )
+    q.add_argument("units", nargs="*", help="the units to release; none releases every one")
+    q.set_defaults(func=cmd_docs_unlock)
+    decision = p.add_parser(
+        "decision", help="the docs project's decision records (ADR-018 D7)"
+    ).add_subparsers(dest="decision_action", required=True)
+    q = decision.add_parser(
+        "new", help="mint the next decision record page under <srcdir>/decisions/"
+    )
+    q.add_argument("title", help="the record's title, one line")
+    q.add_argument("--dry-run", action="store_true", help="say what it would write")
+    q.set_defaults(func=cmd_docs_decision_new)
+    migrate = p.add_parser(
+        "migrate", help="convert Markdown into the docs project through pandoc (ADR-018 D14)"
+    ).add_subparsers(dest="migrate_kind", required=True)
+    for kind, said in (
+        ("adr", "Markdown ADRs to record pages of decision needs under <srcdir>/decisions/"),
+        ("prose", "Markdown pages to rST pages, beside each source or under --into"),
+    ):
+        q = migrate.add_parser(kind, help=said)
+        q.add_argument("files", nargs="+", help="the Markdown files")
+        if kind == "prose":
+            q.add_argument("--into", help="a directory in the docs project to write the pages in")
+        q.add_argument(
+            "--from",
+            dest="reader",
+            default="gfm",
+            help="pandoc's reader for the Markdown (default gfm)",
+        )
+        q.add_argument("--dry-run", action="store_true", help="convert; write nothing")
+        q.set_defaults(func=cmd_docs_migrate)
+
+    p = sub.add_parser("store").add_subparsers(dest="sub", required=True)
+    q = p.add_parser("init", help="create a store for this repository and link it")
+    q.add_argument("path", nargs="?", help="where; default ~/.invariant/stores/<name>")
+    q.set_defaults(func=cmd_store_init)
+    q = p.add_parser("link", help="link this repository to an existing store")
+    q.add_argument("path", nargs="?", help="the store's path")
+    q.add_argument(
+        "--update", action="store_true",
+        help="re-key a link made by local ID onto the repository's origin",
+    )
+    q.set_defaults(func=cmd_store_link)
+    q = p.add_parser("status", help="is this repository linked to a store")
+    q.add_argument("--quiet", action="store_true", help="print nothing; exit 0 if linked")
+    q.set_defaults(func=cmd_store_status)
+    q = p.add_parser(
+        "pull", parents=[session_arg],
+        help="bring the store in step with its remote now (ADR-014 D7)",
+    )
+    q.add_argument(
+        "--replay", action="store_true",
+        help="past a divergence, replay the unpublished commits on top of the remote; "
+        "stops if a file changed on both sides",
+    )
+    q.set_defaults(func=cmd_store_pull)
+    q = p.add_parser(
+        "clone",
+        help="the first clone of a store on this machine: shown, then registered "
+        "once confirmed (ADR-014 D7)",
+    )
+    q.add_argument("remote", help="the store's remote")
+    q.add_argument("--path", help="where; default ~/.invariant/stores/<name>")
+    q.add_argument(
+        "--yes", action="store_true",
+        help="confirm without asking; without it and without a terminal the clone is declined",
+    )
+    q.add_argument(
+        "--timeout", type=float, default=600.0,
+        help="seconds the clone may take before it counts as unreachable (default 600)",
+    )
+    q.set_defaults(func=cmd_store_clone)
+    q = p.add_parser(
+        "push",
+        help="publish the store to its remote once every outgoing commit passes "
+        "its privacy screen (ADR-014 D8)",
+    )
+    q.set_defaults(func=cmd_store_push)
+    q = p.add_parser(
+        "hook",
+        help="the store's privacy screen, as its git hooks run it (ADR-014 D8)",
+    )
+    q.add_argument("name", choices=("pre-commit", "commit-msg", "pre-push"))
+    q.add_argument("args", nargs="*", help="what git hands the hook")
+    q.set_defaults(func=cmd_store_hook)
+    q = p.add_parser(
+        "migrate",
+        help="move the configuration and records between the repository and a "
+        "store, with their history, as a session of their own (ADR-014 D12)",
+    )
+    q.add_argument("--to", required=True, choices=("store", "repo"), help="the home to move to")
+    q.add_argument("--store", help="--to store: the store, or where a new one goes")
+    q.add_argument(
+        "--records", help="--to repo: the records to move within a store project (increment 7b)"
+    )
+    q.set_defaults(func=cmd_store_migrate)
+
+    p = sub.add_parser("config").add_subparsers(dest="sub", required=True)
+    q = p.add_parser("show")
+    q.add_argument("--provenance", action="store_true")
+    q.set_defaults(func=cmd_config_show)
+
+    # session
+    session = sub.add_parser("session").add_subparsers(dest="sub", required=True)
+
+    q = session.add_parser("start")
+    q.add_argument("name")
+    q.add_argument("--id", help="the id to register the new session under")
+    q.add_argument(
+        "--base",
+        help="the branch to cut the worktree from and merge back into; "
+        "defaults to the branch the main checkout has checked out",
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="start a second session for a task that already has a parked one",
+    )
+    q.add_argument(
+        "--host-session-id",
+        help="the agent host's session identifier; attribution survives a cwd reset with it",
+    )
+    q.set_defaults(func=cmd_session_start)
+
+    q = session.add_parser("isolate", parents=[session_arg])
+    q.add_argument("--execute", action="store_true")
+    q.set_defaults(func=cmd_session_isolate)
+
+    # --id everywhere it can mean something. Every ambiguity message tells the
+    # caller to pass it, and a subcommand that then rejects it makes the advice
+    # a dead end.
+    q = session.add_parser("status", parents=[session_arg])
+    q.set_defaults(func=cmd_session_status)
+    session.add_parser("list").set_defaults(func=cmd_session_list)
+
+    q = session.add_parser("transition", parents=[session_arg])
+    q.add_argument("state")
+    q.add_argument("--reason")
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(func=cmd_session_transition)
+
+    q = session.add_parser("files", parents=[session_arg])
+    # `remove` exists because `add` can record a path that cannot be opened,
+    # and a declared set with no way back blocks the review boundary on an
+    # entry nobody can delete.
+    q.add_argument("action", choices=["add", "remove"])
+    q.add_argument("paths", nargs="+")
+    q.set_defaults(func=cmd_session_files)
+
+    q = session.add_parser(
+        "adopt", help="bind a host session id to a session", parents=[session_arg]
+    )
+    q.add_argument("host_session_id")
+    q.add_argument("--force", action="store_true", help="rebind deliberately")
+    q.set_defaults(func=cmd_session_adopt)
+
+    q = session.add_parser(
+        "resume", help="pick up a session a previous host session put down"
+    )
+    # Optional, because --id must be able to name the session on its own: every
+    # ambiguity message in this library tells the caller to pass --id, and a
+    # subcommand that required a name alongside it would make that advice a
+    # dead end.
+    q.add_argument("name", nargs="?", help="a name, a bare task slug, or an id")
+    q.add_argument("--id", help="the session to resume, by id")
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="take over a live binding, or resume a session that already landed",
+    )
+    q.set_defaults(func=cmd_session_resume)
+
+    q = session.add_parser(
+        "handoff",
+        help="hand the work to a fresh Claude Code session: record a note, "
+        "open a new Terminal window running it",
+        description=(
+            "Privacy-scan and record --note on this session (any state, torn "
+            "down included), then open a new macOS Terminal window in the main "
+            "checkout running: claude --name <slug> --remote-control <slug> "
+            "\"<note>\". The slug comes from the note's 'next:' item unless "
+            "--name gives one. Once the launch succeeds, this Claude Code session "
+            "(CLAUDE_PID) is sent SIGTERM after a short delay unless --keep-open. "
+            "--dismiss instead retires the latest fresh note without acting on it."
+        ),
+        parents=[session_arg],
+    )
+    q.add_argument(
+        "--note",
+        help="one terse keyword line; its 'next:' item names the new session",
+    )
+    q.add_argument(
+        "--dismiss",
+        action="store_true",
+        help="retire the latest fresh note here without acting on it; it is "
+        "recorded as dismissed",
+    )
+    q.add_argument("--name", help="the new session's name, instead of deriving it")
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the exact command and AppleScript; record and launch nothing",
+    )
+    q.add_argument(
+        "--keep-open",
+        action="store_true",
+        help="launch the successor but leave this Claude Code session running; "
+        "by default it is sent SIGTERM shortly after a successful launch",
+    )
+    q.set_defaults(func=cmd_session_handoff)
+
+    # Nested subparsers rather than `files`' flat `action` + positional: `add`
+    # takes one title, three actions take an integer, and `show` takes nothing.
+    # A flat shape could only accept strings, so the integer check would move
+    # out of the parser and into a refusal about the plan.
+    plan = session.add_parser(
+        "plan", help="the deliverable set this session owes"
+    ).add_subparsers(dest="plan_action", required=True)
+
+    q = plan.add_parser(
+        "add", help="record a deliverable this session owes", parents=[session_arg]
+    )
+    # ONE positional, deliberately. `plan add wire the toolbar` unquoted is then
+    # a usage error rather than a deliverable called "wire".
+    q.add_argument("title")
+    q.set_defaults(func=cmd_session_plan)
+
+    for action, help_text in (
+        ("done", "mark a deliverable finished"),
+        ("reopen", "undo a done — the way back from ticking the wrong number"),
+        ("remove", "drop a deliverable; its number is retired, never reissued"),
+    ):
+        q = plan.add_parser(action, help=help_text, parents=[session_arg])
+        q.add_argument("n", type=int)
+        q.set_defaults(func=cmd_session_plan)
+
+    q = plan.add_parser(
+        "show", help="the plan, and what is next on it", parents=[session_arg]
+    )
+    q.set_defaults(func=cmd_session_plan)
+
+    # The decisions this session made (ADR-018 D9), shaped as `plan` is.
+    decisions = session.add_parser(
+        "decisions", help="the decisions this session made, as needs or drafts"
+    ).add_subparsers(dest="decisions_action", required=True)
+    q = decisions.add_parser(
+        "add", help="declare a decision: its need's id, or --draft", parents=[session_arg]
+    )
+    q.add_argument("need_id", nargs="?", help="the decision need's id (DEC_...)")
+    q.add_argument("--draft", help="a decision not yet a need, in one line")
+    q.set_defaults(func=cmd_session_decisions)
+    q = decisions.add_parser(
+        "resolve", help="name the need a draft became", parents=[session_arg]
+    )
+    q.add_argument("n", type=int)
+    q.add_argument("need_id")
+    q.set_defaults(func=cmd_session_decisions)
+    q = decisions.add_parser(
+        "remove", help="drop a declared decision; its number is retired",
+        parents=[session_arg],
+    )
+    q.add_argument("n", type=int)
+    q.set_defaults(func=cmd_session_decisions)
+    q = decisions.add_parser(
+        "show", help="the declared decisions and their drafts", parents=[session_arg]
+    )
+    q.set_defaults(func=cmd_session_decisions)
+
+    q = session.add_parser(
+        "sync", help="rebase this session's branch onto its base", parents=[session_arg]
+    )
+    q.set_defaults(func=cmd_session_sync)
+
+    q = session.add_parser(
+        "reap", help="abandon sessions whose worktree and branch are both gone"
+    )
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_session_reap)
+
+    q = session.add_parser(
+        "review", help="evaluate the review gates and advance", parents=[session_arg]
+    )
+    q.add_argument("--force", action="store_true")
+    q.add_argument("--reason")
+    q.set_defaults(func=cmd_session_review)
+
+    q = session.add_parser("merge", parents=[session_arg])
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="merge despite a refusing gate; the override is recorded",
+    )
+    q.set_defaults(func=cmd_session_merge)
+
+    q = session.add_parser("push", parents=[session_arg])
+    q.add_argument("--remote", default="origin")
+    q.add_argument("--force", action="store_true")
+    q.set_defaults(func=cmd_session_push)
+
+    q = session.add_parser("teardown", parents=[session_arg])
+    q.add_argument("--keep-worktree", action="store_true")
+    q.add_argument("--keep-branch", action="store_true")
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="remove a worktree you are standing in, knowing the host has moved",
+    )
+    q.set_defaults(func=cmd_session_teardown)
+
+    # pipeline
+    pipeline = sub.add_parser("pipeline").add_subparsers(dest="sub", required=True)
+
+    q = pipeline.add_parser(
+        "ack", help="record a deliberate decision to proceed against an advisory gate",
+        parents=[session_arg],
+    )
+    q.add_argument("rule")
+    q.add_argument("--reason", required=True)
+    q.set_defaults(func=cmd_pipeline_ack)
+
+    q = pipeline.add_parser(
+        "coverage", help="run the configured coverage command and record it",
+        parents=[session_arg],
+    )
+    # Repeatable, as on `pipeline test`, and for the same reason (BUG_031).
+    # Runs commands.coverage_one: a scoped figure, recorded as scoped (ADR-010).
+    q.add_argument("--selector", action="append")
+    q.set_defaults(func=cmd_pipeline_coverage)
+
+    q = pipeline.add_parser("start", parents=[session_arg])
+    q.add_argument("--methodology")
+    q.add_argument("--task")
+    q.set_defaults(func=cmd_pipeline_start)
+
+    pipeline.add_parser("status", parents=[session_arg]).set_defaults(
+        func=cmd_pipeline_status
+    )
+
+    q = pipeline.add_parser("gates", parents=[session_arg])
+    q.add_argument("--state")
+    q.set_defaults(func=cmd_pipeline_gates)
+
+    q = pipeline.add_parser("advance", parents=[session_arg])
+    q.add_argument("state")
+    q.add_argument("--force", action="store_true")
+    q.add_argument("--reason")
+    q.set_defaults(func=cmd_pipeline_advance)
+
+    q = pipeline.add_parser(
+        "test", help="run the configured suite and record it", parents=[session_arg]
+    )
+    q.add_argument("--phase")
+    # Repeatable. Declared without `action="append"`, argparse's documented
+    # behaviour for a repeated single-value option applied — the last
+    # occurrence silently overwrote the earlier ones, and the run reported a
+    # healthy green for a scope nobody asked for (BUG_031). `item new --field`
+    # a few lines below has carried the idiom all along.
+    q.add_argument("--selector", action="append")
+    q.set_defaults(func=cmd_pipeline_test)
+
+    # items
+    item = sub.add_parser("item").add_subparsers(dest="sub", required=True)
+
+    q = item.add_parser("new")
+    q.add_argument("type", choices=["idea", "bug"])
+    q.add_argument("--title", required=True, dest="title")
+    q.add_argument("--field", action="append")
+    q.add_argument("--body")
+    q.add_argument("--section", help="file at the end of the section with this title")
+    q.add_argument("--after", metavar="ID", help="file directly after this entry")
+    q.set_defaults(func=cmd_item_new)
+
+    q = item.add_parser("list")
+    q.add_argument("--type", choices=["idea", "bug"])
+    q.add_argument("--status")
+    q.add_argument("--open", action="store_true")
+    q.set_defaults(func=cmd_item_list)
+
+    q = item.add_parser("show")
+    q.add_argument("id")
+    q.set_defaults(func=cmd_item_show)
+
+    q = item.add_parser("transition")
+    q.add_argument("id")
+    q.add_argument("status")
+    q.add_argument("--reason")
+    q.add_argument("--force", action="store_true")
+    q.add_argument("--ruling", help="who ruled, and when; needs --evidence")
+    q.add_argument("--evidence", help="the commit the ruling rests on; needs --ruling")
+    q.set_defaults(func=cmd_item_transition)
+
+    q = item.add_parser("residue")
+    q.add_argument("id")
+    q.add_argument("--add")
+    q.add_argument("--clear")
+    q.set_defaults(func=cmd_item_residue)
+
+    q = item.add_parser(
+        "migrate",
+        help="move every item, open and closed, into another backend (ADR-018 D14)",
+    )
+    q.add_argument("--to", required=True, choices=["markdown", "json", "sphinx_needs"])
+    q.add_argument(
+        "--path",
+        help="the target store; for sphinx_needs, default the docs project's backlog.rst",
+    )
+    q.add_argument(
+        "--closed-path",
+        dest="closed_path",
+        help="where items in a terminal state go; without it, every item goes to --path",
+    )
+    q.add_argument(
+        "--from",
+        dest="reader",
+        default="gfm",
+        help="pandoc's reader for Markdown bodies converted to rST (default gfm)",
+    )
+    q.add_argument("--dry-run", action="store_true", help="migrate and read back; write nothing")
+    q.set_defaults(func=cmd_item_migrate)
+
+    # memory
+    memory = sub.add_parser("memory").add_subparsers(dest="sub", required=True)
+    memory.add_parser("check").set_defaults(func=cmd_memory_check)
+    memory.add_parser("index").set_defaults(func=cmd_memory_index)
+
+    q = memory.add_parser("write")
+    q.add_argument("name")
+    q.add_argument("--type", required=True,
+                   choices=["user", "feedback", "project", "reference"])
+    q.add_argument("--description", required=True)
+    q.add_argument("--body")
+    q.add_argument("--body-file")
+    q.set_defaults(func=cmd_memory_write)
+
+    # stats
+    stats = sub.add_parser(
+        "stats", help="what sessions took and what they cost"
+    ).add_subparsers(dest="sub", required=True)
+
+    q = stats.add_parser(
+        "refresh", help="rebuild the raw store from the host's transcripts"
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="re-parse even where the source has not changed",
+    )
+    q.set_defaults(func=cmd_stats_refresh)
+
+    q = stats.add_parser("report", help="render the report")
+    q.add_argument(
+        "--write",
+        action="store_true",
+        help="write it to the manifest's paths.reports instead of stdout",
+    )
+    q.set_defaults(func=cmd_stats_report)
+
+    q = stats.add_parser("show", help="one session in full, with its breakdown")
+    q.add_argument("session", help="an invariant session name or id")
+    q.set_defaults(func=cmd_stats_show)
+
+    q = stats.add_parser(
+        "archive",
+        help="promote a record to permanent, so it outlives the host's retention",
+    )
+    q.add_argument("session", help="an invariant session name or id")
+    q.set_defaults(func=cmd_stats_archive)
+
+    stats.add_parser(
+        "check", help="staleness, unpriced models, and records that are the only copy"
+    ).set_defaults(func=cmd_stats_check)
+
+    # sweep (ADR-010)
+    sweep = sub.add_parser(
+        "sweep", help="the whole suite on a cadence, and what it files"
+    ).add_subparsers(dest="sub", required=True)
+    q = sweep.add_parser(
+        "run",
+        help="run the whole suite once from the main checkout, file what is new, "
+        "and commit the record",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run and diff, but write no record, file nothing and commit nothing",
+    )
+    q.set_defaults(func=cmd_sweep_run)
+    q = sweep.add_parser("status", help="the last sweep, its age and the cadence")
+    q.add_argument("--branch", help="whose sweeps (default: the checked-out branch)")
+    q.set_defaults(func=cmd_sweep_status)
+    q = sweep.add_parser("show", help="one sweep record, the latest by default")
+    q.add_argument("record", nargs="?", help="a seq, a record file name, or a head prefix")
+    q.add_argument("--branch", help="whose sweeps (default: the checked-out branch)")
+    q.set_defaults(func=cmd_sweep_show)
+
+    # guidelines (ADR-012)
+    guide = sub.add_parser(
+        "guidelines", help="the project's coding guidelines ruleset"
+    ).add_subparsers(dest="sub", required=True)
+    q = guide.add_parser(
+        "render",
+        help="write the human checklist from the ruleset, in docs.format",
+        parents=[session_arg],
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="render, scan and report what would be written, and write nothing",
+    )
+    q.add_argument(
+        "--insert",
+        action="append",
+        metavar="BLOCK",
+        help="append this managed block to each instruction file that lacks it "
+        "(guidelines/index); render never inserts one unasked",
+    )
+    q.add_argument(
+        "--overwrite-local",
+        action="store_true",
+        help="replace a managed block that was edited by hand, rather than skip it",
+    )
+    q.set_defaults(func=cmd_guidelines_render)
+    q = guide.add_parser(
+        "show", help="print the full checklist text from the ruleset, writing nothing",
+        parents=[session_arg],
+    )
+    q.add_argument(
+        "--phase",
+        metavar="ROLE",
+        help="print only the rules a state with this role sees: design, review, "
+        "landing or abandon (ADR-012 D7)",
+    )
+    q.add_argument(
+        "--files",
+        action="extend",
+        nargs="+",
+        metavar="PATH",
+        help="with --phase, only the rules these files bring into play (repeatable)",
+    )
+    q.add_argument(
+        "--touched",
+        action="store_true",
+        help="with --phase, add the session's declared plus changed files to --files",
+    )
+    q.set_defaults(func=cmd_guidelines_show)
+    q = guide.add_parser(
+        "baseline",
+        help="record or prune the ratchet baseline of pattern and boundary findings",
+        parents=[session_arg],
+    )
+    mode = q.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--record",
+        action="store_true",
+        help="scan every tracked file under each rule's applies_to and record its findings",
+    )
+    mode.add_argument(
+        "--prune",
+        action="store_true",
+        help="recompute the touched files and drop what the change fixed; never adds",
+    )
+    q.add_argument(
+        "--rule",
+        action="append",
+        metavar="ID",
+        help="with --record, replace only this rule's entries (repeatable)",
+    )
+    q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="plan, scan and report what would be written, and write nothing",
+    )
+    q.set_defaults(func=cmd_guidelines_baseline)
+    q = guide.add_parser(
+        "verdict",
+        help="submit one cited verdict on a judgement guideline (ADR-012 D5)",
+        parents=[session_arg],
+    )
+    q.add_argument("rule", help="the judgement guideline's id")
+    q.add_argument("--status", required=True, choices=("pass", "fail", "na"))
+    q.add_argument(
+        "--cite",
+        action="append",
+        nargs=3,
+        metavar=("PATH", "FIRST", "LAST"),
+        help="a cited line range in a file the change touched (repeatable)",
+    )
+    q.add_argument(
+        "--test",
+        action="append",
+        metavar="SELECTOR",
+        help="a test selector a recorded run in this pipeline named (repeatable)",
+    )
+    q.add_argument(
+        "--na-condition",
+        metavar="ID",
+        help="with --status na, the id of the rule's claim condition",
+    )
+    q.add_argument("--note", help="an inert note, capped and privacy-scanned")
+    q.set_defaults(func=cmd_guidelines_verdict)
+    verdicts = guide.add_parser(
+        "verdicts", help="verdicts on judgement guidelines, in bulk"
+    ).add_subparsers(dest="verdicts_sub", required=True)
+    q = verdicts.add_parser(
+        "submit",
+        help="submit a JSON list of verdicts; one invalid entry refuses the whole file",
+        parents=[session_arg],
+    )
+    q.add_argument("file", help="a JSON file holding a list of verdict objects")
+    q.set_defaults(func=cmd_guidelines_verdicts_submit)
+    q = verdicts.add_parser(
+        "show",
+        help="show how each judgement guideline the change owes a verdict stands, "
+        "as guidelines.verdicts_complete sees it; writes nothing",
+        parents=[session_arg],
+    )
+    q.set_defaults(func=cmd_guidelines_verdicts_show)
+
+    # a project's own steps (ADR-021)
+    q = sub.add_parser("step").add_subparsers(dest="sub", required=True)
+    r = q.add_parser(
+        "run", help="run one of the project's steps and record it", parents=[session_arg]
+    )
+    r.add_argument("name")
+    r.set_defaults(func=cmd_step_run)
+    q.add_parser(
+        "list", help="each step, its point, its level, its last outcome and debts"
+    ).set_defaults(func=cmd_step_list)
+
+    # rules / checks
+    q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)
+    q.add_parser("list").set_defaults(func=cmd_rules_list)
+
+    q = sub.add_parser("check", parents=[session_arg])
+    q.add_argument("rules", nargs="*")
+    q.set_defaults(func=cmd_check)
+
+    q = sub.add_parser("privacy").add_subparsers(dest="sub", required=True)
+    r = q.add_parser("scan")
+    r.add_argument("paths", nargs="+")
+    r.add_argument("--reveal", action="store_true",
+                   help="print raw matches (for a terminal, never for a file)")
+    r.set_defaults(func=cmd_privacy_scan)
+
+    # state
+    state = sub.add_parser("state").add_subparsers(dest="sub", required=True)
+    q = state.add_parser("show")
+    q.add_argument("--session")
+    q.set_defaults(func=cmd_state_show)
+
+    q = state.add_parser("repair")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_state_repair)
+
+    # oracle
+    oracle = sub.add_parser(
+        "oracle", help="the machine-wide view of every invariant project"
+    ).add_subparsers(dest="sub", required=True)
+    projects = oracle.add_parser(
+        "projects", help="the user-level index of registered projects"
+    ).add_subparsers(dest="action", required=True)
+    projects.add_parser("list", help="every registered project").set_defaults(
+        func=cmd_oracle_projects_list
+    )
+    q = projects.add_parser(
+        "add", help="register a project by hand (init and session start do it too)"
+    )
+    q.add_argument("path", nargs="?", help="a directory inside the project (default: here)")
+    q.set_defaults(func=cmd_oracle_projects_add)
+    q = projects.add_parser(
+        "remove",
+        help="drop a project from the index; refused when nothing matches",
+    )
+    q.add_argument("key", help="its state-root key, its root, or its name")
+    q.set_defaults(func=cmd_oracle_projects_remove)
+    q = projects.add_parser(
+        "prune", help="drop every project whose root no longer has a manifest"
+    )
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(func=cmd_oracle_projects_prune)
+    q = oracle.add_parser(
+        "list", help="every live session in every project, and its next step"
+    )
+    q.add_argument("--project", help="one project, by its key, root or name")
+    q.set_defaults(func=cmd_oracle_list)
+    q = oracle.add_parser(
+        "watch",
+        help="scan every few seconds, write the snapshot, alert once per rising edge",
+    )
+    q.add_argument("--once", action="store_true", help="one tick, then exit")
+    q.add_argument("--interval", type=float, default=5.0, help="seconds between ticks")
+    q.add_argument(
+        "--stuck-minutes", type=float, default=20.0,
+        help="a running turn silent this long is stuck",
+    )
+    q.add_argument(
+        "--no-notify", action="store_true",
+        help="post nothing; new alerts stay owed to a watcher that does",
+    )
+    q.set_defaults(func=cmd_oracle_watch)
+    q = oracle.add_parser(
+        "tui", help="the live dashboard; every action is confirmed first, n starts a new "
+                    "session (needs invariant[oracle])"
+    )
+    q.set_defaults(func=cmd_oracle_tui)
+    q = oracle.add_parser(
+        "close-host",
+        help="end a leftover Claude window, then close its Terminal tab; checks every fact "
+             "again first",
+    )
+    q.add_argument("host_id", help="the Claude session id of the window")
+    q.add_argument("--pid", type=int, required=True, help="its process id, as confirmed")
+    q.add_argument("--start", required=True,
+                   help="its process start token, as confirmed; a reused pid differs")
+    q.add_argument("--tty", default=None,
+                   help="the terminal it runs on, as confirmed (ttysNNN); omit for none")
+    q.set_defaults(func=cmd_oracle_close_host)
+    q = oracle.add_parser(
+        "start-session",
+        help="open a new Claude window, Remote Control on, in a registered project",
+    )
+    q.add_argument("project", help="a registered project, by its key, root or name")
+    q.add_argument("--prompt", default=None, help="the new session's first prompt")
+    q.add_argument("--name", default=None,
+                   help="the label after the project in the session name "
+                        "(default: MMDD-HHMM)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="print the command and the facts; launch nothing")
+    q.set_defaults(func=cmd_oracle_start_session)
+    q = oracle.add_parser("notify-test", help="post one notification, to check delivery")
+    q.set_defaults(func=cmd_oracle_notify_test)
+    q = oracle.add_parser(
+        "install", help="install the LaunchAgent that keeps `oracle watch` running"
+    )
+    q.add_argument("--dry-run", action="store_true",
+                   help="print the plist and the launchctl calls; change nothing")
+    q.add_argument("--interval", type=float, default=None,
+                   help="seconds between ticks (default 5)")
+    q.add_argument("--web", action="store_true",
+                   help="install the web page's agent instead: `oracle web --wait`, always on")
+    q.add_argument("--port", type=int, default=None,
+                   help="with --web, the port the page serves on (default 7341)")
+    q.set_defaults(func=cmd_oracle_install)
+    q = oracle.add_parser("uninstall", help="unload the LaunchAgents and remove their plists")
+    q.add_argument("--dry-run", action="store_true",
+                   help="print the launchctl calls; change nothing")
+    q.add_argument("--web", action="store_true",
+                   help="remove the web page's agent only; the watcher stays")
+    q.set_defaults(func=cmd_oracle_uninstall)
+    q = oracle.add_parser(
+        "status", help="is the agent loaded, and how old is the watcher's snapshot"
+    )
+    q.set_defaults(func=cmd_oracle_status)
+    web = oracle.add_parser(
+        "web",
+        help="serve the dashboard to paired devices on this Mac's Tailscale address",
+    )
+    web.add_argument("--port", type=int, default=7341)
+    web.add_argument(
+        "--allow-loopback", action="store_true",
+        help="with no Tailscale address, serve on 127.0.0.1 for a test on this Mac",
+    )
+    web.add_argument(
+        "--wait", action="store_true",
+        help="wait for a Tailscale address instead of refusing, and follow it (the agent's mode)",
+    )
+    web.set_defaults(func=cmd_oracle_web)
+    web_actions = web.add_subparsers(dest="web_action")
+    q = web_actions.add_parser("pair", help="a one-time code that pairs one device")
+    q.add_argument("--name", default="device", help="what to call the device")
+    q.add_argument("--ttl", type=float, default=300.0, help="seconds the code lives")
+    q.add_argument("--port", type=int, default=None,
+                   help="the port the link names (default: the one the page serves on)")
+    q.add_argument("--allow-loopback", action="store_true",
+                   help="with no Tailscale address, link 127.0.0.1")
+    q.set_defaults(func=cmd_oracle_web_pair)
+    web_actions.add_parser("devices", help="the paired devices").set_defaults(
+        func=cmd_oracle_web_devices
+    )
+    q = web_actions.add_parser("revoke", help="forget one paired device")
+    q.add_argument("id", help="its id, from 'oracle web devices'")
+    q.set_defaults(func=cmd_oracle_web_revoke)
+
+    hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
+    q = hooks.add_parser("install")
+    q.set_defaults(func=cmd_hooks_install)
+
+    # host bridge
+    q = sub.add_parser("hook")
+    q.add_argument("event")
+    q.set_defaults(func=cmd_hook)
+
+    q = sub.add_parser(
+        "override",
+        help="pass a rule that fires at a hook, or one guideline at the next "
+        "advance, once, with the decision recorded",
+        parents=[session_arg],
+    )
+    q.add_argument("rule", help="a rule id, or a guideline id from the ruleset")
+    q.add_argument("--reason", help="required unless --clear")
+    q.add_argument(
+        "--calls", type=int, default=1,
+        help="how many calls it covers; a guideline grant covers one",
+    )
+    q.add_argument("--clear", action="store_true", help="withdraw an unspent grant")
+    q.set_defaults(func=cmd_override)
+
+    q = sub.add_parser(
+        "standdown",
+        help="hold every gate for an interval, reversibly, with the hold recorded",
+        parents=[session_arg],
+    )
+    q.add_argument("--reason", help="required unless --clear")
+    q.add_argument(
+        "--until",
+        choices=("pipeline", "session"),
+        default="pipeline",
+        help="what lifts it; the default is the shortest scope that is useful",
+    )
+    q.add_argument(
+        "--include",
+        action="append",
+        help="fold a held-out rule in; repeatable (privacy.clean is the only one)",
+    )
+    q.add_argument("--clear", action="store_true", help="lift it now")
+    q.set_defaults(func=cmd_standdown)
+
+    q = sub.add_parser("context", parents=[session_arg])
+    q.set_defaults(func=cmd_context)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except InvariantError as exc:
+        print(f"invariant: {exc}", file=sys.stderr)
+        return exc.exit_code
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

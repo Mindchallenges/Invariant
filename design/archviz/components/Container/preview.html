@@ -1,0 +1,31 @@
+<!-- @dsCard group="Structure" height=400 subtitle="Boundary, cloud zone, group, layer band and swimlane" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Container — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var s = "";
+s += A.container({kind: "boundary", role: "primary", title: "Vehicle platform", tech: "system boundary", x: 10, y: 10, w: 300, h: 160});
+s += A.node({type: "app", label: "Log collector", tech: "C++20", x: 30, y: 60, w: 120});
+s += A.node({type: "app", label: "Uploader", tech: "C++20", x: 170, y: 60, w: 120});
+s += A.container({kind: "zone", role: "secondary", title: "Cloud region eu-central", x: 330, y: 10, w: 290, h: 160});
+s += A.container({kind: "zone", role: "secondary", title: "Kubernetes cluster", x: 346, y: 44, w: 258, h: 110});
+s += A.node({type: "node", label: "Worker node pool", tech: "3 × arm64", x: 400, y: 86, w: 150});
+s += A.container({kind: "group", role: "tertiary", title: "Central compute (HPC)", tech: "2 × SoC board", x: 640, y: 10, w: 200, h: 160});
+s += A.node({type: "hw", label: "Safety MCU", tech: "Cortex-R52", x: 670, y: 70, w: 140});
+s += A.container({kind: "band", role: "tertiary", title: "Hardware layer", x: 10, y: 196, w: 400, h: 90});
+s += A.node({type: "bus", label: "Automotive Ethernet", tech: "1000BASE-T1", x: 60, y: 240, w: 300});
+s += A.container({kind: "lane", title: "1 Vehicle", x: 440, y: 196, w: 200, h: 180});
+s += A.container({kind: "lane", title: "2 Backend", x: 640, y: 196, w: 200, h: 180});
+s += A.node({type: "step", label: "Send chunk", kind: "io", x: 480, y: 250, w: 120});
+s += A.node({type: "step", label: "Validate", x: 680, y: 250, w: 120});
+s += A.relation({link: "next", points: [[600, 271], [680, 271]]});
+s += '<text class="av-cap" x="160" y="186" text-anchor="middle">boundary · zone</text>';
+document.getElementById("root").innerHTML = A.svg(860, 390, s, "Containers");
+
+</script>
+</body>
+</html>

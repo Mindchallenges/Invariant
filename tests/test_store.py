@@ -1,0 +1,356 @@
+import fcntl
+import json
+import threading
+from dataclasses import dataclass, field
+
+import pytest
+
+from invariant.core.errors import LockTimeout, StateError
+from invariant.core.store import (
+    UNKNOWN_KEYS,
+    InertStore,
+    JsonStore,
+    PreservesUnknownKeys,
+)
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = JsonStore(tmp_path / "state")
+    s.ensure_root()
+    return s
+
+
+class TestReadWrite:
+    def test_roundtrip(self, store):
+        store.write("sessions/abc.json", {"state": "isolated"})
+        assert store.read("sessions/abc.json") == {"state": "isolated"}
+
+    def test_missing_returns_default(self, store):
+        assert store.read("sessions/nope.json", default={"x": 1}) == {"x": 1}
+        assert store.read("sessions/nope.json") is None
+
+    def test_write_creates_parent_directories(self, store):
+        store.write("deep/nested/file.json", [1, 2])
+        assert store.read("deep/nested/file.json") == [1, 2]
+
+    def test_corrupt_json_names_the_repair_command(self, store):
+        path = store.root / "sessions" / "bad.json"
+        path.write_text("{not json", encoding="utf-8")
+        with pytest.raises(StateError, match="invariant state repair"):
+            store.read("sessions/bad.json")
+
+    def test_write_leaves_no_temp_files_behind(self, store):
+        store.write("sessions/abc.json", {"a": 1})
+        leftovers = list((store.root / "sessions").glob(".*tmp"))
+        assert leftovers == []
+
+    def test_written_json_is_human_readable(self, store):
+        # The recovery path for a wedged store is a human opening the file, so
+        # indentation and stable key order are a contract, not a nicety.
+        store.write("sessions/abc.json", {"b": 1, "a": 2})
+        raw = (store.root / "sessions" / "abc.json").read_text(encoding="utf-8")
+        assert raw.startswith("{\n")
+        assert raw.index('"a"') < raw.index('"b"')
+        assert raw.endswith("\n")
+
+    def test_existing_file_survives_a_failed_write(self, store, monkeypatch):
+        store.write("sessions/abc.json", {"good": True})
+
+        def boom(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("os.replace", boom)
+        with pytest.raises(StateError, match="cannot write"):
+            store.write("sessions/abc.json", {"good": False})
+        assert store.read("sessions/abc.json") == {"good": True}
+
+
+class TestPathSafety:
+    def test_escaping_the_root_is_refused(self, store):
+        with pytest.raises(StateError, match="escapes the state root"):
+            store.read("../../secrets.json")
+
+    def test_escaping_via_write_is_refused(self, store):
+        with pytest.raises(StateError, match="escapes the state root"):
+            store.write("../outside.json", {})
+
+
+class TestListAndDelete:
+    def test_list_ids_is_sorted_and_stem_only(self, store):
+        for name in ("b", "a", "c"):
+            store.write(f"sessions/{name}.json", {})
+        assert store.list_ids("sessions") == ["a", "b", "c"]
+
+    def test_list_ids_of_missing_directory(self, store):
+        assert store.list_ids("nothing") == []
+
+    def test_delete(self, store):
+        store.write("sessions/a.json", {})
+        assert store.delete("sessions/a.json") is True
+        assert store.delete("sessions/a.json") is False
+
+
+class TestLocking:
+    def test_mutation_is_written_back(self, store):
+        with store.locked("registry.json", default={"sessions": {}}) as data:
+            data["sessions"]["s1"] = {"state": "working"}
+        assert store.read("registry.json")["sessions"]["s1"]["state"] == "working"
+
+    def test_exception_leaves_the_previous_document_intact(self, store):
+        store.write("registry.json", {"sessions": {"s1": {}}})
+        with pytest.raises(ValueError):
+            with store.locked("registry.json") as data:
+                data["sessions"]["s2"] = {}
+                raise ValueError("mid-mutation failure")
+        # A half-applied registry is worse than no change at all.
+        assert store.read("registry.json") == {"sessions": {"s1": {}}}
+
+    def test_a_held_lock_times_out_rather_than_waiting_forever(self, store):
+        lock_path = store.root / "locks" / "registry.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        blocker = open(lock_path, "a+")
+        fcntl.flock(blocker.fileno(), fcntl.LOCK_EX)
+        try:
+            with pytest.raises(LockTimeout, match="state repair"):
+                with store.locked("registry.json", timeout=0.15):
+                    pass
+        finally:
+            fcntl.flock(blocker.fileno(), fcntl.LOCK_UN)
+            blocker.close()
+
+    def test_a_lock_alone_reads_and_writes_nothing(self, store):
+        """For a read-modify-write that may decide to write nothing (BUG_107)."""
+        with store.lock("registry.json"):
+            assert not store.exists("registry.json")
+        assert not store.exists("registry.json")
+
+    def test_a_lock_is_released_when_its_body_raises(self, store):
+        with pytest.raises(ValueError), store.lock("registry.json"):
+            raise ValueError("mid-mutation failure")
+        with store.lock("registry.json", timeout=0):
+            pass
+
+    def test_a_lock_file_that_cannot_be_opened_is_a_state_error(self, store, monkeypatch):
+        """A hook absorbs a StateError. A bare OSError would answer degraded."""
+        store.ensure_root()
+
+        def refuse(*_args, **_kwargs):
+            raise PermissionError("read-only state root")
+
+        monkeypatch.setattr("builtins.open", refuse)
+        with pytest.raises(StateError, match="cannot open the lock"), store.lock("registry.json"):
+            pass
+
+    def test_a_lock_the_system_refuses_is_a_state_error(self, store, monkeypatch):
+        def refuse(*_args, **_kwargs):
+            raise OSError("no locks available")
+
+        monkeypatch.setattr("invariant.core.store.fcntl.flock", refuse)
+        with pytest.raises(StateError, match="cannot lock"), store.lock("registry.json", timeout=0):
+            pass
+
+    def test_concurrent_writers_do_not_lose_updates(self, store):
+        store.write("registry.json", {"n": 0})
+        errors = []
+
+        def bump():
+            try:
+                for _ in range(20):
+                    with store.locked("registry.json") as data:
+                        data["n"] += 1
+            except Exception as exc:  # pragma: no cover - surfaced via assert
+                errors.append(exc)
+
+        threads = [threading.Thread(target=bump) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        # Without the lock held across read-modify-write this loses increments.
+        assert store.read("registry.json")["n"] == 80
+
+    def test_lock_is_released_after_use(self, store):
+        with store.locked("registry.json", default={}):
+            pass
+        with store.locked("registry.json", default={}) as data:
+            data["second"] = True
+        assert store.read("registry.json") == {"second": True}
+
+
+def test_ensure_root_is_idempotent(tmp_path):
+    store = JsonStore(tmp_path / "state")
+    store.ensure_root()
+    store.ensure_root()
+    assert (store.root / "sessions").is_dir()
+
+
+def test_ensure_root_reports_a_real_failure(tmp_path):
+    blocker = tmp_path / "state"
+    blocker.write_text("I am a file, not a directory", encoding="utf-8")
+    with pytest.raises(StateError, match="cannot create state root"):
+        JsonStore(blocker).ensure_root()
+
+
+def test_json_is_valid_on_disk(store):
+    store.write("sessions/a.json", {"k": "v"})
+    json.loads((store.root / "sessions" / "a.json").read_text(encoding="utf-8"))
+
+
+# -- the inert store ---------------------------------------------------
+
+
+def snapshot(root):
+    """Every file under ``root`` with its bytes — the whole observable state."""
+    if not root.exists():
+        return None
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+class TestInertStore:
+    """Reads like the real store; writes nothing, wherever the write comes from.
+
+    It exists for `doctor`'s hook probe (BUG_059). The probe runs every hook the
+    host would run, and a hook is a writer — so a probe built on the real store
+    delivered a real lifecycle event and spent the caller's host binding. The
+    guarantee has to hold for every write path at once, including ones nobody
+    has written yet, which is why it lives at the store and not in a list of
+    handlers told to behave.
+    """
+
+    @pytest.fixture
+    def seeded(self, store):
+        store.write("sessions/abc.json", {"host_ended": False})
+        with store.locked("registry.json", default={}) as data:
+            data["abc"] = {"state": "isolated"}
+        return store
+
+    def test_it_reads_what_the_real_store_wrote(self, seeded):
+        inert = InertStore(seeded.root)
+        assert inert.read("sessions/abc.json") == {"host_ended": False}
+        assert inert.exists("sessions/abc.json")
+        assert inert.list_ids("sessions") == ["abc"]
+
+    def test_a_write_lands_nowhere(self, seeded):
+        before = snapshot(seeded.root)
+        InertStore(seeded.root).write("sessions/abc.json", {"host_ended": True})
+        InertStore(seeded.root).write("sessions/new.json", {"x": 1})
+        assert snapshot(seeded.root) == before
+
+    def test_a_delete_removes_nothing(self, seeded):
+        before = snapshot(seeded.root)
+        assert InertStore(seeded.root).delete("sessions/abc.json") is False
+        assert snapshot(seeded.root) == before
+
+    def test_a_locked_mutation_is_seen_and_discarded(self, seeded):
+        """The caller still gets the current document to work on, so the code
+        path it exercises is the real one; only the write-back is gone."""
+        before = snapshot(seeded.root)
+        with InertStore(seeded.root).locked("registry.json", default={}) as data:
+            assert data == {"abc": {"state": "isolated"}}
+            data["abc"]["state"] = "abandoned"
+        assert snapshot(seeded.root) == before
+
+    def test_a_locked_mutation_on_a_missing_document_gets_its_default(self, tmp_path):
+        with InertStore(tmp_path / "state").locked("registry.json", default={"d": 1}) as data:
+            assert data == {"d": 1}
+
+    def test_it_creates_no_state_root_and_no_lock_files(self, tmp_path):
+        """Not even the directories: a probe of an uninitialised project must
+        leave it uninitialised."""
+        inert = InertStore(tmp_path / "state")
+        inert.ensure_root()
+        with inert.locked("registry.json", default={}) as data:
+            data["x"] = 1
+        inert.write("sessions/a.json", {})
+        assert not (tmp_path / "state").exists()
+
+    def test_it_still_refuses_a_path_outside_the_state_root(self, store):
+        """Inert is not unchecked: a bad path is still the caller's bug."""
+        with pytest.raises(StateError, match="escapes"):
+            InertStore(store.root).write("../elsewhere.json", {})
+
+
+# -- the round-trip contract -------------------------------------------
+
+
+@dataclass
+class Record(PreservesUnknownKeys):
+    """A persisted record as an older build has it: two fields and no more.
+
+    Stands in for `Session` and `Pipeline` in the tests that are about the
+    contract rather than about either domain.
+    """
+
+    id: str
+    state: str = "new"
+    _extra: dict = field(default_factory=dict)
+
+
+class TestPreservesUnknownKeys:
+    """A build writes back what it could not read (BUG_061).
+
+    The mirror of the forward half. `from_dict` filtering unknown keys is what
+    makes a NEW field cost no migration; on its own it also made an OLD build
+    delete every field it had not heard of, silently, in a command that
+    reported success.
+    """
+
+    def test_an_unrecognised_key_survives_a_load_and_a_save(self):
+        raw = {"id": "s1", "state": "working", "plan": [{"n": 1}], "resumed_count": 2}
+        written = Record.from_dict(raw).to_dict()
+        assert written["plan"] == [{"n": 1}]
+        assert written["resumed_count"] == 2
+        assert written["id"] == "s1"
+        assert written["state"] == "working"
+
+    def test_the_preserved_keys_are_written_at_the_top_level(self):
+        """Where the build that owns them will look for them, which is where
+        they were. Nesting them under a container would be the same deletion
+        one indirection along: the older build's `_extra` is not a key any
+        newer `from_dict` reads."""
+        written = Record.from_dict({"id": "s1", "hosts": ["h1"]}).to_dict()
+        assert written == {"id": "s1", "state": "new", "hosts": ["h1"]}
+
+    def test_the_container_never_reaches_the_document(self):
+        assert UNKNOWN_KEYS not in Record.from_dict({"id": "s1", "x": 1}).to_dict()
+
+    def test_a_declared_field_wins_a_collision_with_a_preserved_key(self):
+        """The live attribute is what the running code means; the preserved
+        value is by definition one this build cannot interpret. Letting the
+        preserved key shadow the field would discard the value the code just
+        computed — this defect inverted."""
+        record = Record(id="s1", state="working", _extra={"state": "abandoned"})
+        assert record.to_dict()["state"] == "working"
+
+    def test_a_key_named_like_the_container_round_trips_as_data(self):
+        """`_extra` is reserved in the format and never read back as the
+        container, so a hand-edit that writes one is preserved rather than
+        expanded into the record."""
+        written = Record.from_dict({"id": "s1", UNKNOWN_KEYS: 3}).to_dict()
+        assert written[UNKNOWN_KEYS] == 3
+        assert Record.from_dict(written).to_dict() == written
+
+    def test_a_dunder_key_stays_inert_data(self):
+        """Preserved keys are dict entries, never attributes. A document that
+        could name `__class__` and have it assigned would be a hand-editable
+        file with reach into the object."""
+        record = Record.from_dict({"id": "s1", "__class__": "int", "__dict__": 1})
+        assert type(record) is Record
+        assert record.to_dict()["__class__"] == "int"
+
+    def test_a_document_that_is_not_a_record_says_so(self):
+        """The store promises hand-inspectable, hand-fixable files, so a hand
+        edit that leaves a list where an object was gets the repair advice
+        rather than an AttributeError from a comprehension."""
+        with pytest.raises(StateError, match="state repair"):
+            Record.from_dict([{"id": "s1"}])
+
+    def test_a_record_with_nothing_unknown_serialises_as_it_always_did(self):
+        assert Record(id="s1").to_dict() == {"id": "s1", "state": "new"}

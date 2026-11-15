@@ -1,0 +1,32 @@
+<!-- @dsCard group="Elements" height=470 subtitle="Every element type at its default shape and role colour" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>ElementNode — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var items = [
+  ["actor","Driver"],["system","Vehicle platform","In-vehicle software"],["extsys","Identity provider"],["usecase","Diagnose field issue"],
+  ["hw","Central compute","2 × SoC board"],["hw","Application SoC","ARM A78AE","soc"],["hw","IMU","","sensor"],["platform","Embedded Linux","Yocto, kernel 6.6"],
+  ["cloud","Kubernetes cluster"],["node","Worker node pool","3 × arm64"],["app","Log collector","C++20"],["app","Fleet portal","React","ui"],
+  ["app","Query API","Go, REST","gateway"],["store","Telemetry store","TimescaleDB"],["queue","Event stream","Kafka"],["comp","Ring buffer","C++20"],
+  ["data","LogRecord"],["req","No log loss"],["adr","Use zstd"],["scenario","Upload session"]
+];
+var cols = 4, cw = 190, ch = 104, out = "";
+items.forEach(function (it, i) {
+  var o = {type: it[0], label: it[1], tech: it[2] || "", kind: it[3] || ""};
+  if (it[0] === "cloud") { out += A.container({kind: "zone", role: "secondary", title: it[1], x: (i % cols) * cw + 10, y: Math.floor(i / cols) * ch + 8, w: 160, h: 58}); }
+  else {
+    var s = A.size(o), x = (i % cols) * cw + 10 + (170 - s.w) / 2, y = Math.floor(i / cols) * ch + 8 + (it[0] === "actor" ? 0 : (60 - s.h) / 2);
+    o.x = Math.round(x); o.y = Math.round(y); out += A.node(o);
+  }
+  var t = A.TYPES[it[0]];
+  out += '<text class="av-cap" x="' + ((i % cols) * cw + 95) + '" y="' + (Math.floor(i / cols) * ch + 86) + '" text-anchor="middle">' + it[0] + (it[3] ? "." + it[3] : "") + " · " + t.prefix + "</text>";
+});
+document.getElementById("root").innerHTML = A.svg(cols * cw, 5 * ch, out, "Element types");
+
+</script>
+</body>
+</html>

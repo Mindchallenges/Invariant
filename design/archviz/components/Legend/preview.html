@@ -1,0 +1,14 @@
+<!-- @dsCard group="Chrome" height=110 subtitle="Built from the types and relations present in the view" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Legend — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+document.getElementById("root").innerHTML = A.legend({types: ["app", "comp", "iface", "store", "extsys"], links: ["provides", "requires", "uses", "flows_to"]});
+
+</script>
+</body>
+</html>

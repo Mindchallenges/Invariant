@@ -1,0 +1,123 @@
+id: strict
+description: >
+  Everything the library can prove, it enforces. Appropriate for a project that
+  has already been burned by each of these and would rather argue with a gate
+  than re-learn the lesson. Two rules stay at warn because they are heuristics
+  rather than proofs, and a blocking heuristic is a false positive with
+  authority.
+
+rules:
+  session.isolated_before_edit: block
+  session.no_edit_in_main_checkout: block
+  session.push_barrier: block
+  session.push_enabled: block
+  session.ff_merge_target: block
+  session.own_file_set_only: block
+  session.work_would_be_stranded: block
+  session.deliverables_complete: block
+  session.branch_is_current: warn
+  session.named_after_isolating: block
+  session.teardown_complete: block
+
+  pipeline.complete: block
+  pipeline.started_before_edit: block
+
+  # The store's docs lock (ADR-014 D5, increment 4b): a read or edit of a
+  # store policy path needs its unit held. Blocks in every profile, as the
+  # isolation rules do: a design read from docs another session is about to
+  # change is the stale design the ruling exists to prevent.
+  store.docs_lock_held: block
+  # Released before the change leaves design (ADR-014 D5, increment 4c-1):
+  # the read-design-write cycle ends with the doc update committed and the
+  # units free, so code work never holds another session's design up.
+  store.docs_lock_released: block
+
+  # Advisory even here. "An agent was needed for this change" is a judgement,
+  # and this profile's own rule is that heuristics advise.
+  agents.design_agent_ran: warn
+  agents.review_agent_ran: warn
+  # Said before a design or review agent is dispatched with no pipeline to
+  # record it (IDEA_020). Warn everywhere: the dispatch is legitimate.
+  agents.gated_dispatch_has_pipeline: warn
+  # Every library agent's installed copy is what the host would render now
+  # (ADR-012 D8, the A6 ruling 10). Injected at the landing only where
+  # host.kind has an adapter. Warns in every profile, strict included: by the
+  # time it sees a hand edit the edit happened, and the fix is an overlay.
+  agents.rendered_current: warn
+
+  docs.read_architecture: block
+  # The architecture docs assessment, doctor's `docs assessment` row (ADR-016
+  # D3). Warns in every profile, so gaps never make doctor exit 1; it is
+  # never injected into a pipeline.
+  docs.assessment: warn
+  docs.updated: block
+  docs.diagrams_current: block
+  # The docs project's strict build and traceability (ADR-018 D5, D6). Warn
+  # in every profile while docs.needs.state is migrating; an enforced
+  # project's load raises both to block (D10).
+  docs.builds_strict: warn
+  docs.needs_traceable: warn
+  # The refused homes and the declared decisions (ADR-018 D8, D9): warn while
+  # migrating, raised to block, with a floor, when enforced (ruling 19).
+  docs.design_home: warn
+  docs.decisions_recorded: warn
+  items.decisions_linked: warn
+  # A change moving docs.needs.state back from enforced (D10): blocks in every
+  # profile and state, and passes only with --force --reason.
+  docs.mandate_kept: block
+  # The incremental docs path (ADR-016 D6): each touched source area no
+  # architecture doc names is owed. Injected at the landing only under
+  # docs.onboarding: incremental. Warns in loose and standard, blocks in strict.
+  docs.area_documented: block
+
+  test.new_test_fails: block
+  test.all_pass: block
+  coverage.meets_floor: block
+  # A whole-suite or whole-scheme run on a change, under a sweep cadence
+  # (ADR-010 D5). N/A without one.
+  sweep.no_full_run: block
+  # How old the last sweep is, beside each scheduled gate (ADR-010 D6).
+  # Warn in every profile, strict included: validation refuses block or ask.
+  sweep.fresh: warn
+
+  privacy.clean: block
+
+  # The project's guidelines ruleset loads and validates (ADR-012 D12,
+  # ruling 7). N/A with no ruleset configured, and injected at the landing
+  # state only when one is. Blocks everywhere: a ruleset that does not load
+  # is one every guidelines gate would otherwise answer from in part.
+  guidelines.ruleset_valid: block
+  # Every generated output (the checklist, each guidelines/index block) is
+  # what render would write now (ADR-012 D3). Warns in every profile, strict
+  # included (ruling 7): by the time it sees a hand edit, the edit happened.
+  guidelines.generated_current: warn
+  # No new or unanswerable finding of a pattern, boundary or cochange guideline in
+  # the changed files (ADR-012 D4, D12, ruling 7). Split by profile: it
+  # warns in loose and standard and blocks in strict. A project moves it to
+  # block once its baseline is recorded.
+  guidelines.mechanical_clean: block
+  # Every judgement guideline the change owes a verdict has one that still
+  # holds: cited files unchanged, tests green, the pinned ruleset (ADR-012
+  # D5, A4 increment 3, ruling 7). Split by profile like mechanical_clean:
+  # it warns in loose and standard and blocks in strict. A fail at warn
+  # severity is reported and never blocks.
+  guidelines.verdicts_complete: block
+  # The baseline only shrinks against the base branch's committed copy, and
+  # no stale entry is left in a touched file (ADR-012 D6, DN-5 to DN-7,
+  # ruling 7). Injected at the landing only when a baseline is configured.
+  # Blocks everywhere: a grown baseline admits a violation with no review.
+  guidelines.baseline_only_shrinks: block
+
+  memory.schema_valid: block
+  memory.index_current: block
+  memory.no_dead_links: block
+  # Duplicate detection is similarity-based; it proposes candidates rather than
+  # proving a duplicate, so it advises even here.
+  memory.no_duplicates: warn
+
+  item.bug_reproduced_before_fix: block
+  # Residue is free text; matching it against a status is a judgement call.
+  item.residue_matches_status: warn
+  # This one is not a judgement call: the history either walks the machine to
+  # the recorded status or it does not, and an override says so in the record.
+  item.history_matches_status: block

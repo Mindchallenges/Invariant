@@ -1,0 +1,21 @@
+<!-- @dsCard group="Behaviour" height=380 subtitle="Lifelines, sync / async / return messages, a loop fragment" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Sequence — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var r = A.sequence({
+  participants: [{id: "c", label: "Upload client", type: "comp"}, {id: "i", label: "Ingestion service", type: "app"}, {id: "p", label: "Identity provider", type: "extsys"}, {id: "q", label: "Event stream", type: "queue"}],
+  messages: [
+    {from: "c", to: "i", label: "OpenSession(vin, token)"}, {from: "i", to: "p", label: "verify(token)"}, {from: "p", to: "i", label: "claims", kind: "return"},
+    {from: "c", to: "i", label: "PutChunk(chunk)", kind: "async", fragment: "loop [chunks left]"}, {from: "i", to: "q", label: "publish(chunk)", kind: "async", fragment: "loop [chunks left]"},
+    {from: "c", to: "c", label: "markUploaded()", fragment: "loop [chunks left]"}]
+});
+document.getElementById("root").innerHTML = A.svg(r.w, r.h, r.svg, "Sequence");
+
+</script>
+</body>
+</html>

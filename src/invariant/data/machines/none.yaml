@@ -1,0 +1,13 @@
+id: none
+kind: pipeline
+description: >
+  The escape hatch: one state, no gates. Present so that a project that
+  disagrees with every shipped methodology can still use the session and
+  work-item domains rather than abandoning the library.
+
+initial: working
+terminal: [working]
+
+states:
+  working:
+    description: No methodology is being enforced.

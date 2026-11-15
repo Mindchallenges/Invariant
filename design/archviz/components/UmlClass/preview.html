@@ -1,0 +1,22 @@
+<!-- @dsCard group="Detailed design" height=330 subtitle="Compartments: name, attributes, operations; mono for members" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>UmlClass — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var s = "";
+s += A.umlClass({label: "ILogSink", stereotype: "interface", operations: ["+ push(r: const LogRecord&): bool"], x: 20, y: 10});
+s += A.umlClass({label: "RingBuffer", attributes: ["- capacity_: size_t", "- head_: atomic<size_t>"], operations: ["+ push(r: const LogRecord&): bool", "+ drain(max: size_t): Batch"], x: 20, y: 150});
+s += A.umlClass({label: "LogRecord", stereotype: "struct", attributes: ["+ ts: uint64_t", "+ level: Level", "+ payload: std::string"], x: 380, y: 150});
+s += A.umlClass({label: "SpoolWriter", attributes: ["- dir_: path"], operations: ["+ flush(): void"], x: 380, y: 10});
+s += A.relation({link: "realizes", points: [[120, 150], [120, 104]]});
+s += A.relation({link: "composes", points: [[262, 200], [380, 200]], label: "1..*", labelAt: [320, 194]});
+s += A.relation({link: "uses", points: [[400, 92], [400, 120], [200, 120], [200, 150]]});
+document.getElementById("root").innerHTML = A.svg(620, 300, s, "UML class");
+
+</script>
+</body>
+</html>

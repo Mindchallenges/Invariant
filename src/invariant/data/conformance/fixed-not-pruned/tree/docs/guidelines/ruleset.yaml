@@ -1,0 +1,13 @@
+version: 1
+sections:
+  - id: style
+    title: Style
+rules:
+  - id: style.no-print
+    section: style
+    title: No print calls in the application
+    statement: The application reports through its return values, never print.
+    severity: blocker
+    phases: [review, landing]
+    applies_to: ["*.py"]
+    check: {kind: pattern, engine: regex, in: code, match: '\bprint\('}

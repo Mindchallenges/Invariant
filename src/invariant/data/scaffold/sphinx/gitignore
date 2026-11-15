@@ -1,0 +1,3 @@
+# The docs environment, created by `invariant docs venv` from requirements.txt.
+.venv/
+_build/

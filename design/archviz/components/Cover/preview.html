@@ -1,0 +1,46 @@
+<!-- @dsCard height=288 -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Cover</title>
+<style>
+  html, body { margin: 0; background: var(--canvas); }
+  .cv { position: relative; width: 960px; height: 288px; overflow: hidden; background: var(--canvas); }
+  .cv svg { position: absolute; inset: 0; }
+  .b-primary { fill: var(--primary); } .b-secondary { fill: var(--secondary); } .b-neutral { fill: var(--neutral); }
+  .b-tertiary { fill: var(--tertiary); } .b-accent { fill: var(--accent); }
+  .cut { fill: var(--canvas); rx: var(--radius-node); }
+  .cut-sq { fill: var(--canvas); rx: var(--radius-control); }
+  .name { position: absolute; left: 40px; bottom: 72px; margin: 0; font: 600 96px/0.92 var(--font-sans); letter-spacing: -0.02em; color: var(--ink); }
+  .tag { position: absolute; left: 42px; bottom: 40px; margin: 0; max-width: 440px; font: 400 14px/20px var(--font-sans); color: var(--ink-muted); }
+</style></head>
+<body>
+<div class="cv">
+  <svg viewBox="0 0 960 288" width="960" height="288" aria-hidden="true">
+    <!--
+      blocks: primary 456×72, secondary 456×48, neutral 456×32, tertiary 456×64 bands (rank-sep/node-sep multiples), accent discs r=iface-size/2
+      arrangement: a strip of unequal layer bands stacked top to bottom, bleeding off the right edge — the layered view itself
+      pattern: tiles cut from the bands by radius-node, some merged two-wide (row "geometric, modular, dense UI"): elements sit inside their layer
+      steps and radii: gaps space-2 (8), insets space-5 (24), tiles radius-node, port squares radius-control
+    -->
+    <rect class="b-primary" x="504" y="24" width="456" height="72"/>
+    <rect class="b-secondary" x="504" y="104" width="456" height="48"/>
+    <rect class="b-neutral" x="504" y="160" width="456" height="32"/>
+    <rect class="b-tertiary" x="504" y="200" width="456" height="64"/>
+    <rect class="cut" x="528" y="44" width="96" height="32"/>
+    <rect class="cut" x="640" y="44" width="96" height="32"/>
+    <rect class="cut" x="752" y="44" width="184" height="32"/>
+    <rect class="cut" x="560" y="116" width="80" height="24"/>
+    <rect class="cut" x="704" y="116" width="80" height="24"/>
+    <rect class="cut" x="800" y="116" width="136" height="24"/>
+    <rect class="cut" x="584" y="168" width="248" height="16"/>
+    <rect class="cut" x="528" y="216" width="112" height="32"/>
+    <rect class="cut" x="656" y="216" width="112" height="32"/>
+    <rect class="cut-sq" x="808" y="224" width="16" height="16"/>
+    <circle class="b-accent" cx="672" cy="128" r="8"/>
+    <circle class="b-accent" cx="912" cy="60" r="8"/>
+  </svg>
+  <p class="name">Archviz</p>
+  <p class="tag">Architecture diagrams as views of one model.</p>
+</div>
+</body>
+</html>

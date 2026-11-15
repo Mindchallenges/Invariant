@@ -1,0 +1,32 @@
+<!-- @dsCard group="Chrome" height=470 subtitle="Toolbar, stage, tooltip, legend and caption around every view" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>DiagramFrame — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var s = "";
+s += A.container({kind: "boundary", role: "primary", title: "Log collector daemon", tech: "C++20", x: 120, y: 0, w: 330, h: 230});
+s += A.node({type: "comp", label: "Journal source", x: 140, y: 50, w: 140});
+s += A.node({type: "comp", label: "Ring buffer", x: 140, y: 160, w: 140, selected: true});
+s += A.node({type: "comp", label: "Spool writer", x: 300, y: 160, w: 130});
+s += A.node({type: "iface", label: "ILogSink", x: 352, y: 63});
+s += A.relation({link: "requires", points: [[280, 71], [350, 71]]});
+s += A.relation({link: "provides", points: [[230, 160], [230, 120], [360, 120], [360, 80]]});
+s += A.relation({link: "uses", points: [[280, 181], [300, 181]]});
+s += A.node({type: "extsys", label: "Diagnostic firmware", x: -60, y: 160, w: 150});
+s += A.relation({link: "flows_to", points: [[90, 181], [140, 181]]});
+s += A.node({type: "store", label: "On-board spool", tech: "eMMC", x: 490, y: 160, w: 130});
+s += A.relation({link: "flows_to", points: [[430, 181], [490, 181]]});
+var body = A.svg(700, 240, '<g transform="translate(70,0)">' + s + "</g>", "Log collector components");
+document.getElementById("root").innerHTML = A.frame({
+  title: "Log collector – components", caption: "Figure 4 · component view, root APP_LOGD", body: body,
+  tip: A.tooltip({title: "Ring buffer", id: "CMP_RINGBUF", type: "comp", tech: "C++20", summary: "Lock-free buffer between log sources and the spool writer."}),
+  legend: A.legend({types: ["app", "comp", "iface", "store", "extsys"], links: ["provides", "requires", "uses", "flows_to"]})
+});
+
+</script>
+</body>
+</html>

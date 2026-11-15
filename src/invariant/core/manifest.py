@@ -1,0 +1,2520 @@
+"""Manifest loading, layered resolution, and provenance.
+
+The manifest is the only project-aware artifact (``docs/architecture/manifest.rst``).
+Values are resolved in layers, later winning:
+
+  1. library defaults
+  2. adapter defaults, primary ecosystem first
+  3. the enforcement profile (rule levels only)
+  4. the config levels (ADR-014 D3): the user's defaults (5a), the store and
+     its block for this repo (5b), the repo's own manifest or pointer (5c)
+  5. environment overrides
+
+``Manifest.locate`` finds the project and its levels (ADR-014 D2).
+
+Every resolved value remembers which layer produced it. "Why is this rule
+blocking me" has to be answerable without reading the library's source, and a
+layered config that cannot explain itself is a config people disable.
+"""
+
+from __future__ import annotations
+
+import copy
+import fnmatch
+import os
+import posixpath
+import sys
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from . import git
+from .agents import TIERS
+from .errors import ManifestError, UnknownRuleError
+from .home import UserConfig, load_user_config
+from .identity import repo_identity
+from .privacy import DEFAULT_PATTERNS, parse_allow
+from .stores import (
+    POINTER,
+    STORE_MANIFEST,
+    StoreLink,
+    find_store,
+    read_pointer,
+    store_levels,
+)
+
+MANIFEST_RELPATH = Path(".claude") / "invariant.yaml"
+
+#: The kinds of place a project's own level lives (ADR-014 D9): the in-repo
+#: manifest, the store's ``invariant.yaml``, or the repo pointer alone.
+LOCATION_KINDS = ("repo", "store", "pointer")
+
+
+@dataclass(frozen=True)
+class ManifestLocation:
+    """Where the project's own level lives, in its git tree (ADR-014 D9).
+
+    The base readers read the manifest through this, never through
+    ``MANIFEST_RELPATH``: the in-repo ``.claude/invariant.yaml`` in the
+    repository (``repo``), the store's ``invariant.yaml`` in the store's
+    main checkout (``store``), or the pointer, ``.invariant.yaml``, at the
+    repository root when no store answers (``pointer``). ``tree`` is the
+    checkout the file is in, ``relpath`` its POSIX path there, and ``key``
+    the store's key for this repository under ``store.repos``.
+    """
+
+    tree: Path
+    relpath: str
+    kind: str
+    key: str | None = None
+
+    def level(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+        """What this project's level sets, read from ``raw``, the file's YAML.
+
+        The file as written for ``repo`` and ``pointer``. For ``store``, the
+        store's top level overlaid by its ``store.repos.<key>`` block, which
+        is how the store's levels resolve for this repository (D3, 5b),
+        without the ``store`` block itself.
+        """
+        if self.kind != "store":
+            return dict(raw)
+        top = {key: value for key, value in raw.items() if key != "store"}
+        block = raw.get("store")
+        repos = block.get("repos") if isinstance(block, Mapping) else None
+        entry = repos.get(self.key) if isinstance(repos, Mapping) and self.key else None
+        return _overlaid(top, entry) if isinstance(entry, Mapping) else top
+
+
+def _overlaid(base: Mapping[str, Any], extra: Mapping[str, Any]) -> dict[str, Any]:
+    """``extra`` over ``base``, mapping by mapping; ``extra`` wins at a leaf."""
+    out = dict(base)
+    for key, value in extra.items():
+        if isinstance(value, Mapping) and isinstance(out.get(key), Mapping):
+            out[key] = _overlaid(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def manifest_tracking(root: Path, relpath: str | Path = MANIFEST_RELPATH) -> str | None:
+    """How git holds the manifest at ``relpath`` under ``root`` (ADR-020 D11).
+
+    ``committed`` when HEAD carries it, ``local`` when it is untracked and
+    git ignores it (the ``.git/info/exclude`` line), ``uncommitted`` otherwise.
+    ``None`` where there is no such file or git cannot say. ``relpath`` is
+    the in-repo manifest by default, or a :class:`ManifestLocation`'s.
+    """
+    if not (root / relpath).is_file():
+        return None
+    rel = Path(relpath).as_posix()
+    if git.exists_at(root, "HEAD", rel) is True:
+        return "committed"
+    ignored = git.is_ignored(root, rel)
+    if ignored is None:
+        return None
+    return "local" if ignored else "uncommitted"
+
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+class Level(str, Enum):
+    """How a rule's verdict is delivered. Not a property of the rule's logic.
+
+    ``ASK`` is the level that puts a human back in the loop. The agent host's
+    permission contract carries an *ask* decision alongside allow and deny, and
+    for a long time this library only ever emitted deny — so a rule whose
+    failure the operator might legitimately want to wave through had exactly
+    two settings, "stop the work" and "say nothing" (BUG_049/AUTH-01).
+
+    It is delivered as an ask only where there is somebody to ask: the
+    ``pre-tool-use`` surface. Everywhere else — the ``stop`` surface, a
+    transition gate, ``invariant check`` — an ``ask`` verdict STOPS the work,
+    in the same do-not-relax convention the rest of the engine uses. A
+    spurious block is visible and self-correcting; a silent pass is neither.
+    The one-shot override token (``invariant override``) is the appeal that
+    reaches those surfaces.
+    """
+
+    BLOCK = "block"
+    ASK = "ask"
+    WARN = "warn"
+    OFF = "off"
+
+    @classmethod
+    def parse(cls, value: Any) -> Level:
+        # YAML 1.1 resolves a bare `off` to the boolean False (and `on` to
+        # True). Someone writing the obvious thing in a manifest would
+        # otherwise get an error about a value they never typed, so accept the
+        # booleans as the words they were written as.
+        if value is False:
+            return cls.OFF
+        if value is True:
+            raise ManifestError(
+                "'on' is not an enforcement level — YAML read it as a boolean. "
+                "Use 'block' or 'warn', quoted if you like."
+            )
+        try:
+            return cls(str(value).strip().lower())
+        except ValueError:
+            raise ManifestError(
+                f"{value!r} is not a valid enforcement level; use one of: "
+                + ", ".join(level.value for level in cls)
+            ) from None
+
+
+def _unknown_rule(rule_id: str, steps: Any = None) -> bool:
+    """Is this id absent from the rule registry?
+
+    A deferred import, and it has to be: `core.rules` imports this module, so
+    a top-level one is a cycle. That is the whole reason the check was not
+    here already, and it is a solvable reason.
+
+    The registry is the complete answer, not a partial one. A methodology may
+    name any id it likes as a gate, but an id with no registered rule already
+    FAILS at evaluation — there is no path by which a project legitimately
+    carries a rule this build does not know about.
+    """
+    from .rules import get_rule
+    from .steps import step_name
+
+    name = step_name(rule_id)
+    if name is not None:
+        # A project's own step is a rule once declared (ADR-021 D3), and only
+        # then: `step.<typo>` names nothing, as any other unknown id does.
+        return not (isinstance(steps, Mapping) and name in steps)
+    return get_rule(rule_id) is None
+
+
+def _did_you_mean(rule_id: str, steps: Any = None) -> str:
+    """The registered id nearest to what was typed, where there is one.
+
+    A typo three characters off should be answered with the id the operator
+    meant. Where nothing is close the message says nothing rather than
+    proposing an unrelated rule, which would be a worse kind of confident.
+    """
+    from difflib import get_close_matches
+
+    from .rules import all_rules
+    from .steps import rule_id as step_rule
+
+    known = [spec.id for spec in all_rules()]
+    if isinstance(steps, Mapping):
+        known += [step_rule(str(name)) for name in steps]
+    near = get_close_matches(rule_id, known, n=1, cutoff=0.6)
+    return f"; did you mean {near[0]!r}?" if near else ""
+
+
+DEFAULTS: dict[str, Any] = {
+    "version": 1,
+    "project": {"name": "unnamed", "ecosystems": ["generic"]},
+    # Where each record type lives (ADR-014 D1): `repo`, today's layout
+    # exactly, or `store`, a separate git repository the project's level
+    # names, against whose root the record's path keys are then read.
+    # `hooks` and `agents` say where the host adapter wires itself, `repo` or
+    # `user` (D11). Every key defaults to `repo`, so a project that writes
+    # nothing here resolves exactly as before the block existed.
+    "records": {
+        "docs": "repo",
+        "backlog": "repo",
+        "guidelines": "repo",
+        "memory": "repo",
+        "reports": "repo",
+        "sweeps": "repo",
+        "hooks": "repo",
+        "agents": "repo",
+    },
+    "paths": {
+        # null means "derive it". State must be SHARED by every worktree of a
+        # repository: a session created from the main checkout has to stay
+        # visible from the worktree it just created, and a per-worktree state
+        # directory makes it invisible at exactly that moment. The git common
+        # directory is already shared by every worktree and already untracked,
+        # so it is where the state belongs. Set a path here to override.
+        "state": None,
+        "docs": "docs/architecture",
+        "memory": ".claude/memory",
+        "memory_index": "MEMORY.md",
+        # Where `invariant stats report --write` puts its artifact (ADR-002
+        # D4). Declared here rather than appended to the CLI's write-scope
+        # invariant as one more exception: that invariant now reads "the state
+        # root and the stores the manifest declares", so the next feature that
+        # needs a writable location adds a key instead of widening a list. The
+        # second exception is always easier to justify than the first.
+        "reports": "docs/reports",
+        # Where `invariant sweep run` commits one record per sweep (ADR-010
+        # D9). Declared for the same reason as `reports`: the sweep writes it
+        # from the main checkout, and a declared store is writable and exempt
+        # from session isolation by construction.
+        "sweeps": "docs/sweeps",
+    },
+    "commands": {
+        "build": None,
+        "test": None,
+        "test_one": None,
+        "lint": None,
+        "coverage": None,
+        # Optional second leg, for ecosystems where measuring coverage and
+        # READING the measurement are separate programs. Where it is unset the
+        # coverage command speaks for itself and nothing changes; where it is
+        # set, the suite's exit status comes from the first command and the
+        # numbers from the second, so neither can be mistaken for the other.
+        "coverage_report": None,
+        # Scoped coverage, `{selector}` substituted: the sibling of `test_one`
+        # (ADR-010). A project whose floor moved to a sweep cadence records a
+        # change's coverage from its affected suites, and this is the command
+        # that runs them.
+        "coverage_one": None,
+    },
+    # Static substitutions for command templates.
+    "vars": {},
+    # Substitutions resolved by RUNNING a command, not by writing the value
+    # down. An operational identifier written into a config is both a privacy
+    # leak and a value that goes stale silently; a command that resolves it is
+    # neither.
+    "discover": {},
+    "docs": {
+        "format": "markdown",
+        "diagrams": "mermaid",
+        "index": None,
+        "require_diagram_update": True,
+        # The architecture docs assessment (ADR-016 D1, D2, D9). Read-only:
+        # it feeds `docs assess` and the `docs.assessment` doctor row, and no
+        # gate. The defaults are the starter overview.md's shape.
+        "assess": {
+            "checks": ["sections", "areas", "links"],
+            "sections": ["Layers", "Component responsibilities", "Compliance checklist"],
+            "areas": {"from": "adapter", "globs": [], "declared": [], "exclude": []},
+        },
+        # How the gaps are to be closed, chosen at `init` (ADR-016 D4, D9):
+        # `incremental` arms `docs.area_documented` (increment 3) and
+        # `all_at_once` is provenance for the plan `docs assess --plan`
+        # records. `off` is today's behaviour.
+        "onboarding": "off",
+        # Adopting existing documentation (ADR-016 D7, D8): `in_place` points
+        # `paths.docs` at the source, `copy` copied it into the docs location
+        # and records drift against a receipt. Written by `docs adopt`; null
+        # is today's behaviour.
+        "adopt": {"mode": None, "source": None},
+        # The docs project's needs (ADR-018 D2, D3, D6, D10). `state` is
+        # `migrating` until the migration's last step writes `enforced`.
+        # `types` null means the seven baseline types (core/needs), the item
+        # types following `items.id_prefix`; a list replaces them whole.
+        # `srcdir` null means the nearest directory at or above `paths.docs`
+        # holding a conf.py, below the root.
+        # `refused_paths` null means D8's default globs (core/needs,
+        # `DEFAULT_REFUSED_PATHS`); a list replaces them whole.
+        "needs": {
+            "state": "migrating",
+            "types": None,
+            "srcdir": None,
+            "refused_paths": None,
+            "require_links": [
+                {"from": "decision", "to": "element"},
+                {"from": "bug", "to": "element"},
+            ],
+            "decision_statuses": ["proposed", "accepted", "superseded", "rejected"],
+        },
+    },
+    "methodology": {
+        "pipeline": "tdd",
+        "extra_machines": [],
+        # `coverage_exclude` is a list of glob patterns held OUT of the floor
+        # — never out of the measurement. The row is still produced and the
+        # number still reported; only the below-floor verdict skips it, and
+        # the verdict names every path it set aside and why. Empty by
+        # default: excluding anything from a floor is a policy decision, and
+        # it belongs in a diff someone can review rather than in a habit each
+        # author has to remember.
+        # `coverage_baseline` is a path to a recorded per-file shortfall the
+        # floor is ratcheted against: below the floor but at or above the
+        # record does not block, below the record is a regression and does,
+        # and no record at all fails exactly as it did before. Null by
+        # default, because the relaxation must rest on evidence somebody
+        # wrote down rather than on the absence of any.
+        # `non_source` is a list of glob patterns the project declares are not
+        # code — versioned design bundles, fixtures, vendored assets. A
+        # DIFFERENT question from `coverage_exclude`, and the pair is easy to
+        # confuse: that one means "measured, but not held to the floor" and is
+        # applied after the missing-row check on purpose, so that suppressing
+        # a path from the reporter cannot buy a pass. This one means "no run in
+        # this project could produce a row for it at all", and is applied where
+        # the built-in documentation suffixes are. Nothing in the manifest
+        # could say that, so a project versioning design bundles beside the
+        # code they specify had a blocking gate with no local fix and no work
+        # that could clear it. Empty by default and every match named in the
+        # verdict with the pattern that spent it: this is the project asserting
+        # something the engine cannot check.
+        # `coverage_advisory_paths` is a list of glob patterns where the floor
+        # is ADVISORY: a touched file under one is reported with its figure, or
+        # as not measured, and never fails the gate, while every other file is
+        # held exactly as before. For a phase that lands new, flag-off code on
+        # scoped suites with one full coverage pass owed at its end — the end
+        # being the deletion of this list. A change touching only advisory
+        # paths passes without a coverage run and says so, and `doctor` names
+        # a configured list as an active exception so it is not forgotten.
+        "gates": {
+            "coverage_min": 90,
+            "coverage_scope": "touched",
+            "coverage_exclude": [],
+            "coverage_baseline": None,
+            "non_source": [],
+            "coverage_advisory_paths": [],
+            # A sweep cadence (ADR-010). `cadence_days` null means none, which
+            # is exactly the behaviour before the key existed. With one, the
+            # gates named in `gates` stop demanding whole-suite or whole-scheme
+            # evidence per change: a scheduled floor is advisory for every
+            # touched file outside `held_paths`, and a scheduled `test.all_pass`
+            # judges the change's scoped run. `held_paths` are globs whose
+            # touch still owes a FULL run before merge. `grace_days` is how late
+            # a sweep may be before `sweep.fresh` warns. Validated at load: a
+            # cadence that still requires whole-run evidence per change is
+            # refused, naming the gate and the key.
+            "schedule": {
+                "cadence_days": None,
+                "grace_days": 3,
+                "gates": [],
+                "held_paths": [],
+            },
+        },
+    },
+    "enforcement": {"profile": "standard", "rules": {}},
+    "session": {
+        # Paths exempt from worktree isolation. Configuration and knowledge
+        # files are the motivating case: they are data rather than code, every
+        # session edits them, and routing them through a branch produces
+        # conflicts with no review value.
+        "exempt_paths": [".claude/*", ".claude/**", "MEMORY.md"],
+        "worktree_prefix": None,
+        # Where session worktrees are created. Unset means beside the
+        # repository, which keeps the worktree off every path the repository
+        # itself tracks. A project sets this when its host trusts one specific
+        # location — some hosts confirm before moving their permission root
+        # into a directory they do not manage, and the confirmation is not
+        # suppressible by any permission rule, so the only way to stop asking
+        # is to put the worktree where the host already trusts.
+        #
+        # A relative value is resolved against the repository root. Placing
+        # worktrees INSIDE the repository is therefore supported, but it makes
+        # exempt_paths load-bearing in a way it is not otherwise: see
+        # _project_relative_forms, which resolves a path in a linked worktree
+        # against that worktree alone so a directory prefix cannot exempt the
+        # sources underneath it.
+        "worktree_dir": None,
+        # Whether publishing to a remote is part of the session lifecycle.
+        #
+        # Off by default. A session's job is to get reviewed work onto the base
+        # branch; the worktree and its branch are then removed and the work is
+        # already visible to every other worktree, because they share one object
+        # database. Publishing costs a CI run and is a decision about the
+        # project rather than about the session, so it belongs to whoever is
+        # making that decision — not to whichever agent happened to finish last.
+        "push": False,
+        # How long an OPEN plan may sit without moving before the closeout gate
+        # treats the branch as stranded rather than parked.
+        #
+        # A session that spans several agent-host sessions rests with commits
+        # on its branch by design — that is the whole point of a plan
+        # outliving one host — so "there is unmerged work here" stops being
+        # evidence of anything on its own. What still distinguishes the two
+        # cases is whether the plan is being WORKED: a parked session's
+        # deliverables move; an abandoned one's do not.
+        #
+        # Seven days, because the distinction being drawn is "paused over a
+        # weekend" against "abandoned", and a bound that cannot tell those
+        # apart is worse than none.
+        "plan_stale_days": 7,
+    },
+    # The markdown backend stores one file per item, so its path is a
+    # directory. The json and sphinx_needs backends treat it as a single file.
+    "items": {
+        "backend": "markdown",
+        "path": "docs/backlog",
+        # An ADDITIONAL project prefix; the item type already contributes its
+        # own stem, so "BUG_" here mints BUG_BUG_001.
+        "id_prefix": "",
+        # numeric -> BUG_001. slug -> BUG_DRAIN_TREATS_EVERY_FAILURE, for a
+        # backlog whose entries are referenced by name, where a number is both
+        # inconsistent with its neighbours and unlinkable.
+        "id_strategy": "numeric",
+        # Where retired entries live, in the backend's own format: a file for
+        # json and sphinx_needs, a directory for markdown. Unset, there is no
+        # closed store. Set, id minting and an explicit id's uniqueness check
+        # read it too, so a retired id is never spent twice (BUG_074 (c)).
+        # Nothing writes it yet: retirement on close is deferred (IDEA_019).
+        "closed_path": None,
+        # Work items are data every session touches, like configuration and
+        # memory, so the store is exempt from worktree isolation by default.
+        # Set false where backlog edits should be reviewed with the code.
+        "exempt": True,
+    },
+    "memory": {"managed": True, "index_generated": True},
+    "privacy": {
+        "enabled": True,
+        # One authoritative default set, owned by core/privacy. A second copy
+        # here is how a bare PrivacyScanner() and the manifest path came to
+        # enable different patterns (AUD-15).
+        "patterns": list(DEFAULT_PATTERNS),
+        "extra": [],
+        "allow": [],
+        # Keywords resolve through paths.*: docs -> paths.docs, memory ->
+        # paths.memory AND paths.memory_index (the index is a concentrate of
+        # exactly the text the memory scope protects), reports ->
+        # paths.reports (the one rendering of the stats store that leaves the
+        # machine). Any other entry is a project-relative path prefix, which
+        # is how a project widens scope beyond what paths.* names (AUD-15).
+        "scope": ["docs", "memory", "reports", "commit_messages"],
+    },
+    "agents": {
+        "library": [
+            "feature-architect",
+            "compliance-reviewer",
+            "backlog-curator",
+            "bug-reproducer",
+        ],
+        # Project-owned agents the library never touches. A name may not also
+        # be in `library`: an agent is the library's or the project's.
+        "local": [],
+        # Agent name -> overlay path, project-relative (ADR-012 D8, A6.3). A
+        # path is read only when it is named here: docs/agents/<name>.yaml is
+        # the documented convention, never an implicit default (ruling 6).
+        # Each must name an agent in `library`.
+        "overlays": {},
+        # Library agent -> tier, the operator's override of the default its
+        # source states (ADR-012 D9, the A7 ruling 1). A hint: no gate reads it.
+        "tiers": {},
+        # Which agents satisfy which pipeline role. Installing an agent does
+        # not make anything use it, so this mapping is what the agent-role
+        # gates read. A role left empty makes its gate "not applicable" rather
+        # than passing: a project with no review agent should see the gate skip,
+        # not see it go green.
+        "roles": {
+            "design": ["feature-architect"],
+            "review": ["compliance-reviewer"],
+        },
+    },
+    # `tier_map` is tier -> this host's own choice for that tier, one line of
+    # text the engine never interprets (ADR-012 D9, ruling 10). Empty by default
+    # and in every shipped file, so every agent runs on the host's default.
+    "host": {"kind": "claude_code", "tier_map": {}},
+    # The project's coding guidelines (ADR-012 D3, D13). `ruleset` is the
+    # path of the one YAML ruleset; null means no guidelines, and every
+    # `guidelines.*` rule is N/A. The documented location is inside the docs
+    # project, <docs project>/guidelines/ruleset.yaml (`core/guidelines.
+    # ruleset_location`): invariant-docs/guidelines/ruleset.yaml for a new
+    # project, which `init` writes here explicitly (ADR-020 D10), and
+    # docs/guidelines/ruleset.yaml where the docs project is docs/ (ADR-012
+    # ruling 1). Never derived at load. Rule CONTENT never goes here:
+    # the manifest is the operator's enforcement configuration, the ruleset is
+    # the project's content (D2). `checklist` is where `guidelines render`
+    # writes the human checklist; null means checklist.<md|rst> beside the
+    # ruleset, following docs.format (ruling DN-B). It is a generated file the
+    # manifest declares, the CLI's third write class (ruling 13), and never
+    # exempt from isolation. `instruction_files` lists the files that carry
+    # the managed `guidelines/index` block; null means the host adapter's
+    # default (CLAUDE.md for claude_code), which the CLI supplies because no
+    # domain imports a host. They are generated files too, but only between
+    # their markers. `injection.max_lines` caps that block (ruling DN-C), and
+    # every injected guideline text. `injection.on_edit` says whether an
+    # edit carries the statements of the judgement rules that apply to it
+    # (the A5 ruling D7); the findings an edit adds are advised either way.
+    # `baseline` is the ratchet's record of pre-existing pattern and boundary
+    # findings (D6); null means no baseline, and every such finding is new
+    # (DN-1). A configured path whose file does not exist is an error. It is
+    # a generated file too, written only by `guidelines baseline`.
+    # `verdicts.note_max_chars` caps the inert note a judgement verdict
+    # carries (D5 item 6, A4 increment 1). A key D13 does not name is
+    # refused rather than ignored.
+    "guidelines": {
+        "ruleset": None,
+        "baseline": None,
+        "checklist": None,
+        "instruction_files": None,
+        "injection": {"max_lines": 40, "on_edit": True},
+        "verdicts": {"note_max_chars": 280},
+    },
+}
+
+#: The `agents` keys this build reads.
+_AGENTS_KEYS = ("library", "local", "roles", "overlays", "tiers")
+
+#: The `host` keys this build reads.
+_HOST_KEYS = ("kind", "tier_map")
+
+#: The `guidelines` keys this build reads.
+_GUIDELINES_KEYS = (
+    "ruleset", "baseline", "checklist", "instruction_files", "injection", "verdicts",
+)
+#: Those of them that are null or one path.
+_GUIDELINES_PATH_KEYS = ("ruleset", "baseline", "checklist")
+#: The `guidelines.injection` keys this build reads.
+_INJECTION_KEYS = ("max_lines", "on_edit")
+#: The `guidelines.verdicts` keys this build reads (A4 increment 1).
+_VERDICTS_KEYS = ("note_max_chars",)
+
+#: The `docs.assess` keys this build reads (ADR-016 D9), its checks, the
+#: `areas` keys and where areas may come from (D1, D2).
+_ASSESS_KEYS = ("checks", "sections", "areas")
+#: The `docs` keys this build reads, and the onboarding modes (ADR-016 D9).
+_DOCS_KEYS = (
+    "format", "diagrams", "index", "require_diagram_update", "assess", "onboarding", "adopt",
+    "needs",
+)
+#: The `docs.needs` keys this build reads (ADR-018 increment 3).
+_NEEDS_KEYS = (
+    "state", "types", "srcdir", "require_links", "decision_statuses", "refused_paths",
+)
+#: The rules whose level follows `docs.needs.state` (ADR-018 D5, D6, D8, D9,
+#: D10): the profile's `warn` while migrating, `block` when enforced, and in
+#: an enforced project never lower (ruling 19, the floor): a level setting one
+#: below `block` is refused at load, naming ruling 1.
+MANDATE_RULES = (
+    "docs.builds_strict",
+    "docs.needs_traceable",
+    "docs.design_home",
+    "docs.decisions_recorded",
+    "items.decisions_linked",
+)
+#: The rule refusing a change that moves `docs.needs.state` back from
+#: `enforced` (ADR-018 D10). It blocks in every profile and has the floor in
+#: every state, because the change it judges is one that leaves the project
+#: migrating, where the mandate rules' own floor no longer holds.
+MANDATE_KEPT = "docs.mandate_kept"
+ONBOARDING_MODES = ("off", "incremental", "all_at_once")
+#: The `docs.adopt` keys and modes (ADR-016 D7, D9); null is no adoption.
+_ADOPT_KEYS = ("mode", "source")
+ADOPT_MODES = ("in_place", "copy")
+ASSESS_CHECKS = ("sections", "areas", "links")
+_AREAS_KEYS = ("from", "globs", "declared", "exclude")
+AREA_SOURCES = ("adapter", "globs", "declared")
+_DECLARED_AREA_KEYS = ("path", "name")
+
+#: Each record type, and the locations it may take (ADR-014 D1).
+RECORD_LOCATIONS: dict[str, tuple[str, ...]] = {
+    "docs": ("repo", "store"),
+    "backlog": ("repo", "store"),
+    "guidelines": ("repo", "store"),
+    "memory": ("repo", "store"),
+    "reports": ("repo", "store"),
+    "sweeps": ("repo", "store"),
+    "hooks": ("repo", "local"),
+    "agents": ("repo", "local"),
+}
+
+#: Locations a record no longer takes, each with the reason and the fix. The
+#: user-level host wiring of ADR-014 D11 was replaced before it was built:
+#: nothing is installed at user level (ADR-020 D9).
+_RETIRED_LOCATIONS: dict[str, str] = {
+    "user": (
+        "user is retired (ADR-020 D9): nothing is installed at user level, and "
+        "each project is wired on its own. Use local for this clone's own "
+        ".claude/, uncommitted and listed in .git/info/exclude, or repo for the "
+        "committed wiring"
+    ),
+}
+
+#: The path keys each record type owns. Under `store` they are read against
+#: the store root (D1). `methodology.extra_machines` and
+#: `methodology.gates.coverage_baseline` follow `guidelines`, because they
+#: are policy files too; `agents.overlays` is a mapping whose values are the
+#: paths.
+RECORD_PATH_KEYS: dict[str, tuple[str, ...]] = {
+    "docs": ("paths.docs", "docs.needs.srcdir"),
+    "backlog": ("items.path", "items.closed_path"),
+    "guidelines": (
+        "guidelines.ruleset",
+        "guidelines.baseline",
+        "guidelines.checklist",
+        "agents.overlays",
+        "methodology.extra_machines",
+        "methodology.gates.coverage_baseline",
+    ),
+    "memory": ("paths.memory", "paths.memory_index"),
+    "reports": ("paths.reports",),
+    "sweeps": ("paths.sweeps",),
+}
+
+#: Records whose `store` location is refused until the increment that makes
+#: it safe is built, with that reason (ADR-014 D9, Increments). Empty since
+#: increment 4c-2, which reads the guidelines records from their own tree.
+_STORE_NOT_YET: dict[str, str] = {}
+
+
+@dataclass
+class Manifest:
+    """A fully resolved configuration plus the provenance of every value."""
+
+    root: Path
+    path: Path
+    data: dict[str, Any]
+    provenance: dict[str, str] = field(default_factory=dict)
+    #: The root of the project's store, when it has one (ADR-014 D2). A
+    #: record under `store` reads its path keys against it.
+    store_root: Path | None = None
+    #: The store as the lookup found it, for a store project (ADR-014 D2).
+    store: StoreLink | None = None
+    #: False when ``locate`` found no project and resolved the defaults.
+    located: bool = True
+    #: The config levels as read, lowest first, each with its provenance
+    #: label (ADR-014 D3): the user's defaults, the store's levels, then the
+    #: repo's own. What a level itself sets, as against what resolves, is
+    #: read here (ADR-017 D2, a question's current value at its target).
+    levels: tuple[tuple[str, dict[str, Any]], ...] = ()
+    _discovery_cache: dict[str, str] = field(default_factory=dict, repr=False)
+
+    # -- discovery -----------------------------------------------------
+
+    @classmethod
+    def locate(
+        cls,
+        start: Path | None = None,
+        *,
+        required: bool = True,
+        env: Mapping[str, str] | None = None,
+    ) -> Manifest:
+        """The project ``start`` lies in, resolved over every config level.
+
+        Walks up from ``start`` (ADR-014 D2). At each level an in-repo
+        manifest, ``.claude/invariant.yaml``, answers first, exactly as
+        before; otherwise a git top level whose identity has a store (its
+        pointer, then the user level's ``repos:``), or which carries a
+        pointer, is the project root. The nearest answer wins, so a repo
+        nested inside an in-repo project finds its own store first. A plain
+        git repository is walked past.
+
+        With nothing found, ``required`` refuses; otherwise the defaults are
+        resolved at ``start``, with ``located`` false. A refusal about a
+        project that was found names it (``ManifestError.project_root``).
+        """
+        begin = Path(start or Path.cwd()).resolve()
+        user = load_user_config(env)
+        below = [(user.label, user.defaults)] if user.defaults else []
+        for candidate in [begin, *begin.parents]:
+            in_repo = candidate / MANIFEST_RELPATH
+            if in_repo.is_file():
+                with _naming_the_project(candidate, in_repo):
+                    return cls._in_repo(candidate, in_repo, below, env)
+            if (candidate / ".git").exists():
+                with _naming_the_project(candidate, candidate / POINTER):
+                    found = cls._store_project(candidate, user, below, env)
+                if found is not None:
+                    return found
+        if required:
+            raise ManifestError(
+                "no .claude/invariant.yaml found in this directory or any "
+                "parent; run 'invariant init' to create one, or "
+                "'invariant store link <store>' to keep this repository's records "
+                "in a store"
+            )
+        return cls.from_raw(
+            {}, root=begin, path=begin / MANIFEST_RELPATH, env=env, below=below,
+            located=False,
+        )
+
+    @classmethod
+    def _in_repo(
+        cls,
+        root: Path,
+        path: Path,
+        below: Sequence[tuple[str, Mapping[str, Any]]],
+        env: Mapping[str, str] | None,
+    ) -> Manifest:
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ManifestError(f"{MANIFEST_RELPATH} is not valid YAML: {exc}") from exc
+        if not isinstance(raw, Mapping):
+            raise ManifestError(f"{MANIFEST_RELPATH} must contain a mapping")
+        return cls.from_raw(dict(raw), root=root, path=path, env=env, below=below)
+
+    @classmethod
+    def _store_project(
+        cls,
+        top: Path,
+        user: UserConfig,
+        below: Sequence[tuple[str, Mapping[str, Any]]],
+        env: Mapping[str, str] | None,
+    ) -> Manifest | None:
+        """The project at the git top level ``top``, when it has a store or a
+        pointer; ``None`` for a plain repository."""
+        pointer = read_pointer(top)
+        link = find_store(top, repo_identity(top), pointer, user)
+        if link is None and pointer is None:
+            return None
+        levels = list(below)
+        path = pointer.path if pointer is not None else None
+        if link is not None:
+            try:
+                store = store_levels(link)
+            except ManifestError as exc:
+                note = _migrating(top)
+                if note is None:
+                    raise
+                raise ManifestError(f"{exc}\n{note}") from exc
+            link = store.link
+            levels.append((link.label, store.top))
+            if store.repo:
+                levels.append((link.repo_label, store.repo))
+            path = path or link.root / STORE_MANIFEST
+        manifest = cls.from_raw(
+            pointer.level if pointer is not None else {},
+            root=top,
+            path=path or top / POINTER,
+            env=env,
+            below=levels,
+            store=link,
+            label=f"repo:{POINTER}",
+        )
+        if link is None and manifest.get("guidelines.baseline") is not None:
+            # The shrink gate reads the base's manifest where the project's own
+            # level lives (``Manifest.location``): the store's invariant.yaml
+            # for a store project (ADR-014 D9, increment 4c-2). A pointer alone
+            # may set no policy key, so a baseline here came from the user
+            # level, which no base holds: the gate would read "no baseline
+            # configured" and admit every entry.
+            raise ManifestError(
+                "guidelines.baseline is refused in a project defined by a pointer "
+                "alone, with no store: its level may set no policy key, so the "
+                "baseline came from the user level, which no base branch holds, and "
+                "guidelines.baseline_only_shrinks would admit every entry (ADR-014 "
+                "D9). Link a store and set it there, or keep the manifest in the "
+                "repository."
+            )
+        return manifest
+
+    @classmethod
+    def is_project_root(cls, path: Path) -> bool:
+        """Is ``path`` the root of a project, in-repo or store?
+
+        An in-repo manifest answers by its existence alone, as it always did.
+        Otherwise ``locate`` is asked, and a project there that does not load
+        is still a project: its refusal is its own report.
+        """
+        path = Path(path)
+        if (path / MANIFEST_RELPATH).is_file():
+            return True
+        if not (path / ".git").exists():
+            return False
+        try:
+            found = cls.locate(path, required=False)
+        except ManifestError as exc:
+            return exc.project_root is not None and exc.project_root == path.resolve()
+        return found.located and found.root == path.resolve()
+
+    # -- resolution ----------------------------------------------------
+
+    @classmethod
+    def from_raw(
+        cls,
+        raw: Mapping[str, Any],
+        *,
+        root: Path,
+        path: Path,
+        env: Mapping[str, str] | None = None,
+        below: Sequence[tuple[str, Mapping[str, Any]]] = (),
+        store_root: Path | None = None,
+        store: StoreLink | None = None,
+        label: str | None = None,
+        located: bool = True,
+    ) -> Manifest:
+        """Resolve ``raw``, the repo's level, over the library's layers.
+
+        ``below`` are the config levels under ``raw``, lowest first, each
+        with its provenance label: the user's defaults and the store's levels
+        (ADR-014 D3, 5a and 5b). ``label`` is ``raw``'s own, ``repo:`` and
+        the file's path from the root unless given. ``store`` is the
+        project's store; ``store_root``, its root, against which a record
+        under `store` reads its path keys (D1).
+        """
+        env = os.environ if env is None else env
+        if label is None:
+            try:
+                label = f"repo:{Path(path).relative_to(root).as_posix()}"
+            except ValueError:
+                label = f"repo:{Path(path).name}"
+        if store is not None and store_root is None:
+            store_root = store.root
+        levels = [*(level for _label, level in below), raw]
+
+        data = copy.deepcopy(DEFAULTS)
+        provenance: dict[str, str] = {}
+        _record(provenance, data, "default")
+
+        # Layer 2 — the primary adapter's defaults, flat `commands.*` included.
+        # The ecosystems are the highest level's that names them: a store
+        # project names them in its store.
+        primary, *others = _ecosystems(
+            {"project": {"ecosystems": _highest(levels, "project", "ecosystems")}}
+        )
+        _merge(data, _adapter_defaults(primary), provenance, f"adapter:{primary}")
+
+        # Layer 3 — every further ecosystem, in listed order, without ever
+        # overwriting the primary (ADR-013 D1, D4). Its commands go under its
+        # own key, `commands.<ecosystem>`; anything else it supplies fills
+        # only a key no adapter has set. Merging them flat let the LAST
+        # ecosystem's commands replace the primary's while the primary's
+        # adapter read the output (BUG_097).
+        for eco in _secondaries(primary, others):
+            adapter_defaults = _adapter_defaults(eco)
+            commands = adapter_defaults.pop("commands", None)
+            if commands:
+                _merge(data, {"commands": {eco: commands}}, provenance, f"adapter:{eco}")
+            _fill(data, adapter_defaults, provenance, f"adapter:{eco}")
+
+        # Layer 4 — the enforcement profile supplies rule levels only. The
+        # name is the highest level's that sets one, so a user default picks
+        # the profile and the project's own choice still wins over it.
+        profile_name = str(
+            _highest(levels, "enforcement", "profile") or data["enforcement"]["profile"]
+        )
+        profile_rules = _load_profile(profile_name)
+        _merge(
+            data,
+            {"enforcement": {"rules": profile_rules}},
+            provenance,
+            f"profile:{profile_name}",
+        )
+        # An enforced project's docs rules block from its profile (ADR-018
+        # D10); a level setting one lower is refused at load by ruling 19's
+        # floor (`_validate_floor`).
+        if _highest(levels, "docs", "needs", "state") == "enforced":
+            _merge(
+                data,
+                {"enforcement": {"rules": dict.fromkeys(MANDATE_RULES, "block")}},
+                provenance,
+                f"profile:{profile_name} (docs.needs.state: enforced)",
+            )
+
+        # A store project's sync settings take the ruled defaults (ADR-014 D7,
+        # ruling 7). An in-repo project has no store to pull, so it carries no
+        # `sync` block and its configuration reads exactly as before.
+        if store is not None:
+            from .storesync import SYNC_DEFAULTS
+
+            _merge(data, {"sync": dict(SYNC_DEFAULTS)}, provenance, "default")
+
+        # Layer 5 — the config levels, lowest first (ADR-014 D3): the user's
+        # defaults, the store and its block for this repo, then the repo's own.
+        for below_label, level in below:
+            _merge(data, level, provenance, below_label)
+        _merge(data, raw, provenance, label)
+
+        manifest = cls(
+            root=Path(root),
+            path=Path(path),
+            data=data,
+            provenance=provenance,
+            store_root=store_root,
+            store=store,
+            located=located,
+            levels=tuple(
+                (level_label, copy.deepcopy(dict(level)))
+                for level_label, level in [*below, (label, raw)]
+            ),
+        )
+
+        # Layer 6 — environment escapes.
+        manifest._apply_env(env)
+        try:
+            manifest.validate()
+        except ManifestError as exc:
+            raise manifest._naming_lower_levels(exc, below) from exc
+        manifest._place_store_records()
+        return manifest
+
+    def _naming_lower_levels(
+        self, exc: ManifestError, below: Sequence[tuple[str, Mapping[str, Any]]]
+    ) -> ManifestError:
+        """``exc``, naming the user-level values in the configuration it refused.
+
+        A default written in one operator's home is part of every project's
+        configuration on that machine, so a refusal it caused must say where
+        to look: the message would otherwise point at a manifest that never
+        set the key.
+        """
+        values = self.user_level_values()
+        if not values:
+            return exc
+        labels = sorted({label for label, _level in below})
+        keys = ", ".join(key for key, _value, _label in values)
+        message = (
+            f"{exc}\n  The user level ({', '.join(labels)}) supplies part of this "
+            f"configuration: {keys}."
+        )
+        if isinstance(exc, UnknownRuleError):
+            return UnknownRuleError(message, exc.rule_id)
+        return ManifestError(message)
+
+    def set_by_project(self, dotted: str) -> bool:
+        """Did one of the project's own levels, its repo or its store, set it?"""
+        return self.source_of(dotted).startswith(("repo:", "store:"))
+
+    def user_level_values(self) -> list[tuple[str, Any, str]]:
+        """Every resolved value the user level supplied, with its label.
+
+        What `doctor` lists in one row (ADR-014 ruling 19), so an operator's
+        home directory never changes a resolved value unannounced. A user
+        default a higher level overrides is not here: it changed nothing.
+        """
+        return [row for row in self.iter_provenance() if row[2].startswith("user:")]
+
+    def _place_store_records(self) -> None:
+        """Read every `store` record's path keys against the store (D1).
+
+        Validation has already refused a `store` record with no store root
+        and a store path that is absolute or climbs out. The joined value is
+        absolute, which ``path_for`` and every reader that joins onto the
+        root already resolve; its provenance stays the level that set it.
+        """
+        if self.store_root is None:
+            return
+        for record, location in self.data["records"].items():
+            if location != "store":
+                continue
+            for dotted, joined in store_record_paths(
+                self.data, record, self.store_root
+            ).items():
+                *parents, leaf = dotted.split(".")
+                node = self.data
+                for part in parents:
+                    node = node[part]
+                node[leaf] = joined
+
+    def _apply_env(self, env: Mapping[str, str]) -> None:
+        floored = self._floored()
+        if profile := env.get("INVARIANT_PROFILE"):
+            rules = {
+                rule_id: level
+                for rule_id, level in _load_profile(profile).items()
+                if rule_id not in floored
+            }
+            self.data["enforcement"]["profile"] = profile
+            self.data["enforcement"]["rules"].update(rules)
+            self.provenance["enforcement.profile"] = "env:INVARIANT_PROFILE"
+            for rule_id in rules:
+                self.provenance[f"enforcement.rules.{rule_id}"] = "env:INVARIANT_PROFILE"
+
+        if state_root := env.get("INVARIANT_STATE_ROOT"):
+            self.data["paths"]["state"] = state_root
+            self.provenance["paths.state"] = "env:INVARIANT_STATE_ROOT"
+
+        if disabled := env.get("INVARIANT_DISABLE"):
+            # Loud, and NOT a refusal. This variable is an escape hatch reached
+            # in a hurry by somebody who is already blocked; refusing to load
+            # the whole manifest because one token was mistyped would wedge
+            # exactly that caller. It used to do neither — a token naming no
+            # rule was written straight into the map and silently did nothing,
+            # so `privacy.klean,docs.read_architecture` disabled the second and
+            # ignored the first without a word (BUG_050).
+            for rule_id in (r.strip() for r in disabled.split(",") if r.strip()):
+                if _unknown_rule(rule_id, self.data.get("steps")):
+                    print(
+                        f"invariant: INVARIANT_DISABLE names {rule_id!r}, which "
+                        f"is not a rule{_did_you_mean(rule_id, self.data.get('steps'))}. It was ignored; "
+                        f"the rule you meant is still enforced.",
+                        file=sys.stderr,
+                    )
+                    continue
+                if rule_id in floored:
+                    # The floor of ruling 19, held for the escape hatch too,
+                    # and not by refusing the load: the hatch is reached by
+                    # somebody already blocked. The recorded routes remain.
+                    print(
+                        f"invariant: INVARIANT_DISABLE names {rule_id!r}, which "
+                        f"cannot be set below block here (ADR-018 ruling 1, "
+                        f"ruling 19). It was ignored; to pass one change, use "
+                        f"'invariant override', 'pipeline advance --force "
+                        f"--reason' or 'invariant standdown'.",
+                        file=sys.stderr,
+                    )
+                    continue
+                self.data["enforcement"]["rules"][rule_id] = Level.OFF.value
+                self.provenance[f"enforcement.rules.{rule_id}"] = "env:INVARIANT_DISABLE"
+
+    def _floored(self) -> tuple[str, ...]:
+        """The rules no level may set below `block` here (ADR-018 ruling 19).
+
+        The mandate's rules in an enforced project, and `docs.mandate_kept`
+        in every project: the change it refuses leaves the project migrating.
+        """
+        docs = self.data.get("docs")
+        needs = docs.get("needs") if isinstance(docs, Mapping) else None
+        state = needs.get("state") if isinstance(needs, Mapping) else None
+        return (*MANDATE_RULES, MANDATE_KEPT) if state == "enforced" else (MANDATE_KEPT,)
+
+    def _validate_floor(self) -> None:
+        """Refuse a level below `block` on a floored rule, naming ruling 1.
+
+        ADR-001 D25's permanent route is removed for these rules alone; the
+        temporary, recorded ones stand, and the refusal names them.
+        """
+        rules = self.data["enforcement"]["rules"]
+        for rule_id in self._floored():
+            level = Level.parse(rules.get(rule_id, "block"))
+            if level is Level.BLOCK:
+                continue
+            source = self.provenance.get(f"enforcement.rules.{rule_id}", "default")
+            why = (
+                "the docs mandate is not optional (ADR-018 ruling 1): in an "
+                "enforced project its rules cannot be set below block (ruling 19)"
+                if rule_id != MANDATE_KEPT
+                else "moving docs.needs.state back from enforced passes only "
+                "with a reason (ADR-018 ruling 1, D10), so this rule cannot be "
+                "set below block (ruling 19)"
+            )
+            raise ManifestError(
+                f"enforcement.rules.{rule_id} is {level.value} (from {source}), but "
+                f"{why}. Remove the entry. To pass one change, use the recorded "
+                f"routes: 'invariant override {rule_id} --reason <why>', "
+                f"'invariant pipeline advance <state> --force --reason <why>' or "
+                f"'invariant standdown'."
+            )
+
+    def validate(self) -> None:
+        if int(self.data.get("version", 1)) != 1:
+            raise ManifestError(
+                f"manifest version {self.data['version']} is not supported by "
+                f"this release, which understands version 1"
+            )
+        # Both halves of every entry. The VALUE has always been parsed; the KEY
+        # was never checked against anything, and `rule_level()` answers WARN
+        # for an id it does not hold — so an override naming a rule that does
+        # not exist loaded without error, did nothing, and showed a provenance
+        # entry that read as though it had taken (BUG_050).
+        #
+        # An override is the one control this library hands back, so a silent
+        # no-op here costs more than anywhere else. The instinct is already in
+        # the codebase twice: `core.rules.evaluate` fails loudly on a gate
+        # naming a rule that does not exist, because "a gate naming a rule that
+        # does not exist would otherwise pass silently forever", and AUD-08
+        # added exactly this check for a mistyped methodology. Neither had been
+        # extended to the ids an operator uses to exercise authority.
+        #
+        # Refused at load rather than warned: a manifest is read on every
+        # command, so a warning here is printed hundreds of times and read none
+        # of them. The escape-hatch case that must NOT be refused is
+        # `INVARIANT_DISABLE`, and it is handled in `_apply_env` above.
+        # The steps first: a `step.<name>` override is known once its step is
+        # declared, so the declarations must be sound before it is judged.
+        self._validate_steps()
+        steps = self.data.get("steps")
+        for rule_id, level in self.data["enforcement"]["rules"].items():
+            Level.parse(level)  # raises with a useful message
+            if _unknown_rule(rule_id, steps):
+                raise UnknownRuleError(
+                    f"enforcement.rules names {rule_id!r}, which is not a rule "
+                    f"this build carries{_did_you_mean(rule_id, steps)}.\n"
+                    f"  An override that names nothing is silently discarded, "
+                    f"and the rule you meant keeps enforcing.\n"
+                    f"  'invariant rules list' shows every id.",
+                    rule_id,
+                )
+        scope = self.data["privacy"]["scope"]
+        if not isinstance(scope, list):
+            raise ManifestError("privacy.scope must be a list")
+        # Read at load, not when a scanner is first built: a scoped entry
+        # naming a pattern that does not exist would otherwise load, match
+        # nothing, and leave the finding it was written for blocking.
+        try:
+            parse_allow(self.data["privacy"].get("allow") or [])
+        except ValueError as exc:
+            raise ManifestError(str(exc)) from exc
+        # The coverage glob lists are each a RELAXATION, and a bare string
+        # given for one is iterated character by character downstream — so
+        # `"web/**"` contributes a lone `*`, which matches every path in the
+        # project. A mistyped narrowing must not become a project-wide one.
+        gates = self.data["methodology"].get("gates") or {}
+        for key in _GLOB_LIST_GATES:
+            value = gates.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, list) or not all(
+                isinstance(entry, str) for entry in value
+            ):
+                raise ManifestError(
+                    f"methodology.gates.{key} must be a list of glob strings, "
+                    f"got {value!r}"
+                )
+        self._validate_coverage_floor(gates)
+        self._validate_schedule(gates)
+        self._validate_records()
+        self._validate_sync()
+        self._validate_privacy_store()
+        self._validate_ecosystem_commands()
+        self._validate_freshness_level()
+        self._validate_guidelines()
+        self._validate_docs()
+        self._validate_docs_needs()
+        self._validate_floor()
+        self._validate_docs_assess()
+        self._validate_docs_adopt()
+        self._validate_agents()
+        self._validate_host()
+        backend = self.data["items"]["backend"]
+        if backend not in {"markdown", "sphinx_needs", "json", "none"}:
+            raise ManifestError(f"unknown work-item backend {backend!r}")
+        # A mistyped methodology used to surface only when a machine load
+        # happened to run — and several gates skipped, silently and
+        # non-blocking, exactly then (AUD-08). Existence is checked here, at
+        # load, where a configuration error belongs; whether the file parses
+        # as a machine of the right kind is still the loader's question.
+        methodology = str(self.data["methodology"]["pipeline"] or "tdd")
+        from .machines import find_machine_file
+
+        try:
+            find_machine_file(methodology, self)
+        except ManifestError as exc:
+            raise ManifestError(f"methodology.pipeline: {exc}") from exc
+
+    def _validate_steps(self) -> None:
+        """The project's own steps (ADR-021 D1, D2), refused at load naming
+        what is wrong. A ``pipeline.enter`` state is checked against every
+        lane a pipeline may start in, not only the configured one."""
+        from . import steps as steps_reader
+        from .machines import lane_states
+
+        steps_reader.validate(
+            self.data.get("steps"),
+            lane_states=lambda: lane_states(self),
+            placeholders_unfilled=self._unfilled,
+        )
+
+    def _unfilled(self, template: str) -> list[str]:
+        supplied = set(self.get("vars") or {}) | set(self.get("discover") or {})
+        return [p for p in _placeholders(template) if p not in supplied]
+
+    @staticmethod
+    def _validate_coverage_floor(gates: Mapping[str, Any]) -> None:
+        """A floor is a percent (ADR-017 D6): the questionnaire and a
+        hand-written value meet this one rule. Null and a quoted number load,
+        as the gates have always read them (``float(value or 0)``)."""
+        floor = gates.get("coverage_min")
+        if floor is None:
+            return
+        try:
+            percent = None if isinstance(floor, bool) else float(floor)
+        except (TypeError, ValueError):
+            percent = None
+        if percent is None or not 0 <= percent <= 100:
+            raise ManifestError(
+                f"methodology.gates.coverage_min must be a number from 0 to 100, "
+                f"got {floor!r}"
+            )
+
+    def _validate_records(self) -> None:
+        """Refuse a `records` block that would place a record nowhere (D1).
+
+        A location this build cannot honour yet is refused with the increment
+        that builds it rather than loading and doing nothing (BUG_050); none
+        is, since increment 4c-2 lifted the guidelines'. A retired location,
+        `user` for hooks and agents (ADR-020 D9), is refused naming its fix.
+        """
+        records = self.data.get("records")
+        if not isinstance(records, Mapping):
+            raise ManifestError(
+                f"records must be a mapping of record type to its location, "
+                f"got {records!r}"
+            )
+        for record, location in records.items():
+            if record == "manifest":
+                raise ManifestError(
+                    "records.manifest: the manifest is not a record. Where it "
+                    "lives is answered by the config levels (ADR-014 D3): a "
+                    "project moves its manifest by having no repo level."
+                )
+            if record not in RECORD_LOCATIONS:
+                raise ManifestError(
+                    f"records names {record!r}, which is not a record type; "
+                    f"use one of {', '.join(RECORD_LOCATIONS)}"
+                )
+            allowed = RECORD_LOCATIONS[record]
+            retired = _RETIRED_LOCATIONS.get(location) if isinstance(location, str) else None
+            if retired is not None and record in ("hooks", "agents"):
+                raise ManifestError(f"records.{record}: {retired}.")
+            if not isinstance(location, str) or location not in allowed:
+                raise ManifestError(
+                    f"records.{record} is {location!r}; use one of {', '.join(allowed)}"
+                )
+            if location == "store" and record in _STORE_NOT_YET:
+                raise ManifestError(
+                    f"records.{record}: store is refused in this build: "
+                    f"{_STORE_NOT_YET[record]}."
+                )
+        stored = [record for record, location in records.items() if location == "store"]
+        if stored and self.store_root is None:
+            raise ManifestError(
+                f"records.{stored[0]} is store, but this project has no store. "
+                f"A store is named by the repo's pointer or linked from the user "
+                f"level ('invariant store link'); an in-repo project keeps every "
+                f"record in its repo."
+            )
+        if records.get("backlog") == "store" and self.get("items.exempt") is False:
+            raise ManifestError(
+                "items.exempt: false with records.backlog: store is refused "
+                "(ADR-014 D10). A backlog in a store is written in the store's "
+                "main checkout, which no session branch reviews, so it can only "
+                "be exempt from isolation; set items.exempt: true, or keep the "
+                "backlog in the repo to review it with the code."
+            )
+        if self.store_root is not None:
+            for record in stored:
+                store_record_paths(self.data, record, self.store_root)
+
+    def _validate_sync(self) -> None:
+        """Refuse a `sync` block that would load and do nothing (ADR-014 D7).
+
+        Its values are checked wherever it resolves from. A project that keeps
+        its records in its repository has no store to pull, so its own level
+        setting `sync` is refused; a user default is the machine's choice for
+        the store projects on it, and is inert here.
+        """
+        if "sync" not in self.data:
+            return
+        from .storesync import validate
+
+        validate(self.data["sync"])
+        if self.store is None:
+            for label, level in self.levels:
+                if label.startswith("repo:") and "sync" in level:
+                    raise ManifestError(
+                        "sync is a store's (ADR-014 D7): this project keeps its "
+                        "records in its repository and has no store to pull. "
+                        "Remove the sync block."
+                    )
+
+    def _validate_privacy_store(self) -> None:
+        """Refuse a ``privacy.store`` block anywhere but the store's top level
+        (ADR-014 D8): it relaxes the store's own screen, which reads the store's
+        block alone, so set anywhere else it would load and do nothing."""
+        own = self.store.label if self.store is not None else None
+        for label, level in self.levels:
+            block = level.get("privacy")
+            if not isinstance(block, Mapping) or "store" not in block:
+                continue
+            if label != own:
+                raise ManifestError(
+                    f"privacy.store is set at the {label} level; it is a store's own "
+                    f"setting (ADR-014 D8), read only at the store's top level"
+                )
+            from .storescan import check_store_key
+
+            check_store_key(block["store"], label)
+
+    def _validate_ecosystem_commands(self) -> None:
+        """Refuse a per-ecosystem command block that would do nothing (ADR-013 D1).
+
+        A mapping under ``commands`` is a further ecosystem's commands, and
+        nothing else: one naming the primary, or an ecosystem the project does
+        not declare, would load and never be read, which is BUG_050's shape. A
+        command name the block does not know is refused for the same reason.
+        """
+        primary = self.primary_ecosystem
+        secondaries = self.declared_ecosystems[1:]
+        for key, value in (self.data.get("commands") or {}).items():
+            if key in secondaries:
+                if not isinstance(value, Mapping):
+                    raise ManifestError(
+                        f"commands.{key} must be a mapping of the {key!r} "
+                        f"ecosystem's commands, got {value!r}"
+                    )
+            elif not isinstance(value, Mapping):
+                continue
+            elif key == primary:
+                raise ManifestError(
+                    f"commands.{key} names the primary ecosystem, whose commands "
+                    f"are the flat commands.* keys; move them there"
+                )
+            else:
+                declared = ", ".join(self.declared_ecosystems)
+                raise ManifestError(
+                    f"commands.{key} is a block of commands for an ecosystem "
+                    f"project.ecosystems does not declare ({declared}), so "
+                    f"nothing would read it"
+                )
+            for name, command in value.items():
+                if name not in COMMAND_NAMES:
+                    raise ManifestError(
+                        f"commands.{key}.{name} is not a command this build runs; "
+                        f"the names are {', '.join(COMMAND_NAMES)}"
+                    )
+                if command is not None and not isinstance(command, str):
+                    raise ManifestError(
+                        f"commands.{key}.{name} must be a command string or "
+                        f"null, got {command!r}"
+                    )
+
+    def _validate_schedule(self, gates: Mapping[str, Any]) -> None:
+        """Refuse a sweep cadence that still demands whole-run evidence (ADR-010 D3).
+
+        Every refusal names the key and, where there is one, the gate, because
+        the alternative is the shape BUG_050 recorded: a setting that loads,
+        does nothing, and reads as though it had taken effect. Levels are read
+        RESOLVED — profile, overrides and environment — since that is what a
+        gate would actually do with the evidence a change can produce.
+        """
+        schedule = gates.get("schedule")
+        key = "methodology.gates.schedule"
+        if not isinstance(schedule, Mapping):
+            raise ManifestError(f"{key} must be a mapping, got {schedule!r}")
+        cadence = schedule.get("cadence_days")
+        grace = schedule.get("grace_days")
+        scheduled = schedule.get("gates")
+        held = schedule.get("held_paths")
+        if cadence is not None and not _is_count(cadence, minimum=1):
+            raise ManifestError(
+                f"{key}.cadence_days must be null or a positive whole number of "
+                f"days, got {cadence!r}"
+            )
+        if not _is_count(grace, minimum=0):
+            raise ManifestError(
+                f"{key}.grace_days must be a whole number of days, 0 or more, "
+                f"got {grace!r}"
+            )
+        if not isinstance(scheduled, list) or not all(
+            isinstance(entry, str) for entry in scheduled
+        ):
+            raise ManifestError(
+                f"{key}.gates must be a list of rule ids, got {scheduled!r}"
+            )
+        # A relaxation like the coverage globs, so a bare string is refused
+        # for the reason it is refused there.
+        if not isinstance(held, list) or not all(isinstance(entry, str) for entry in held):
+            raise ManifestError(
+                f"{key}.held_paths must be a list of glob strings, got {held!r}"
+            )
+        if cadence is None:
+            if scheduled or held:
+                named = "gates" if scheduled else "held_paths"
+                raise ManifestError(
+                    f"{key}.{named} is set, but {key}.cadence_days is null, so "
+                    f"nothing is on a sweep cadence and the list would do "
+                    f"nothing.\n  Set cadence_days, or empty the list."
+                )
+            return
+        if not scheduled:
+            raise ManifestError(
+                f"{key}.gates is empty, but cadence_days is {cadence}: a cadence "
+                f"must move at least one of {', '.join(SCHEDULABLE_GATES)} to "
+                f"the sweep."
+            )
+        for gate in scheduled:
+            if gate not in SCHEDULABLE_GATES:
+                from difflib import get_close_matches
+
+                near = get_close_matches(gate, SCHEDULABLE_GATES, n=1, cutoff=0.6)
+                hint = f"; did you mean {near[0]!r}?" if near else ""
+                raise ManifestError(
+                    f"{key}.gates names {gate!r}, which cannot be scheduled"
+                    f"{hint}\n  The schedulable gates are "
+                    f"{', '.join(SCHEDULABLE_GATES)}."
+                )
+        floor_gate = "coverage.meets_floor"
+        if floor_gate not in scheduled:
+            level = self.rule_level(floor_gate)
+            if level in (Level.BLOCK, Level.ASK):
+                raise ManifestError(
+                    f"{floor_gate} is at {level.value} and not in {key}.gates, "
+                    f"so it still demands a whole-scheme coverage run on every "
+                    f"change: a scoped run is a lower bound it would block on.\n"
+                    f"  Schedule it ({key}.gates), or set "
+                    f"enforcement.rules.{floor_gate} to warn or off."
+                )
+            return
+        scope = str(gates.get("coverage_scope", "touched"))
+        if scope != "touched":
+            raise ManifestError(
+                f"{floor_gate} is scheduled, but methodology.gates.coverage_scope "
+                f"is {scope!r}: a floor over every measured row is whole-scheme "
+                f"evidence per change by definition. Use coverage_scope: touched."
+            )
+        if gates.get("coverage_advisory_paths"):
+            raise ManifestError(
+                f"{floor_gate} is scheduled, so every touched file is already "
+                f"advisory, and methodology.gates.coverage_advisory_paths would "
+                f"load and do nothing. Remove it; {key}.held_paths is how a "
+                f"scheduled floor holds a path back."
+            )
+
+    def _validate_freshness_level(self) -> None:
+        """Refuse ``sweep.fresh`` at a level that stops work (ADR-010 D3 item 5).
+
+        Ruling 10 made the freshness rule advisory by construction: a stale
+        sweep is evidence the project has not refreshed, and stopping a change
+        for it would make one machine being off for a weekend block everyone.
+        The engine holds that ruling here rather than in prose. Refused with
+        or without a cadence, since a level nothing reads today would block on
+        the day one is set.
+        """
+        rule_id = "sweep.fresh"
+        level = self.rule_level(rule_id)
+        if level in (Level.BLOCK, Level.ASK):
+            raise ManifestError(
+                f"enforcement.rules.{rule_id} is {level.value}, but {rule_id} "
+                f"only ever warns: a stale or missing sweep never stops a change "
+                f"(ADR-010 ruling 10).\n  Set it to warn or off."
+            )
+
+    def _validate_guidelines(self) -> None:
+        """Refuse a `guidelines` key this build does not read (ADR-012 D13).
+
+        A key the schema does not know loads, does nothing, and reads in
+        `config show` as though it had taken: the BUG_050 shape, so it is
+        refused by name. `ruleset`, `baseline` and `checklist` are null or a
+        non-empty path, `instruction_files` null or a non-empty list of them,
+        `injection.max_lines` an integer of at least 2, `injection.on_edit` a
+        boolean, and `verdicts.note_max_chars` a positive integer. Where a path
+        points is checked by whatever reads it, against the tree in hand.
+        """
+        section = self.data.get("guidelines")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"guidelines must be a mapping, got {section!r}")
+        for key in section:
+            if key not in _GUIDELINES_KEYS:
+                raise ManifestError(
+                    f"guidelines.{key} is not a key this build reads; it reads "
+                    f"{', '.join('guidelines.' + k for k in _GUIDELINES_KEYS)}."
+                )
+        for key in _GUIDELINES_PATH_KEYS:
+            value = section.get(key)
+            if value is not None and not _is_path(value):
+                raise ManifestError(
+                    f"guidelines.{key} must be null or a path, got {value!r}"
+                )
+        files = section.get("instruction_files")
+        if files is not None and not (
+            isinstance(files, list) and files and all(_is_path(f) for f in files)
+        ):
+            # A bare string is refused rather than read as one file: the
+            # AUD-08 precedent for every list a manifest declares.
+            raise ManifestError(
+                f"guidelines.instruction_files must be null or a list of paths, "
+                f"got {files!r}"
+            )
+        injection = section.get("injection")
+        if not isinstance(injection, Mapping):
+            raise ManifestError(f"guidelines.injection must be a mapping, got {injection!r}")
+        for key in injection:
+            if key not in _INJECTION_KEYS:
+                raise ManifestError(
+                    f"guidelines.injection.{key} is not a key this build reads; it "
+                    f"reads {', '.join('guidelines.injection.' + k for k in _INJECTION_KEYS)}."
+                )
+        cap = injection.get("max_lines")
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 2:
+            # Two lines is the least the block can be: its header, and the line
+            # that counts what the cap left out.
+            raise ManifestError(
+                f"guidelines.injection.max_lines must be an integer of at least 2, "
+                f"got {cap!r}"
+            )
+        on_edit = injection.get("on_edit")
+        if not isinstance(on_edit, bool):
+            # A string such as "no" would read as true, and null as false: each
+            # turns the edit layer the opposite way from what was written.
+            raise ManifestError(
+                f"guidelines.injection.on_edit must be a boolean, got {on_edit!r}"
+            )
+        verdicts = section.get("verdicts")
+        if not isinstance(verdicts, Mapping):
+            raise ManifestError(f"guidelines.verdicts must be a mapping, got {verdicts!r}")
+        for key in verdicts:
+            if key not in _VERDICTS_KEYS:
+                raise ManifestError(
+                    f"guidelines.verdicts.{key} is not a key this build reads; it "
+                    f"reads {', '.join('guidelines.verdicts.' + k for k in _VERDICTS_KEYS)}."
+                )
+        note_cap = verdicts.get("note_max_chars")
+        if isinstance(note_cap, bool) or not isinstance(note_cap, int) or note_cap < 1:
+            raise ManifestError(
+                f"guidelines.verdicts.note_max_chars must be a positive integer, "
+                f"got {note_cap!r}"
+            )
+
+    def _validate_docs(self) -> None:
+        """Refuse a `docs` key this build does not read, and an onboarding
+        mode outside the three (ADR-016 D9), naming it.
+
+        YAML reads an unquoted `off` as false, and `onboarding: off` is how
+        the ADR spells the default, so false is read as `off` rather than
+        refused; true names no mode and is refused.
+        """
+        section = self.data.get("docs")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"docs must be a mapping, got {section!r}")
+        _refuse_unknown("docs", section, _DOCS_KEYS)
+        diagrams = section.get("diagrams")
+        if not (
+            diagrams is None
+            or isinstance(diagrams, str)
+            or (isinstance(diagrams, list) and all(isinstance(d, str) for d in diagrams))
+        ):
+            raise ManifestError(
+                f"docs.diagrams must be a diagram format or a list of them "
+                f"(mermaid, plantuml), got {diagrams!r}"
+            )
+        mode = section.get("onboarding")
+        if mode is False:
+            section["onboarding"] = mode = "off"
+        if not isinstance(mode, str) or mode not in ONBOARDING_MODES:
+            raise ManifestError(
+                f"docs.onboarding is {mode!r}; it is one of "
+                f"{', '.join(ONBOARDING_MODES)}."
+            )
+
+    def _validate_docs_needs(self) -> None:
+        """Refuse a `docs.needs` value this build cannot read (ADR-018 D2, D3,
+        D6), and, when enforced, a project not in the mandate's shape (D3,
+        D10): another docs format or items backend, the backlog in another
+        record than the docs, or an items store outside the source directory.
+        """
+        from . import needs  # local: core/needs reads the manifest back
+
+        section = self.get("docs.needs")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"docs.needs must be a mapping, got {section!r}")
+        _refuse_unknown("docs.needs", section, _NEEDS_KEYS)
+        state = section.get("state")
+        if state not in needs.STATES:
+            raise ManifestError(
+                f"docs.needs.state is {state!r}; it is one of {', '.join(needs.STATES)}"
+            )
+        id_prefix = str(self.get("items.id_prefix") or "")
+        if section.get("types") is not None:
+            problems = needs.type_problems(section["types"], id_prefix)
+            if problems:
+                raise ManifestError("docs.needs.types: " + "; ".join(problems))
+        problems = needs.link_rule_problems(section.get("require_links"))
+        if problems:
+            raise ManifestError("docs.needs.require_links: " + "; ".join(problems))
+        statuses = section.get("decision_statuses")
+        if (
+            not isinstance(statuses, list)
+            or not statuses
+            or not all(_is_one_line(s) for s in statuses)
+        ):
+            raise ManifestError(
+                f"docs.needs.decision_statuses must be a non-empty list of one-line "
+                f"statuses, got {statuses!r}"
+            )
+        refused = section.get("refused_paths")
+        if refused is not None and (
+            not isinstance(refused, list)
+            or not all(isinstance(g, str) and _is_one_line(g) for g in refused)
+        ):
+            raise ManifestError(
+                f"docs.needs.refused_paths must be a list of one-line globs, "
+                f"got {refused!r}"
+            )
+        srcdir = section.get("srcdir")
+        if srcdir is not None and not _is_one_line(srcdir):
+            raise ManifestError(
+                f"docs.needs.srcdir must be one line naming the docs project's "
+                f"source directory, got {srcdir!r}"
+            )
+        if state == "enforced":
+            self._validate_enforced(srcdir)
+
+    def _validate_enforced(self, srcdir: Any) -> None:
+        from . import needs  # local: core/needs reads the manifest back
+
+        enforced = "docs.needs.state is enforced (ADR-018 D10)"
+        fmt = self.get("docs.format")
+        if fmt != "sphinx":
+            raise ManifestError(
+                f"docs.format is {fmt!r}, but {enforced}: an enforced project's "
+                f"docs are a sphinx-needs project, docs.format: sphinx"
+            )
+        backend = self.get("items.backend")
+        if backend != "sphinx_needs":
+            raise ManifestError(
+                f"items.backend is {backend!r}, but {enforced}: items are needs in "
+                f"the docs project, items.backend: sphinx_needs"
+            )
+        records = self.data["records"]
+        if records.get("backlog") != records.get("docs"):
+            raise ManifestError(
+                f"records.backlog is {records.get('backlog')!r} and records.docs is "
+                f"{records.get('docs')!r}, but {enforced}: the items store is in the "
+                f"docs project's build, so the two records are one (ADR-018 D3)"
+            )
+        base = self.store_root if records.get("docs") == "store" else self.root
+        if base is None:
+            return  # a store with no root is refused by the records check
+        docs = project_relative(self.get("paths.docs"))
+        found = needs.resolve_srcdir(
+            Path(base), None if srcdir is None else str(srcdir), docs
+        )
+        if found is None:
+            raise ManifestError(
+                f"{enforced}, but there is no docs project: no conf.py at or above "
+                f"paths.docs ({self.get('paths.docs')}). Set docs.needs.srcdir, or "
+                f"create the docs project there"
+            )
+        spelled = _spelled_from(Path(base), found)
+        for key in ("items.path", "items.closed_path"):
+            value = self.get(key)
+            if value is None:
+                continue
+            where = (Path(base) / str(value)).resolve()
+            if found != where and found not in where.parents:
+                raise ManifestError(
+                    f"{key} is {value!r}, outside the docs project's source "
+                    f"directory {spelled}, but {enforced}: items are needs in the "
+                    f"docs project's build, so the items store lies under {spelled}"
+                )
+
+    def _validate_docs_adopt(self) -> None:
+        """Refuse a `docs.adopt` block that would load and adopt nothing, or
+        something other than it says (ADR-016 D7, D9, ruling 11), naming it.
+
+        A mode is null, `in_place` or `copy`, and a source goes with a mode,
+        each without the other refused. The source is one line, relative to
+        the root `records.docs` names (the repo's or the store's) without a
+        `..` climbing out; under `copy` it may instead be absolute, a source
+        outside both roots recorded as given (D8). Under `in_place` it is
+        `paths.docs` itself, since that is what the mode points, and
+        `docs.adopt.source` is refused at the user level: where one project's
+        documentation lives is never a default for every project.
+        """
+        adopt = self.get("docs.adopt")
+        if not isinstance(adopt, Mapping):
+            raise ManifestError(f"docs.adopt must be a mapping, got {adopt!r}")
+        _refuse_unknown("docs.adopt", adopt, _ADOPT_KEYS)
+        mode, source = adopt.get("mode"), adopt.get("source")
+        if mode is not None and (not isinstance(mode, str) or mode not in ADOPT_MODES):
+            raise ManifestError(
+                f"docs.adopt.mode is {mode!r}; it is null or one of "
+                f"{', '.join(ADOPT_MODES)}."
+            )
+        if source is not None and self.source_of("docs.adopt.source").startswith("user:"):
+            raise ManifestError(
+                f"docs.adopt.source is set at the user level "
+                f"({self.source_of('docs.adopt.source').removeprefix('user:')}); "
+                f"where one project's documentation lives belongs in its own level "
+                f"(its store or its repo), never in every project's defaults "
+                f"(ADR-016 ruling 11)."
+            )
+        if mode is None and source is None:
+            return
+        if mode is None:
+            raise ManifestError(
+                f"docs.adopt.source is {source!r} but docs.adopt.mode is null: a "
+                f"source with no mode adopts nothing. Set docs.adopt.mode to "
+                f"{' or '.join(ADOPT_MODES)}, or run 'invariant docs adopt'."
+            )
+        if not _is_one_line(source):
+            raise ManifestError(
+                f"docs.adopt.source must be one line naming the adopted "
+                f"documentation, required with docs.adopt.mode {mode}; got {source!r}"
+            )
+        if posixpath.isabs(source.strip()):
+            if mode == "in_place":
+                raise ManifestError(
+                    f"docs.adopt.source is {source!r}, an absolute path, and "
+                    f"in_place adopts through paths.docs, a path key that cannot "
+                    f"be absolute (ADR-014 D1): spell it relative to the repo "
+                    f"root, or to the store root under records.docs: store."
+                )
+            return
+        spelled = project_relative(source)
+        if spelled is None or spelled == ".":
+            raise ManifestError(
+                f"docs.adopt.source is {source!r}, which climbs out of the root "
+                f"it is read against; spell it relative to that root."
+            )
+        if mode == "in_place" and project_relative(self.get("paths.docs")) != spelled:
+            raise ManifestError(
+                f"docs.adopt.mode is in_place with docs.adopt.source {source!r}, "
+                f"but paths.docs is {self.get('paths.docs')!r}: in place, "
+                f"paths.docs is the source. Run 'invariant docs adopt {spelled} "
+                f"--mode in_place' to point both."
+            )
+
+    def _validate_docs_assess(self) -> None:
+        """Refuse a `docs.assess` key, check, `from` or entry this build does
+        not read (ADR-016 D9), naming it.
+
+        `checks` is a list of distinct check names, `[]` turning the
+        assessment off; `sections` a list of headings; `areas.from` one of
+        the three sources; `globs` and `exclude` lists of project-relative
+        globs; `declared` a list of `{path, name}`, `name` optional.
+        """
+        section = self.get("docs.assess")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"docs.assess must be a mapping, got {section!r}")
+        _refuse_unknown("docs.assess", section, _ASSESS_KEYS)
+        checks = section.get("checks")
+        if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
+            raise ManifestError(
+                f"docs.assess.checks must be a list of checks, got {checks!r}"
+            )
+        for check in checks:
+            if check not in ASSESS_CHECKS:
+                raise ManifestError(
+                    f"docs.assess.checks names {check!r}, which is not a check; "
+                    f"the checks are {', '.join(ASSESS_CHECKS)}."
+                )
+        if len(set(checks)) != len(checks):
+            repeated = sorted({c for c in checks if checks.count(c) > 1})
+            raise ManifestError(
+                f"docs.assess.checks names {', '.join(repeated)} more than once"
+            )
+        sections = section.get("sections")
+        if not isinstance(sections, list) or not all(_is_path(h) for h in sections):
+            raise ManifestError(
+                f"docs.assess.sections must be a list of headings, got {sections!r}"
+            )
+        areas = section.get("areas")
+        if not isinstance(areas, Mapping):
+            raise ManifestError(f"docs.assess.areas must be a mapping, got {areas!r}")
+        _refuse_unknown("docs.assess.areas", areas, _AREAS_KEYS)
+        source = areas.get("from")
+        if source not in AREA_SOURCES:
+            raise ManifestError(
+                f"docs.assess.areas.from is {source!r}; it is one of "
+                f"{', '.join(AREA_SOURCES)}."
+            )
+        for key in ("globs", "exclude"):
+            value = areas.get(key)
+            if not isinstance(value, list) or not all(
+                project_relative(entry) for entry in value
+            ):
+                raise ManifestError(
+                    f"docs.assess.areas.{key} must be a list of project-relative "
+                    f"globs, got {value!r}"
+                )
+        declared = areas.get("declared")
+        if not isinstance(declared, list):
+            raise ManifestError(
+                f"docs.assess.areas.declared must be a list of {{path, name}}, "
+                f"got {declared!r}"
+            )
+        for entry in declared:
+            if not isinstance(entry, Mapping) or not project_relative(entry.get("path")):
+                raise ManifestError(
+                    f"docs.assess.areas.declared entry {entry!r} must be a mapping "
+                    f"with a project-relative path"
+                )
+            _refuse_unknown("docs.assess.areas.declared entry", entry, _DECLARED_AREA_KEYS)
+            if "name" in entry and not _is_one_line(entry["name"]):
+                raise ManifestError(
+                    f"docs.assess.areas.declared entry {entry!r}: name must be "
+                    f"one line of text"
+                )
+
+    def _validate_agents(self) -> None:
+        """Refuse an `agents` key that would load and do nothing (ADR-012 D13).
+
+        `library` and `local` are lists of agent names, each named once, and
+        no name in both: the renderer installs `library` and never touches
+        `local` (the A6 ruling 11). `overlays` maps a `library` agent to a
+        path. Where that path points, and what the overlay says, is checked
+        by the install that reads it, against the tree in hand. `tiers` maps a
+        `library` agent to a tier (the A7 rulings 1 and 14).
+        """
+        section = self.data.get("agents")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"agents must be a mapping, got {section!r}")
+        for key in section:
+            if key not in _AGENTS_KEYS:
+                raise ManifestError(
+                    f"agents.{key} is not a key this build reads; it reads "
+                    f"{', '.join('agents.' + k for k in _AGENTS_KEYS)}."
+                )
+        names: dict[str, list[str]] = {}
+        for key in ("library", "local"):
+            value = section.get(key)
+            if not isinstance(value, list) or not all(_is_path(n) for n in value):
+                # A bare string is refused rather than read as one name: the
+                # AUD-08 precedent for every list a manifest declares.
+                raise ManifestError(
+                    f"agents.{key} must be a list of agent names, got {value!r}"
+                )
+            twice = sorted({n for n in value if value.count(n) > 1})
+            if twice:
+                raise ManifestError(f"agents.{key} names {', '.join(twice)} twice")
+            names[key] = value
+        both = [n for n in names["local"] if n in names["library"]]
+        if both:
+            raise ManifestError(
+                f"agents.local names {both[0]!r}, which agents.library also names; "
+                f"an agent is the library's or the project's, never both. Remove it "
+                f"from agents.library to own it, or from agents.local to install ours."
+            )
+        overlays = section.get("overlays")
+        if not isinstance(overlays, Mapping):
+            raise ManifestError(
+                f"agents.overlays must be a mapping of agent name to overlay path, "
+                f"got {overlays!r}"
+            )
+        for name, path in overlays.items():
+            if not _is_path(path):
+                raise ManifestError(
+                    f"agents.overlays.{name} must be a path, got {path!r}; by "
+                    f"convention docs/agents/{name}.yaml"
+                )
+            if name in names["local"]:
+                raise ManifestError(
+                    f"agents.overlays names {name!r}, a project-local agent; an "
+                    f"overlay amends a library agent, so edit it directly instead."
+                )
+            if name not in names["library"]:
+                raise ManifestError(
+                    f"agents.overlays names {name!r}, which is not in agents.library "
+                    f"({', '.join(names['library']) or 'empty'}); add it there, or "
+                    f"remove the overlay."
+                )
+        self._validate_tiers(section.get("tiers"), names)
+
+    @staticmethod
+    def _validate_tiers(tiers: Any, names: Mapping[str, list[str]]) -> None:
+        if not isinstance(tiers, Mapping):
+            raise ManifestError(
+                f"agents.tiers must be a mapping of library agent to tier, got {tiers!r}"
+            )
+        for name, tier in tiers.items():
+            if name in names["local"]:
+                raise ManifestError(
+                    f"agents.tiers names {name!r}, a project-local agent; a tier "
+                    f"overrides a library agent's default, and the project owns that "
+                    f"agent's file, so remove it from agents.tiers."
+                )
+            if name not in names["library"]:
+                raise ManifestError(
+                    f"agents.tiers names {name!r}, which is not in agents.library "
+                    f"({', '.join(names['library']) or 'empty'}); add it there, or "
+                    f"remove its tier."
+                )
+            if not _is_tier(tier):
+                raise ManifestError(
+                    f"agents.tiers.{name} must be one of {', '.join(TIERS)}, got {tier!r}"
+                )
+
+    def _validate_host(self) -> None:
+        """Refuse a `host` key that would load and do nothing (the A7 ruling 14).
+
+        `tier_map` maps a tier to one line of text the host adapter hands its
+        host. The engine checks the shape and never what the value says, so
+        core holds no list of model names (ADR-012 D1 item 3, ruling 10).
+        `kind` is not judged here: which kinds have an adapter is the host
+        layer's answer, asked by the commands that need one.
+        """
+        section = self.data.get("host")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"host must be a mapping, got {section!r}")
+        for key in section:
+            if key not in _HOST_KEYS:
+                raise ManifestError(
+                    f"host.{key} is not a key this build reads; it reads "
+                    f"{', '.join('host.' + k for k in _HOST_KEYS)}."
+                )
+        tier_map = section.get("tier_map")
+        if not isinstance(tier_map, Mapping):
+            raise ManifestError(
+                f"host.tier_map must be a mapping of tier to the host's own choice, "
+                f"got {tier_map!r}"
+            )
+        for tier, choice in tier_map.items():
+            if not _is_tier(tier):
+                raise ManifestError(
+                    f"host.tier_map names {tier!r}, which is not one of {', '.join(TIERS)}."
+                )
+            if not _is_one_line(choice):
+                raise ManifestError(
+                    f"host.tier_map.{tier} must be one line of text, got {choice!r}"
+                )
+
+    def scheduled_gates(self) -> frozenset[str]:
+        """The gates a sweep cadence has moved off the per-change path.
+
+        Empty when no cadence is set, whatever the list says — validation has
+        already refused that combination, and an empty answer is the one that
+        changes nothing.
+        """
+        schedule = self.get("methodology.gates.schedule") or {}
+        if schedule.get("cadence_days") is None:
+            return frozenset()
+        return frozenset(str(gate) for gate in schedule.get("gates") or ())
+
+    # -- access --------------------------------------------------------
+
+    def get(self, dotted: str, default: Any = None) -> Any:
+        node: Any = self.data
+        for part in dotted.split("."):
+            if not isinstance(node, Mapping) or part not in node:
+                return default
+            node = node[part]
+        return node
+
+    def source_of(self, dotted: str) -> str:
+        return self.provenance.get(dotted, "default")
+
+    def diagram_formats(self) -> list[str]:
+        """``docs.diagrams`` as a list (ADR-018 D1): a single name is a list of
+        one, and null or ``none`` is no format."""
+        value = self.get("docs.diagrams")
+        if value is None or value == "none":
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(name) for name in value if name != "none"]
+
+    def rule_level(self, rule_id: str) -> Level:
+        rules = self.data["enforcement"]["rules"]
+        if rule_id in rules:
+            return Level.parse(rules[rule_id])
+        # A declared step's level is its declaration's, `block` by default
+        # (ADR-021 D1); `enforcement.rules` above still re-levels it.
+        from .steps import DEFAULT_LEVEL, step_name
+
+        name = step_name(rule_id)
+        steps = self.data.get("steps")
+        if name is not None and isinstance(steps, Mapping) and isinstance(steps.get(name), Mapping):
+            return Level.parse(steps[name].get("level", DEFAULT_LEVEL))
+        return Level.WARN
+
+    def rule_source(self, rule_id: str) -> str:
+        """Where ``rule_id``'s level came from; a step's declaration when no
+        override set it (ADR-021 D3, what ``rules list`` shows)."""
+        key = f"enforcement.rules.{rule_id}"
+        if key in self.provenance:
+            return self.provenance[key]
+        from .steps import step_name
+
+        name = step_name(rule_id)
+        if name is not None:
+            return self.source_of(f"steps.{name}.at")
+        return "default"
+
+    def command_key(self, name: str, ecosystem: str | None = None) -> str:
+        """The dotted key holding ``name`` for ``ecosystem`` (ADR-013 D1).
+
+        The primary's commands are the flat ``commands.*`` keys, as they
+        always were; every further declared ecosystem keeps its own under
+        ``commands.<ecosystem>``. ``None`` means the primary.
+        """
+        if ecosystem is None or ecosystem == self.primary_ecosystem:
+            return f"commands.{name}"
+        return f"commands.{ecosystem}.{name}"
+
+    def command_template(self, name: str, ecosystem: str | None = None) -> str | None:
+        """The unresolved template for ``name``, or ``None`` when none is set."""
+        template = self.get(self.command_key(name, ecosystem))
+        return template if isinstance(template, str) and template else None
+
+    def command_for(self, name: str, ecosystem: str | None = None, **extra: str) -> str:
+        """Resolve a command template, running discovery commands as needed.
+
+        ``ecosystem`` picks whose command it is (``None``: the primary's).
+        Discovery results are cached for the life of the process: a device
+        identifier should be looked up once per invocation, not once per
+        placeholder.
+        """
+        template = self.command_template(name, ecosystem)
+        if not template:
+            key = self.command_key(name, ecosystem)
+            raise ManifestError(
+                f"no command configured for {name!r}; set {key} in "
+                f"{MANIFEST_RELPATH} or select an adapter that supplies it"
+            )
+        return self._filled(f"command {name!r}", template, extra)
+
+    def step_command(self, name: str) -> str:
+        """A declared step's ``run``, filled from ``vars`` and ``discover`` the
+        way :meth:`command_for` fills a command (ADR-021 D1)."""
+        steps = self.get("steps") or {}
+        body = steps.get(name) if isinstance(steps, Mapping) else None
+        if not isinstance(body, Mapping) or not body.get("run"):
+            raise ManifestError(f"no step named {name!r} is declared under steps")
+        return self._filled(f"step {name!r}", str(body["run"]), {})
+
+    def _filled(self, label: str, template: str, extra: Mapping[str, str]) -> str:
+        values: dict[str, str] = {}
+        values.update({k: str(v) for k, v in (self.get("vars") or {}).items()})
+        values.update(extra)
+
+        for placeholder in _placeholders(template):
+            if placeholder in values:
+                continue
+            discovery = (self.get("discover") or {}).get(placeholder)
+            if discovery is None:
+                raise ManifestError(
+                    f"{label} needs {{{placeholder}}}, which is neither "
+                    f"in vars nor in discover. Prefer a discover entry — a "
+                    f"command that resolves the value at runtime — over writing "
+                    f"the value down."
+                )
+            values[placeholder] = self._discover(placeholder, discovery)
+
+        try:
+            return template.format(**values)
+        except KeyError as exc:
+            raise ManifestError(
+                f"{label} references unknown placeholder {exc}"
+            ) from None
+
+    def discovered_in(self, name: str, ecosystem: str | None = None, **extra: str) -> dict[str, str]:
+        """The placeholders of ``name`` that discovery resolved, with their values.
+
+        Asked after :meth:`command_for` with the same arguments: a placeholder
+        ``vars`` or ``extra`` supplied was not discovered, and one discovery
+        has not run for is absent. A run records these so a later replay can
+        hand the same values back to the project's own discovery (BUG_093).
+        """
+        template = self.command_template(name, ecosystem) or ""
+        supplied = set(self.get("vars") or {}) | set(extra)
+        return {
+            placeholder: self._discovery_cache[placeholder]
+            for placeholder in _placeholders(template)
+            if placeholder not in supplied and placeholder in self._discovery_cache
+        }
+
+    def discovers_for(self, name: str, ecosystem: str | None = None) -> list[str]:
+        """The placeholders of ``name`` only a ``discover`` entry can supply."""
+        template = self.command_template(name, ecosystem) or ""
+        supplied = set(self.get("vars") or {})
+        discover = self.get("discover") or {}
+        return [p for p in _placeholders(template) if p not in supplied and p in discover]
+
+    def _discover(self, key: str, command: str) -> str:
+        if key in self._discovery_cache:
+            return self._discovery_cache[key]
+        import subprocess
+
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,  # the exit status is read below, with its stderr
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ManifestError(
+                f"discovery for {key!r} timed out; the command was: {command}"
+            ) from exc
+        value = proc.stdout.strip()
+        if proc.returncode != 0 or not value:
+            raise ManifestError(
+                f"discovery for {key!r} produced nothing (exit {proc.returncode}). "
+                f"The command was: {command}"
+                + (f"\n{proc.stderr.strip()}" if proc.stderr.strip() else "")
+            )
+        self._discovery_cache[key] = value
+        return value
+
+    @property
+    def location(self) -> ManifestLocation:
+        """Where the project's own level lives, in its git tree (ADR-014 D9).
+
+        The store's ``invariant.yaml`` in the store's main checkout when the
+        project has a store, whatever pointer named it: a pointer may set no
+        policy key, so the store holds the project's policy. Otherwise the
+        file ``locate`` read, relative to the root: ``.claude/invariant.yaml``
+        in-repo, or ``.invariant.yaml`` for a project defined by its pointer
+        alone. What the base readers read, at the base, instead of
+        ``MANIFEST_RELPATH``.
+        """
+        if self.store is not None:
+            return ManifestLocation(
+                Path(self.store.root), STORE_MANIFEST, "store", self.store.key
+            )
+        try:
+            rel = Path(self.path).resolve().relative_to(Path(self.root).resolve())
+        except (OSError, ValueError):
+            rel = MANIFEST_RELPATH
+        kind = "pointer" if rel.as_posix() == POINTER else "repo"
+        return ManifestLocation(Path(self.root), rel.as_posix(), kind)
+
+    def path_for(self, key: str) -> Path:
+        """Resolve a configured path against the project root."""
+        value = self.get(f"paths.{key}")
+        if value is None:
+            raise ManifestError(f"no path configured for {key!r}")
+        return (self.root / value).resolve()
+
+    @property
+    def ecosystems(self) -> list[str]:
+        return list(self.get("project.ecosystems") or ["generic"])
+
+    @property
+    def primary_ecosystem(self) -> str:
+        """The first declared ecosystem, whose commands are the flat keys."""
+        return self.ecosystems[0]
+
+    @property
+    def declared_ecosystems(self) -> list[str]:
+        """Every declared ecosystem once, the primary first (ADR-013)."""
+        primary, *others = self.ecosystems
+        return [primary, *_secondaries(primary, others)]
+
+    @property
+    def state_root(self) -> Path:
+        """Where runtime state lives — shared across every worktree.
+
+        An explicit ``paths.state`` wins. Otherwise the git common directory,
+        which every linked worktree of a repository resolves to the same place
+        and which git already ignores. Only outside a repository does this fall
+        back to a path under the project root.
+        """
+        configured = self.get("paths.state")
+        if configured:
+            return (self.root / configured).resolve()
+
+        from . import git
+
+        common = git.common_dir(self.root)
+        if common is not None:
+            return (common / "invariant" / "state").resolve()
+        return (self.root / ".claude" / "invariant" / "state").resolve()
+
+    def iter_provenance(self) -> Iterator[tuple[str, Any, str]]:
+        for dotted, value in sorted(_flatten(self.data)):
+            yield dotted, value, self.source_of(dotted)
+
+
+# -- helpers -----------------------------------------------------------
+
+#: The gates a sweep cadence may move off the per-change path (ADR-010 D1).
+#: Every other gate's evidence is per change by nature.
+SCHEDULABLE_GATES = ("coverage.meets_floor", "test.all_pass")
+
+#: The command names a `commands` block may hold, flat or per ecosystem.
+COMMAND_NAMES = tuple(DEFAULTS["commands"])
+
+
+def _is_count(value: Any, *, minimum: int) -> bool:
+    """A whole number at or above ``minimum``; a YAML boolean is not one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+#: The `methodology.gates` keys whose value is a list of globs.
+_GLOB_LIST_GATES = ("coverage_exclude", "non_source", "coverage_advisory_paths")
+
+
+def project_relative(value: Any, bases: Iterable[Path | str | None] = ()) -> str | None:
+    """The canonical project-relative spelling of a declared path or glob.
+
+    Every manifest value that is MATCHED against a path — an exempt pattern, a
+    store a rule tests membership of, a scope prefix, a coverage glob — is
+    compared against the project-relative spelling of the target, and that
+    spelling never starts with ``./``, never ends with ``/`` and never carries
+    an empty or ``..`` segment. A declaration spelled any of those ways used to
+    be compared as written and could therefore match nothing: the exemption,
+    scope or exclusion it declared was off, and nothing said so (BUG_071).
+
+    So equivalent spellings are reduced to one before anything is compared:
+    ``./docs/backlog``, ``docs/backlog/``, ``docs//backlog`` and
+    ``docs/x/../backlog`` are all ``docs/backlog``. Normalised rather than
+    refused at load, because refusing would turn spellings that already
+    worked — a trailing ``/`` on ``items.path`` — into a manifest that no
+    longer loads, and because a spelling the library can read unambiguously is
+    not an error the operator should have to fix.
+
+    An absolute value is spelled against the first of ``bases`` (the project's
+    checkouts) that contains it. ``None`` means the value names nothing inside
+    the project — an absolute path under none of the bases, or a relative one
+    whose ``..`` climbs out — and a caller building match patterns must DROP
+    it: a declaration outside the project cannot exempt, scope or exclude a
+    path outside it either. The project root itself comes back as ``"."``,
+    which no project-relative target spells, so it stays exactly as inert as
+    it always was rather than widening to "everything".
+
+    Lexical only: nothing is read from disk, so a glob is normalised the same
+    way as a path. Storage is a different question and is not asked here —
+    `path_for` and the item backends join the raw value onto the root, which
+    already accepts every one of these spellings.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if posixpath.isabs(text):
+        # POSIX keeps a leading `//` as implementation-defined; nothing here
+        # means that, so collapse it before normalising.
+        candidate = posixpath.normpath("/" + text.lstrip("/"))
+        for base in bases:
+            if base is None:
+                continue
+            for spelling in _base_spellings(Path(base)):
+                if candidate == spelling:
+                    return "."
+                if candidate.startswith(spelling.rstrip("/") + "/"):
+                    return candidate[len(spelling.rstrip("/")) + 1 :]
+        return None
+    normal = posixpath.normpath(text)
+    if normal == ".." or normal.startswith("../"):
+        return None
+    return normal
+
+
+def glob_matches(rel: str, canonical: str) -> bool:
+    """Does the project-relative path ``rel`` fall under the declared glob?
+
+    The one matcher a declared glob is compared with (ADR-012 D4: "the same
+    project_relative and glob matcher every other declared glob uses"). The
+    glob is in its canonical spelling (:func:`project_relative`), and it
+    matches the path itself or anything beneath it. ``fnmatch``'s ``*``
+    crosses ``/``, so ``app/*.py`` names every Python file under ``app``,
+    and ``app/**/*.py`` names only those at least one directory down.
+    """
+    return fnmatch.fnmatch(rel, canonical) or fnmatch.fnmatch(rel, f"{canonical}/*")
+
+
+def store_record_paths(
+    data: Mapping[str, Any], record: str, store_root: Path
+) -> dict[str, Any]:
+    """``record``'s path keys in ``data``, joined onto ``store_root`` (D1).
+
+    Keyed by dotted key; a null value is left out. A list is joined entry by
+    entry and a mapping value by value. A path under a store is
+    store-relative: the store can be shared, so an absolute path would carry
+    one machine's home directory, and one climbing out with ``..`` would name
+    something outside the store. Either is refused, naming the key.
+    """
+    joined: dict[str, Any] = {}
+    for dotted in RECORD_PATH_KEYS.get(record, ()):
+        value = _dig(data, *dotted.split("."))
+        if value is None:
+            continue
+        if isinstance(value, Mapping):
+            joined[dotted] = {
+                name: _store_path(f"{dotted}.{name}", entry, record, store_root)
+                for name, entry in value.items()
+            }
+        elif isinstance(value, list):
+            joined[dotted] = [
+                _store_path(dotted, entry, record, store_root) for entry in value
+            ]
+        else:
+            joined[dotted] = _store_path(dotted, value, record, store_root)
+    return joined
+
+
+def _store_path(dotted: str, value: Any, record: str, store_root: Path) -> str:
+    text = str(value)
+    if posixpath.isabs(text) or Path(text).is_absolute() or ".." in Path(text).parts:
+        raise ManifestError(
+            f"{dotted} is {text!r}, but under records.{record}: store a path is "
+            f"store-relative: never absolute, and never climbing out with '..'."
+        )
+    return str(Path(store_root) / text)
+
+
+def _base_spellings(base: Path) -> list[str]:
+    """A checkout's absolute spelling as written and as resolved.
+
+    Both, because the declaration may have been written through a symlinked
+    prefix the resolved root no longer carries, or the other way round.
+    """
+    spellings = [posixpath.normpath(str(base))]
+    try:
+        resolved = posixpath.normpath(str(base.resolve()))
+    except OSError:  # pragma: no cover - a resolve that cannot answer
+        return spellings
+    if resolved not in spellings:
+        spellings.append(resolved)
+    return spellings
+
+
+def _migrating(top: Path) -> str | None:
+    """What ``store migrate``'s marker says about the repository at ``top``,
+    read from the default state root (ADR-014 D12; ADR-020 D3: mid-move, the
+    main checkout finds neither home and names the session)."""
+    from . import git, storemigrate  # local: storemigrate imports this module lazily
+
+    common = git.common_dir(top)
+    if common is None:
+        return None
+    return storemigrate.marker_note(common / "invariant" / "state")
+
+
+@contextmanager
+def _naming_the_project(root: Path, path: Path) -> Iterator[None]:
+    """Name the project a refusal is about, when the lookup found one."""
+    try:
+        yield
+    except ManifestError as exc:
+        if exc.project_root is None:
+            exc.project_root = root
+            exc.manifest_path = path
+        raise
+
+
+def _highest(levels: Sequence[Mapping[str, Any]], *keys: str) -> Any:
+    """The value the highest level that sets ``keys`` gives, else ``None``."""
+    for level in reversed(levels):
+        value = _dig(level, *keys)
+        if value:
+            return value
+    return None
+
+
+def _ecosystems(raw: Mapping[str, Any]) -> list[str]:
+    value = _dig(raw, "project", "ecosystems")
+    if not value:
+        return list(DEFAULTS["project"]["ecosystems"])
+    return [str(v) for v in value]
+
+
+def _secondaries(primary: str, others: list[str]) -> list[str]:
+    """The further ecosystems, in listed order, each once and never the primary."""
+    seen = {primary}
+    found: list[str] = []
+    for eco in others:
+        if eco not in seen:
+            seen.add(eco)
+            found.append(eco)
+    return found
+
+
+def _dig(mapping: Mapping[str, Any], *keys: str) -> Any:
+    node: Any = mapping
+    for key in keys:
+        if not isinstance(node, Mapping) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+
+def _adapter_defaults(ecosystem: str) -> dict[str, Any]:
+    """Adapter-supplied manifest defaults, imported lazily to avoid a cycle."""
+    from ..adapters import defaults_for  # local import: adapters import Level
+
+    return defaults_for(ecosystem)
+
+
+def profile_names() -> list[str]:
+    """The shipped enforcement profiles, sorted: the names `enforcement.profile`
+    may take."""
+    return sorted(p.stem for p in (DATA_DIR / "profiles").glob("*.yaml"))
+
+
+def _load_profile(name: str) -> dict[str, str]:
+    path = DATA_DIR / "profiles" / f"{name}.yaml"
+    if not path.is_file():
+        raise ManifestError(
+            f"unknown enforcement profile {name!r}; available: "
+            + (", ".join(profile_names()) or "(none installed)")
+        )
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ManifestError(f"profile {name!r} is not valid YAML: {exc}") from exc
+    return dict(raw.get("rules", {}) or {})
+
+
+def _merge(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    provenance: dict[str, str],
+    origin: str,
+    prefix: str = "",
+) -> None:
+    """Recursive merge that records provenance for every leaf it sets."""
+    for key, value in source.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(value, Mapping) and isinstance(target.get(key), Mapping):
+            _merge(target[key], value, provenance, origin, f"{dotted}.")
+        else:
+            target[key] = copy.deepcopy(value)
+            provenance[dotted] = origin
+            if isinstance(value, Mapping):
+                _record(provenance, value, origin, f"{dotted}.")
+
+
+def _fill(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    provenance: dict[str, str],
+    origin: str,
+    prefix: str = "",
+) -> None:
+    """Like :func:`_merge`, but sets only a leaf no adapter has set yet.
+
+    A further ecosystem's defaults fill what the library left at its default
+    and the primary did not supply; the primary wins every key it names.
+    """
+    for key, value in source.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(value, Mapping) and isinstance(target.get(key), Mapping):
+            _fill(target[key], value, provenance, origin, f"{dotted}.")
+        elif provenance.get(dotted, "default") == "default":
+            target[key] = copy.deepcopy(value)
+            provenance[dotted] = origin
+            if isinstance(value, Mapping):
+                _record(provenance, value, origin, f"{dotted}.")
+
+
+def _record(
+    provenance: dict[str, str],
+    node: Mapping[str, Any],
+    origin: str,
+    prefix: str = "",
+) -> None:
+    for key, value in node.items():
+        dotted = f"{prefix}{key}"
+        provenance[dotted] = origin
+        if isinstance(value, Mapping):
+            _record(provenance, value, origin, f"{dotted}.")
+
+
+def _placeholders(template: str) -> list[str]:
+    """The ``{name}`` placeholders in a command template, in order, deduped."""
+    import string
+
+    seen: list[str] = []
+    for _literal, field_name, _spec, _conv in string.Formatter().parse(template):
+        if field_name and field_name not in seen:
+            seen.append(field_name)
+    return seen
+
+
+def _flatten(node: Mapping[str, Any], prefix: str = "") -> Iterator[tuple[str, Any]]:
+    for key, value in node.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(value, Mapping):
+            yield from _flatten(value, f"{dotted}.")
+        else:
+            yield dotted, value
+
+
+def _refuse_unknown(where: str, mapping: Mapping[str, Any], known: Sequence[str]) -> None:
+    """Refuse a key of ``mapping`` that is not in ``known``, naming it."""
+    for key in mapping:
+        if key not in known:
+            raise ManifestError(
+                f"{where}.{key} is not a key this build reads; it reads "
+                f"{', '.join(where + '.' + k for k in known)}."
+            )
+
+
+def _is_path(value: Any) -> bool:
+    """A declared path: a string with something in it."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_tier(value: Any) -> bool:
+    """A name from the tier vocabulary. An unhashable or non-string value is not."""
+    return isinstance(value, str) and value in TIERS
+
+
+def _spelled_from(base: Path, path: Path) -> str:
+    try:
+        return path.relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _is_one_line(value: Any) -> bool:
+    """Text with something in it and no line break of any kind, a trailing one
+    included: it is rendered into a single line of a host's file."""
+    return isinstance(value, str) and bool(value.strip()) and value.splitlines() == [value]

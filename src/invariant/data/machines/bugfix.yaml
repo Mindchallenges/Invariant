@@ -1,0 +1,66 @@
+id: bugfix
+kind: pipeline
+description: >
+  Prove a reported defect is real before spending a session fixing it. The
+  reproducing state has stopping authority: its success condition is a
+  trustworthy verdict, not a landed fix.
+
+initial: triaging
+terminal: [committed, reproduced, not_reproducible, abandoned]
+
+# `reproducing` IS the red state; it is named for what it proves rather than
+# for its colour. Declaring it here is what makes `test.new_test_fails` — the
+# gate this machine names as the precondition of `fixing` — satisfiable from
+# this machine at all (BUG_030).
+red_phase: reproducing
+
+states:
+  triaging:
+    description: Read the report and the docs that own the affected area.
+    roles: [design]
+    next: [reproducing, abandoned]
+  reproducing:
+    description: One test that fails on the reported symptom.
+    next: [fixing, reproduced, not_reproducible, abandoned]
+  reproduced:
+    description: >
+      The symptom was proved and the fix is left to a later session. This is
+      where a repro-only session ends: the bug-reproducer has stopping
+      authority and never fixes, and every other terminal reachable without
+      fixing — not_reproducible, abandoned — would be a false statement about
+      a proof that fired, so its committed red test could not land until the
+      fix did (BUG_066).
+
+      The price is the thing the outcome claims, a recorded red run, plus a
+      clean privacy scan because the proof lands on the base branch. It does
+      not carry the landing role: a test-only commit cannot honestly update a
+      diagram, and the agent gates guard a design and a review this outcome
+      does not claim happened. A later fixer starts a fresh pipeline and
+      records red against the proof, which is then on the base branch.
+    entry_gates: [test.new_test_fails, privacy.clean]
+  not_reproducible:
+    description: >
+      The symptom could not be reproduced. This is a real outcome, not a
+      failure of the attempt — recording it stops the next session repeating it.
+
+      Reaching it is deliberately ungated. `test.new_test_fails` used to sit on
+      `reproducing`'s exit and therefore fired here too, which asked for a
+      failing test as the price of recording that no failing test could be
+      written — unsatisfiable by definition on the one edge that means it
+      (BUG_037).
+  fixing:
+    # The proof of red is the precondition of fixing, not the price of leaving
+    # the state that produced it.
+    entry_gates: [test.new_test_fails]
+    next: [verifying, abandoned]
+  verifying:
+    description: Confirm the fix addresses the reported symptom, not a neighbour.
+    roles: [review]
+    entry_gates: [test.all_pass]
+    next: [committed, fixing, abandoned]
+  committed:
+    roles: [landing]
+    entry_gates: [test.all_pass, privacy.clean]
+  abandoned:
+    description: The work was dropped. Reaching it is deliberately ungated.
+    roles: [abandon]

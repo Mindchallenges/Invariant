@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Archviz design system</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="components/bundle.css">
+<script src="components/bundle.js"></script>
+<style>
+  body { font-family: var(--font-sans); background: var(--canvas); color: var(--ink); }
+  .g-top { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center;
+           padding: 10px 24px; background: var(--surface); border-bottom: 1px solid var(--grid); font-size: 13px; }
+  .g-top a { color: var(--ink-muted); text-decoration: none; } .g-top a:hover { color: var(--primary-ink); }
+  .g-top b { margin-right: 8px; }
+  .g-top button { margin-left: auto; font: 500 12px var(--font-sans); color: var(--ink); background: var(--canvas);
+                  border: 1px solid var(--grid); border-radius: var(--radius-control); padding: 6px 10px; cursor: pointer; }
+  .g-top button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px; }
+  .g-cover { overflow-x: auto; border: 1px solid var(--grid); border-radius: var(--radius-group); margin-bottom: 32px; }
+  .g-card { border: 1px solid var(--grid); border-radius: var(--radius-group); margin: 0 0 24px; overflow: hidden; }
+  .g-card header { padding: 14px 18px; border-bottom: 1px solid var(--grid); background: var(--surface); }
+  .g-card h2 { margin: 2px 0; font-size: 16px; } .g-card p { margin: 0; font-size: 13px; color: var(--ink-muted); }
+  .g-group { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-muted); }
+  .g-body { overflow-x: auto; }
+</style>
+</head>
+<body>
+<nav class="g-top"><b>Archviz</b><a href="#ElementNode">ElementNode</a><a href="#Interface">Interface</a><a href="#Relation">Relation</a><a href="#Container">Container</a><a href="#UmlClass">UmlClass</a><a href="#Sequence">Sequence</a><a href="#StateFlow">StateFlow</a><a href="#Status">Status</a><a href="#Legend">Legend</a><a href="#DiagramFrame">DiagramFrame</a><button type="button" id="g-theme">Dark theme</button></nav>
+<main>
+<div class="g-cover"><style>
+  html, body { margin: 0; background: var(--canvas); }
+  .cv { position: relative; width: 960px; height: 288px; overflow: hidden; background: var(--canvas); }
+  .cv svg { position: absolute; inset: 0; }
+  .b-primary { fill: var(--primary); } .b-secondary { fill: var(--secondary); } .b-neutral { fill: var(--neutral); }
+  .b-tertiary { fill: var(--tertiary); } .b-accent { fill: var(--accent); }
+  .cut { fill: var(--canvas); rx: var(--radius-node); }
+  .cut-sq { fill: var(--canvas); rx: var(--radius-control); }
+  .name { position: absolute; left: 40px; bottom: 72px; margin: 0; font: 600 96px/0.92 var(--font-sans); letter-spacing: -0.02em; color: var(--ink); }
+  .tag { position: absolute; left: 42px; bottom: 40px; margin: 0; max-width: 440px; font: 400 14px/20px var(--font-sans); color: var(--ink-muted); }
+</style>
+<div class="cv">
+  <svg viewBox="0 0 960 288" width="960" height="288" aria-hidden="true">
+    <!--
+      blocks: primary 456×72, secondary 456×48, neutral 456×32, tertiary 456×64 bands (rank-sep/node-sep multiples), accent discs r=iface-size/2
+      arrangement: a strip of unequal layer bands stacked top to bottom, bleeding off the right edge — the layered view itself
+      pattern: tiles cut from the bands by radius-node, some merged two-wide (row "geometric, modular, dense UI"): elements sit inside their layer
+      steps and radii: gaps space-2 (8), insets space-5 (24), tiles radius-node, port squares radius-control
+    -->
+    <rect class="b-primary" x="504" y="24" width="456" height="72"/>
+    <rect class="b-secondary" x="504" y="104" width="456" height="48"/>
+    <rect class="b-neutral" x="504" y="160" width="456" height="32"/>
+    <rect class="b-tertiary" x="504" y="200" width="456" height="64"/>
+    <rect class="cut" x="528" y="44" width="96" height="32"/>
+    <rect class="cut" x="640" y="44" width="96" height="32"/>
+    <rect class="cut" x="752" y="44" width="184" height="32"/>
+    <rect class="cut" x="560" y="116" width="80" height="24"/>
+    <rect class="cut" x="704" y="116" width="80" height="24"/>
+    <rect class="cut" x="800" y="116" width="136" height="24"/>
+    <rect class="cut" x="584" y="168" width="248" height="16"/>
+    <rect class="cut" x="528" y="216" width="112" height="32"/>
+    <rect class="cut" x="656" y="216" width="112" height="32"/>
+    <rect class="cut-sq" x="808" y="224" width="16" height="16"/>
+    <circle class="b-accent" cx="672" cy="128" r="8"/>
+    <circle class="b-accent" cx="912" cy="60" r="8"/>
+  </svg>
+  <p class="name">Archviz</p>
+  <p class="tag">Architecture diagrams as views of one model.</p>
+</div>
+</div>
+<section class="g-card" id="ElementNode"><header><span class="g-group">Elements</span><h2>ElementNode</h2><p>Every element type at its default shape and role colour</p></header><div class="g-body">
+<div id="root-ElementNode" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var items = [
+  ["actor","Driver"],["system","Vehicle platform","In-vehicle software"],["extsys","Identity provider"],["usecase","Diagnose field issue"],
+  ["hw","Central compute","2 × SoC board"],["hw","Application SoC","ARM A78AE","soc"],["hw","IMU","","sensor"],["platform","Embedded Linux","Yocto, kernel 6.6"],
+  ["cloud","Kubernetes cluster"],["node","Worker node pool","3 × arm64"],["app","Log collector","C++20"],["app","Fleet portal","React","ui"],
+  ["app","Query API","Go, REST","gateway"],["store","Telemetry store","TimescaleDB"],["queue","Event stream","Kafka"],["comp","Ring buffer","C++20"],
+  ["data","LogRecord"],["req","No log loss"],["adr","Use zstd"],["scenario","Upload session"]
+];
+var cols = 4, cw = 190, ch = 104, out = "";
+items.forEach(function (it, i) {
+  var o = {type: it[0], label: it[1], tech: it[2] || "", kind: it[3] || ""};
+  if (it[0] === "cloud") { out += A.container({kind: "zone", role: "secondary", title: it[1], x: (i % cols) * cw + 10, y: Math.floor(i / cols) * ch + 8, w: 160, h: 58}); }
+  else {
+    var s = A.size(o), x = (i % cols) * cw + 10 + (170 - s.w) / 2, y = Math.floor(i / cols) * ch + 8 + (it[0] === "actor" ? 0 : (60 - s.h) / 2);
+    o.x = Math.round(x); o.y = Math.round(y); out += A.node(o);
+  }
+  var t = A.TYPES[it[0]];
+  out += '<text class="av-cap" x="' + ((i % cols) * cw + 95) + '" y="' + (Math.floor(i / cols) * ch + 86) + '" text-anchor="middle">' + it[0] + (it[3] ? "." + it[3] : "") + " · " + t.prefix + "</text>";
+});
+document.getElementById("root-ElementNode").innerHTML = A.svg(cols * cw, 5 * ch, out, "Element types");
+
+})();</script>
+</div></section><section class="g-card" id="Interface"><header><span class="g-group">Elements</span><h2>Interface</h2><p>Lollipop = provided, socket (tee) = required, square = hardware port</p></header><div class="g-body">
+<div id="root-Interface" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var s = "";
+s += A.node({type: "comp", label: "Ring buffer", x: 20, y: 40, w: 140});
+s += A.node({type: "comp", label: "Journal source", x: 400, y: 40, w: 140});
+s += A.relation({link: "provides", points: [[160, 61], [262, 61]]});
+s += A.relation({link: "requires", points: [[400, 61], [282, 61]]});
+s += A.node({type: "iface", label: "ILogSink", tech: "in-process", x: 264, y: 53});
+s += '<text class="av-cap" x="211" y="50" text-anchor="middle">provides</text><text class="av-cap" x="341" y="50" text-anchor="middle">requires</text>';
+s += A.node({type: "hw", label: "Zone controller", x: 600, y: 40, w: 150});
+s += A.node({type: "iface", kind: "port", label: "CAN0", tech: "CAN-FD", x: 667, y: 115});
+s += A.relation({link: "provides", points: [[675, 82], [675, 115]]});
+document.getElementById("root-Interface").innerHTML = A.svg(780, 170, s, "Interfaces");
+
+})();</script>
+</div></section><section class="g-card" id="Relation"><header><span class="g-group">Relations</span><h2>Relation</h2><p>Line, colour and arrowhead per relation type</p></header><div class="g-body">
+<div id="root-Relation" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var rows = ["part_of","deployed_on","runs_on","connects","uses","flows_to","provides","requires","realizes","inherits","composes","aggregates","associates","next","satisfies","decides","msg.sync","msg.async","msg.return"];
+var notes = {part_of:"containment (nests in most views)", deployed_on:"software placed on platform / node", runs_on:"platform on hardware / node", connects:"physical link to bus or network", uses:"dependency, C4 uses", flows_to:"data flow, producer → consumer", provides:"offers an interface (lollipop)", requires:"needs an interface (socket)", realizes:"implements an interface class", inherits:"specialises a base class", composes:"whole owns part (lifetime)", aggregates:"whole references part", associates:"plain association", next:"state / step successor", satisfies:"element → requirement", decides:"decision → element", "msg.sync":"synchronous call", "msg.async":"asynchronous message", "msg.return":"return / reply"};
+var s = "";
+rows.forEach(function (r, i) {
+  var y = 18 + i * 28;
+  s += '<text class="av-meta" x="10" y="' + (y + 4) + '" style="fill:var(--ink);font-weight:500">' + r + "</text>";
+  s += A.relation({link: r, points: [[150, y], [300, y]]});
+  s += '<text class="av-cap" x="330" y="' + (y + 4) + '">' + notes[r] + "</text>";
+});
+document.getElementById("root-Relation").innerHTML = A.svg(640, 540, s, "Relation notation");
+
+})();</script>
+</div></section><section class="g-card" id="Container"><header><span class="g-group">Structure</span><h2>Container</h2><p>Boundary, cloud zone, group, layer band and swimlane</p></header><div class="g-body">
+<div id="root-Container" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var s = "";
+s += A.container({kind: "boundary", role: "primary", title: "Vehicle platform", tech: "system boundary", x: 10, y: 10, w: 300, h: 160});
+s += A.node({type: "app", label: "Log collector", tech: "C++20", x: 30, y: 60, w: 120});
+s += A.node({type: "app", label: "Uploader", tech: "C++20", x: 170, y: 60, w: 120});
+s += A.container({kind: "zone", role: "secondary", title: "Cloud region eu-central", x: 330, y: 10, w: 290, h: 160});
+s += A.container({kind: "zone", role: "secondary", title: "Kubernetes cluster", x: 346, y: 44, w: 258, h: 110});
+s += A.node({type: "node", label: "Worker node pool", tech: "3 × arm64", x: 400, y: 86, w: 150});
+s += A.container({kind: "group", role: "tertiary", title: "Central compute (HPC)", tech: "2 × SoC board", x: 640, y: 10, w: 200, h: 160});
+s += A.node({type: "hw", label: "Safety MCU", tech: "Cortex-R52", x: 670, y: 70, w: 140});
+s += A.container({kind: "band", role: "tertiary", title: "Hardware layer", x: 10, y: 196, w: 400, h: 90});
+s += A.node({type: "bus", label: "Automotive Ethernet", tech: "1000BASE-T1", x: 60, y: 240, w: 300});
+s += A.container({kind: "lane", title: "1 Vehicle", x: 440, y: 196, w: 200, h: 180});
+s += A.container({kind: "lane", title: "2 Backend", x: 640, y: 196, w: 200, h: 180});
+s += A.node({type: "step", label: "Send chunk", kind: "io", x: 480, y: 250, w: 120});
+s += A.node({type: "step", label: "Validate", x: 680, y: 250, w: 120});
+s += A.relation({link: "next", points: [[600, 271], [680, 271]]});
+s += '<text class="av-cap" x="160" y="186" text-anchor="middle">boundary · zone</text>';
+document.getElementById("root-Container").innerHTML = A.svg(860, 390, s, "Containers");
+
+})();</script>
+</div></section><section class="g-card" id="UmlClass"><header><span class="g-group">Detailed design</span><h2>UmlClass</h2><p>Compartments: name, attributes, operations; mono for members</p></header><div class="g-body">
+<div id="root-UmlClass" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var s = "";
+s += A.umlClass({label: "ILogSink", stereotype: "interface", operations: ["+ push(r: const LogRecord&): bool"], x: 20, y: 10});
+s += A.umlClass({label: "RingBuffer", attributes: ["- capacity_: size_t", "- head_: atomic<size_t>"], operations: ["+ push(r: const LogRecord&): bool", "+ drain(max: size_t): Batch"], x: 20, y: 150});
+s += A.umlClass({label: "LogRecord", stereotype: "struct", attributes: ["+ ts: uint64_t", "+ level: Level", "+ payload: std::string"], x: 380, y: 150});
+s += A.umlClass({label: "SpoolWriter", attributes: ["- dir_: path"], operations: ["+ flush(): void"], x: 380, y: 10});
+s += A.relation({link: "realizes", points: [[120, 150], [120, 104]]});
+s += A.relation({link: "composes", points: [[262, 200], [380, 200]], label: "1..*", labelAt: [320, 194]});
+s += A.relation({link: "uses", points: [[400, 92], [400, 120], [200, 120], [200, 150]]});
+document.getElementById("root-UmlClass").innerHTML = A.svg(620, 300, s, "UML class");
+
+})();</script>
+</div></section><section class="g-card" id="Sequence"><header><span class="g-group">Behaviour</span><h2>Sequence</h2><p>Lifelines, sync / async / return messages, a loop fragment</p></header><div class="g-body">
+<div id="root-Sequence" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var r = A.sequence({
+  participants: [{id: "c", label: "Upload client", type: "comp"}, {id: "i", label: "Ingestion service", type: "app"}, {id: "p", label: "Identity provider", type: "extsys"}, {id: "q", label: "Event stream", type: "queue"}],
+  messages: [
+    {from: "c", to: "i", label: "OpenSession(vin, token)"}, {from: "i", to: "p", label: "verify(token)"}, {from: "p", to: "i", label: "claims", kind: "return"},
+    {from: "c", to: "i", label: "PutChunk(chunk)", kind: "async", fragment: "loop [chunks left]"}, {from: "i", to: "q", label: "publish(chunk)", kind: "async", fragment: "loop [chunks left]"},
+    {from: "c", to: "c", label: "markUploaded()", fragment: "loop [chunks left]"}]
+});
+document.getElementById("root-Sequence").innerHTML = A.svg(r.w, r.h, r.svg, "Sequence");
+
+})();</script>
+</div></section><section class="g-card" id="StateFlow"><header><span class="g-group">Behaviour</span><h2>StateFlow</h2><p>Initial, state, final; start, decision, io, end, fork</p></header><div class="g-body">
+<div id="root-StateFlow" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var s = "";
+s += A.node({type: "state", kind: "initial", x: 30, y: 30});
+s += A.relation({link: "next", points: [[48, 39], [90, 39]]});
+s += A.node({type: "state", label: "Idle", x: 90, y: 18, w: 110});
+s += A.relation({link: "next", points: [[200, 39], [290, 39]], label: "window opens", labelAt: [245, 31]});
+s += A.node({type: "state", label: "Streaming", x: 290, y: 18, w: 110});
+s += A.relation({link: "next", points: [[400, 39], [530, 39]], label: "retries exhausted", labelAt: [465, 31]});
+s += A.node({type: "state", kind: "final", x: 530, y: 29});
+s += '<text class="av-cap" x="10" y="100">state machine</text>';
+s += A.node({type: "step", kind: "start", label: "Upload window", x: 10, y: 130, w: 130});
+s += A.relation({link: "next", points: [[140, 151], [180, 151]]});
+s += A.node({type: "step", kind: "decision", label: "Spool has data?", x: 180, y: 123});
+s += A.relation({link: "next", points: [[337, 151], [380, 151]], label: "yes", labelAt: [358, 143]});
+s += A.node({type: "step", kind: "io", label: "Send chunk", x: 380, y: 130, w: 120});
+s += A.relation({link: "next", points: [[258, 179], [258, 230]], label: "no", labelAt: [268, 210], anchor: "start"});
+s += A.node({type: "step", kind: "end", label: "Sleep", x: 208, y: 230, w: 100});
+s += A.node({type: "step", kind: "fork", x: 380, y: 230, w: 120});
+s += '<text class="av-cap" x="440" y="256" text-anchor="middle">fork / join</text>';
+s += '<text class="av-cap" x="10" y="290">flowchart / activity</text>';
+document.getElementById("root-StateFlow").innerHTML = A.svg(580, 300, s, "State and flow");
+
+})();</script>
+</div></section><section class="g-card" id="Status"><header><span class="g-group">States</span><h2>Status</h2><p>Status changes border and opacity, never the role colour of healthy elements</p></header><div class="g-body">
+<div id="root-Status" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var st = [["", "approved"], ["proposed", "proposed"], ["risk", "risk"], ["deprecated", "deprecated"], ["ghost", "neighbour (ghost)"], ["selected", "selected"]];
+var s = "";
+st.forEach(function (v, i) {
+  var o = {type: "comp", label: "Compressor", tech: "zstd", x: 10 + i * 140, y: 10, w: 124};
+  if (v[0] === "ghost") o.ghost = true; else if (v[0] === "selected") o.selected = true; else if (v[0]) o.status = v[0];
+  s += A.node(o);
+  s += '<text class="av-cap" x="' + (72 + i * 140) + '" y="78" text-anchor="middle">' + v[1] + "</text>";
+});
+document.getElementById("root-Status").innerHTML = A.svg(860, 90, s, "Status overlay");
+
+})();</script>
+</div></section><section class="g-card" id="Legend"><header><span class="g-group">Chrome</span><h2>Legend</h2><p>Built from the types and relations present in the view</p></header><div class="g-body">
+<div id="root-Legend" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+document.getElementById("root-Legend").innerHTML = A.legend({types: ["app", "comp", "iface", "store", "extsys"], links: ["provides", "requires", "uses", "flows_to"]});
+
+})();</script>
+</div></section><section class="g-card" id="DiagramFrame"><header><span class="g-group">Chrome</span><h2>DiagramFrame</h2><p>Toolbar, stage, tooltip, legend and caption around every view</p></header><div class="g-body">
+<div id="root-DiagramFrame" class="av-sheet"></div>
+<script>(function(){
+var A = window.Archviz;
+
+var s = "";
+s += A.container({kind: "boundary", role: "primary", title: "Log collector daemon", tech: "C++20", x: 120, y: 0, w: 330, h: 230});
+s += A.node({type: "comp", label: "Journal source", x: 140, y: 50, w: 140});
+s += A.node({type: "comp", label: "Ring buffer", x: 140, y: 160, w: 140, selected: true});
+s += A.node({type: "comp", label: "Spool writer", x: 300, y: 160, w: 130});
+s += A.node({type: "iface", label: "ILogSink", x: 352, y: 63});
+s += A.relation({link: "requires", points: [[280, 71], [350, 71]]});
+s += A.relation({link: "provides", points: [[230, 160], [230, 120], [360, 120], [360, 80]]});
+s += A.relation({link: "uses", points: [[280, 181], [300, 181]]});
+s += A.node({type: "extsys", label: "Diagnostic firmware", x: -60, y: 160, w: 150});
+s += A.relation({link: "flows_to", points: [[90, 181], [140, 181]]});
+s += A.node({type: "store", label: "On-board spool", tech: "eMMC", x: 490, y: 160, w: 130});
+s += A.relation({link: "flows_to", points: [[430, 181], [490, 181]]});
+var body = A.svg(700, 240, '<g transform="translate(70,0)">' + s + "</g>", "Log collector components");
+document.getElementById("root-DiagramFrame").innerHTML = A.frame({
+  title: "Log collector – components", caption: "Figure 4 · component view, root APP_LOGD", body: body,
+  tip: A.tooltip({title: "Ring buffer", id: "CMP_RINGBUF", type: "comp", tech: "C++20", summary: "Lock-free buffer between log sources and the spool writer."}),
+  legend: A.legend({types: ["app", "comp", "iface", "store", "extsys"], links: ["provides", "requires", "uses", "flows_to"]})
+});
+
+})();</script>
+</div></section>
+</main>
+<script>
+document.getElementById("g-theme").addEventListener("click", function () {
+  var r = document.documentElement, dark = r.getAttribute("data-theme") !== "dark";
+  r.setAttribute("data-theme", dark ? "dark" : "light");
+  this.textContent = dark ? "Light theme" : "Dark theme";
+});
+</script>
+</body>
+</html>

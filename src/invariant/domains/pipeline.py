@@ -1,0 +1,1810 @@
+"""The pipeline domain — one task's progress through the configured methodology.
+
+The evidence dictionary is the point of this module. Gates do not re-derive
+whether the suite passed or whether the docs were read; they read what was
+recorded at the moment those things actually happened. That is the difference
+between a gate that verifies and a gate that can be satisfied by accident.
+
+So evidence that vanishes changes a verdict, and one session is many writers:
+parallel hooks and its own commands, each a process of its own. Every
+read-modify-write of the record holds the store's lock across its load and its
+save, and holds it for nothing else (BUG_107). No gate is evaluated, no suite
+run and no transcript read under it; :meth:`PipelineDomain.advance` says how a
+transition stays safe with its gates evaluated outside.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import copy
+import os
+import shutil
+import signal
+import subprocess
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+from ..adapters import get_adapter
+from ..core import needs
+from ..core import steps as steps_reader
+from ..core.errors import (
+    GateFailure,
+    InvariantError,
+    StateError,
+    TransitionError,
+    UsageError,
+)
+from ..core.fsm import Machine
+from ..core.machines import ABANDON_ROLE, LANDING_ROLE, load_pipeline_machine
+from ..core.manifest import Level
+from ..core.rules import (
+    AUDIT_KEY,
+    MECHANICAL_GATE,
+    VERDICTS_GATE,
+    AgentCopy,
+    Evaluated,
+    RuleContext,
+    _without_audit,
+    apply_acknowledgements,
+    evaluate,
+    grant_outcomes,
+    rule_spec,
+    ruleset_pin,
+)
+from ..core.stats import Usage, WatermarkSource
+from ..core.store import LOCK_TIMEOUT_SECONDS, JsonStore, PreservesUnknownKeys
+
+
+def _refuse_chained_coverage(coverage: str, report: str, bundle: str) -> None:
+    """Stop a manifest that still runs both legs as one command.
+
+    Projects wrote ``xcodebuild ... ; xcrun xccov ...`` into ``commands.coverage``
+    because that is what this engine used to ship. Such a manifest cannot simply
+    be tolerated once the report leg exists on its own: the report would run
+    twice, and — the part that matters — the first command's exit status would
+    STILL be the reporter's, so the split would appear to be adopted while the
+    defect it exists to remove carried on unchanged. A migration that silently
+    does nothing is worse than one that asks.
+
+    Detection is by containment rather than by looking for a ``;``, so a project
+    that legitimately chains setup into its coverage command is not caught: the
+    resolved report command, minus the per-run bundle path, must literally
+    appear inside the coverage command.
+    """
+    probe = " ".join(report.replace(bundle, " ").split())
+    if not probe or probe not in " ".join(coverage.split()):
+        return
+    raise UsageError(
+        "commands.coverage still runs the reporting tool itself.\n"
+        f"  coverage:        {coverage}\n"
+        f"  coverage_report: {report}\n"
+        "  A shell reports the LAST command's status, so chained this way a "
+        "red suite followed by a clean read exits 0 and a green suite "
+        "followed by a failed read exits non-zero — the suite's own result "
+        "is unreadable in both directions.\n"
+        "  Split them: leave ONLY the command that runs the suite in "
+        "commands.coverage, and put the reporting command in "
+        "commands.coverage_report. Anything the first leg needs in its "
+        "environment the second leg needs too — a `VAR=value cmd` prefix "
+        "applies to that one command alone and never crossed the `;`."
+    )
+
+
+#: Variables stripped from the environment a spawned suite inherits.
+#:
+#: ``INVARIANT_SESSION_ID`` is how a caller names the session a command should
+#: record against, and the test command is a CHILD PROGRAM, not a caller. In
+#: the one repository whose own suite exercises session creation — this one —
+#: inheriting it made every test that starts a session collide with the real,
+#: live session and die on "session already exists": 25 false failures written
+#: into durable pipeline evidence, against a bare run of the same suite that
+#: was fully green (BUG_035). The documented way to name a run for recording
+#: purposes must not change what the suite it records measures.
+#:
+#: An inflated failure count on a phase that later reads green is the harder
+#: of the two mistakes to notice: a false green hides behind nothing, a false
+#: red hides behind a plausible regression a reader has to actively disprove.
+#:
+#: ``INVARIANT_HOST_SESSION_ID`` and ``INVARIANT_HANDOFF`` are the same fault
+#: one variable over (BUG_058, BUG_077): a host shell exports them, and a suite
+#: that exercises host binding or handoff claims then collides with the live
+#: host. A recorded run — and a scheduled sweep started from a host shell,
+#: which would file the collisions as bugs (ADR-010) — must measure the suite,
+#: not the shell it was started from.
+CHILD_ENV_STRIPPED = (
+    "INVARIANT_SESSION_ID",
+    "INVARIANT_HOST_SESSION_ID",
+    "INVARIANT_HANDOFF",
+)
+
+
+def child_env() -> dict[str, str]:
+    """The environment for a command this domain spawns."""
+    env = dict(os.environ)
+    for name in CHILD_ENV_STRIPPED:
+        env.pop(name, None)
+    return env
+
+
+# -- the run-and-read seam ---------------------------------------------
+#
+# Module-level, not methods, because two domains run the suite: this one, per
+# change, and the sweep, on a cadence (ADR-010 D4). One copy of how a suite is
+# spawned and read is what keeps the two from disagreeing about what a run
+# showed — the subprocess, its environment, the chained-coverage refusal, and
+# the refusals of a run that measured nothing.
+
+
+def run_command(
+    command: str,
+    root: Path,
+    *,
+    timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run one configured command in ``root``, captured, in the child environment.
+
+    ``env`` adds to the child environment, and ``timeout`` bounds the run
+    (ADR-021 D1: a step's). With a timeout the command runs as the leader of
+    its own process group, and the whole group is killed when it runs past
+    the bound, so a shell's children do not outlive it holding the output
+    open. The run then raises :class:`subprocess.TimeoutExpired` carrying
+    what it printed. Without either, the run is exactly what it always was.
+    """
+    child = child_env()
+    if env:
+        child.update(env)
+    if timeout is None:
+        return subprocess.run(
+            command,
+            shell=True,
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            env=child,
+            check=False,  # the exit status is evidence, read by the adapter
+        )
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=str(root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=child,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        stdout, stderr = proc.communicate()
+        raise subprocess.TimeoutExpired(
+            command, timeout, output=stdout, stderr=stderr
+        ) from None
+    return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def joined_selectors(adapter, selectors: Sequence[str]) -> str:
+    """Several selectors as one ``{selector}`` value, or a refusal.
+
+    Whether several fit in one command is the adapter's answer; what to do
+    when they do not is the caller's, and the answer is to refuse. A refusal
+    costs one retry, and running a subset costs the belief that the scope was
+    covered (BUG_031).
+    """
+    joined = adapter.join_selectors(selectors)
+    if joined is None:
+        raise UsageError(
+            f"the {adapter.id!r} adapter takes one selector at a time, "
+            f"and {len(selectors)} were given.\n"
+            + "".join(f"  - {s}\n" for s in selectors)
+            + "  Run them one per invocation. Nothing was run and "
+            "nothing was recorded: a run covering part of the requested "
+            "scope would be read by test.all_pass as the state of the "
+            "whole suite."
+        )
+    return joined
+
+
+def ecosystem_of(manifest, selectors: Sequence[str]) -> str:
+    """The declared ecosystem a run belongs to, or a refusal (ADR-013 D2, D3).
+
+    A run with no selector, and every run in a single-ecosystem project, is
+    the primary's. Otherwise each selector goes to the one declared adapter
+    that claims it (:meth:`Adapter.owns_selector`), and to the primary when
+    none does. Two adapters claiming one selector, or selectors landing in two
+    ecosystems, are refused having run nothing: one run per ecosystem would
+    leave ``test.all_pass`` reading only the last of them, the trap BUG_031
+    refused.
+    """
+    declared = manifest.declared_ecosystems
+    primary = declared[0]
+    if not selectors or len(declared) == 1:
+        return primary
+    owned: dict[str, list[str]] = {}
+    for selector in selectors:
+        claims = [eco for eco in declared if get_adapter(eco).owns_selector(selector)]
+        if len(claims) > 1:
+            raise UsageError(
+                f"{selector} is claimed by more than one declared ecosystem "
+                f"({', '.join(claims)}), so which command runs it and which "
+                "adapter reads it cannot be told. Nothing was run and nothing "
+                "was recorded."
+            )
+        owned.setdefault(claims[0] if claims else primary, []).append(selector)
+    if len(owned) > 1:
+        raise UsageError(
+            "these selectors belong to more than one ecosystem, and one run "
+            "has one command and one adapter to read it:\n"
+            + "".join(
+                f"  - {eco}: {', '.join(found)}\n" for eco, found in owned.items()
+            )
+            + "  Run each ecosystem's selectors in its own invocation. Nothing "
+            "was run and nothing was recorded: a run covering part of the "
+            "requested scope would be read by test.all_pass as the state of "
+            "the whole of it."
+        )
+    return next(iter(owned))
+
+
+@dataclass(frozen=True)
+class Measurement:
+    """What one coverage run measured, and the suite's own outcome beside it."""
+
+    command: str
+    exit_code: int
+    outcome: Any
+    report_command: str | None
+    report_exit: int
+    measured: dict[str, float]
+    #: The suite's own output, for a reader that needs more than the counts —
+    #: the sweep reads failing test identities from it.
+    stdout: str = ""
+    stderr: str = ""
+
+
+def measure_coverage(
+    manifest,
+    adapter,
+    command: str,
+    bundle: Path,
+    root: Path,
+    runner=None,
+    selectors: Sequence[str] = (),
+    ecosystem: str | None = None,
+) -> Measurement:
+    """Run a coverage command and read it, or refuse a run that measured nothing.
+
+    The measurement and the reading of it are separate programs in some
+    ecosystems and one program in others. Where they are separate, they are
+    run separately — see _refuse_chained_coverage for what joining them with a
+    `;` cost, and why it cannot simply be tolerated.
+
+    ``runner`` replaces :func:`run_command` for a caller that injects its own
+    (the sweep's tests); every refusal below still applies to what it returns.
+    ``selectors`` says the run was scoped, which changes only the hint a
+    zero-executed refusal gives: a scoped run that built and launched cleanly
+    most likely matched nothing. ``ecosystem`` is whose report leg to read
+    (``None``: the primary's), and must be the ecosystem ``adapter`` reads for.
+    """
+    runner = runner or run_command
+    report_command: str | None = None
+    if manifest.command_template("coverage_report", ecosystem):
+        report_command = manifest.command_for(
+            "coverage_report", ecosystem, result_bundle=str(bundle)
+        )
+        _refuse_chained_coverage(command, report_command, str(bundle))
+
+    proc = runner(command, root)
+    # The suite's own status, read from the command that RAN the suite.
+    # When a report leg follows, this is the whole point of the split: the
+    # exit code here is the compiler's and the test runner's, and nothing
+    # a reporting tool does afterwards can overwrite it.
+    outcome = adapter.read_run(proc.stdout, proc.stderr, proc.returncode, bundle=bundle)
+
+    if report_command is None:
+        measured = adapter.parse_coverage(f"{proc.stdout}\n{proc.stderr}")
+        report_exit = proc.returncode
+    else:
+        report = runner(report_command, root)
+        measured = adapter.parse_coverage(f"{report.stdout}\n{report.stderr}")
+        report_exit = report.returncode
+
+    # A suite that never ran cannot have measured anything, and a report
+    # produced from a build that fell over describes the previous state of
+    # the world at best. `total is None` means this adapter does not count
+    # tests, which is not the same as counting zero.
+    if outcome.total == 0:
+        if selectors:
+            hint = (
+                "  The selector may have matched nothing — check "
+                f"{', '.join(selectors)} against the suite's test names. A "
+                "build or launch failure, or tests the scrape cannot count, "
+                "would look the same."
+            )
+            if getattr(outcome, "note", ""):
+                hint += f"\n  adapter note: {outcome.note}"
+        else:
+            hint = (
+                "  Usually a build or launch failure rather than a coverage "
+                "problem — read the build output first."
+            )
+        raise UsageError(
+            "the coverage run executed no tests, so its measurement "
+            "describes nothing.\n"
+            f"  command: {command}\n"
+            f"  exit: {proc.returncode}\n" + hint
+        )
+
+    if not measured:
+        # Naming the leg matters. While the two were chained, this message
+        # printed the whole chain and its LAST exit status, so a reader
+        # diagnosing "no measurements" was shown a command whose test half
+        # had in fact succeeded — and the failure was twice attributed to
+        # the suite, and once to an imagined race, before anyone looked at
+        # the reporting tool.
+        raise UsageError(
+            "the coverage run produced no per-file measurements.\n"
+            f"  command: {report_command or command}\n"
+            f"  exit: {report_exit}\n"
+            + (
+                f"  The suite itself ran: executed={outcome.total} "
+                f"failed={outcome.failed}, exit {proc.returncode}. Only "
+                "the reporting leg came back empty.\n"
+                if report_command
+                else ""
+            )
+            + "  Recording an empty result would make the gate pass on a "
+            "measurement that never happened, so nothing was recorded."
+        )
+    return Measurement(
+        command=command,
+        exit_code=proc.returncode,
+        outcome=outcome,
+        report_command=report_command,
+        report_exit=report_exit,
+        measured=measured,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+    )
+
+
+def fresh_bundle(bundle: Path) -> Path:
+    """A result-bundle path, its directory made and any old bundle cleared.
+
+    Cleared because xcodebuild refuses an existing path, and because a stale
+    bundle read as a fresh one would republish the previous run's numbers.
+    Where the path lives is the caller's: it must be one no concurrent run
+    shares.
+    """
+    bundle.parent.mkdir(parents=True, exist_ok=True)
+    if bundle.exists():
+        shutil.rmtree(bundle, ignore_errors=True)
+    return bundle
+
+
+def _scope(selectors: Sequence[str]) -> str:
+    """What a run's evidence says it covered: the whole suite, or a subset."""
+    return "scoped" if selectors else "full"
+
+
+#: How an agent came to be in ``agents_run``. Kept beside the list rather than
+#: folded into it, because the gate reads names and an auditor reads evidence:
+#: changing the list's shape would break every stored record and every gate for
+#: the sake of a question the gate does not ask.
+#:
+#: ``dispatch`` — a parent invoked this agent and the invocation resolved to
+#: this session. ``actor`` — the host itself named this agent as the one making
+#: a call that landed in this pipeline, which is the stronger reading: it is
+#: the agent's own work being observed rather than a request for it.
+VIA_DISPATCH = "dispatch"
+VIA_ACTOR = "actor"
+
+def _text_or_none(value: Any) -> str | None:
+    """A host's fact as the audit keeps it: non-empty text, or not known."""
+    return value if isinstance(value, str) and value else None
+
+
+#: What :meth:`PipelineDomain.record_agent_run` did. Returned rather than
+#: logged, so the hook that called it can surface a drop to the session that
+#: would otherwise meet it at a blocking gate (BUG_028).
+RECORDED = "recorded"
+ALREADY = "already"
+NO_PIPELINE = "no-pipeline"
+
+#: How many times :meth:`PipelineDomain.advance` evaluates its gates before it
+#: gives up on a record that keeps changing under them. Each pass is a fresh
+#: answer about a record that moved during the last one, and a refusal costs one
+#: retry, so this only has to outlast a burst of parallel writes.
+ADVANCE_ATTEMPTS = 5
+
+
+@dataclass
+class Pipeline(PreservesUnknownKeys):
+    """One task's progress through a methodology.
+
+    Shares the session record's store and, until BUG_061, its defect: an older
+    build loading and saving this document deleted every field it did not
+    declare. No field of this record was at risk when that was found, only
+    because none had been added alongside the session's four — a fact about the
+    calendar rather than about the code. So it takes the same round-trip
+    contract, from the same place, rather than a second copy of the reasoning.
+    """
+
+    session_id: str
+    methodology: str
+    task: str = ""
+    state: str = ""
+    evidence: dict[str, Any] = field(default_factory=dict)
+    history: list[dict] = field(default_factory=list)
+    overrides: list[dict] = field(default_factory=list)
+    started: float = 0.0
+    finished: float | None = None
+    #: The usage watermark at the moment this pipeline started (ADR-002 D3).
+    #: Per-state spend is the difference between consecutive watermarks, so the
+    #: FIRST state needs an earlier reading to subtract; without this it would
+    #: have a duration and no spend. ``None`` where the watermark could not be
+    #: observed, which is a fact the report renders rather than a zero.
+    usage_at_start: dict | None = None
+    #: The host session that baseline was counted against. A cumulative count
+    #: is only commensurable with another taken from the same transcript, and
+    #: the binding can move under a forced rebind — so the counter's identity
+    #: is recorded with the reading rather than assumed from the session's
+    #: binding at the time the report is rendered.
+    usage_at_start_host: str | None = None
+    #: The guidelines ruleset this pipeline was started under, pinned like the
+    #: methodology (ADR-012 D3): ``{"path", "digest", "error"}``, with
+    #: ``digest`` null and ``error`` saying why when it could not be loaded
+    #: (ruling DN-D). ``None`` when no ruleset was configured at ``start``, and
+    #: on a record that predates the pin; both leave the manifest to decide.
+    ruleset: dict | None = None
+    #: Keys a document carried that this build does not declare. See
+    #: `core.store.PreservesUnknownKeys`; never written under this name.
+    _extra: dict[str, Any] = field(default_factory=dict)
+
+    def state_entered(self) -> float | None:
+        """When the current state began, derived rather than stored.
+
+        ``started`` plus every elapsed since. Deriving it is what keeps a
+        second clock time out of the record: the anchor is reconstructed from
+        the durations that are already there.
+
+        ``None`` once any entry lacks ``elapsed`` — a pipeline that ran before
+        D3 cannot have its anchor reconstructed, and guessing would attribute
+        every earlier state's time to whichever one happens to be current.
+        """
+        if not self.started:
+            return None
+        total = 0.0
+        for entry in self.history:
+            elapsed = entry.get("elapsed")
+            if elapsed is None:
+                return None
+            total += float(elapsed)
+        return self.started + total
+
+
+class PipelineDomain:
+    def __init__(
+        self,
+        manifest,
+        store: JsonStore | None = None,
+        watermarks: WatermarkSource | None = None,
+        clock=time.time,
+        host_instruction_files: tuple[str, ...] = (),
+        host_agent_plan: Callable[[], Sequence[AgentCopy]] | None = None,
+        lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+    ) -> None:
+        self.manifest = manifest
+        #: How long a writer waits for the record's lock. A person's command
+        #: takes the store's default. A hook passes less, because it makes
+        #: several writes inside the budget the host cancels it at.
+        self.lock_timeout = lock_timeout
+        #: The host adapter's install plan for the library agents, handed to
+        #: every gate on the rule context: ``agents.rendered_current`` at the
+        #: landing reads it (ADR-012 D8, the A6 ruling 10). Injected by the
+        #: CLI, because no domain imports a host; with it the machine carries
+        #: that gate, and ``None`` (no adapter for ``host.kind``) leaves it off.
+        self.host_agent_plan = host_agent_plan
+        self._host_agents = host_agent_plan is not None
+        self.store = store or JsonStore(manifest.state_root)
+        #: The manifest-default machine — the one a NEW pipeline starts under.
+        #: A running pipeline is judged by :meth:`machine_for` instead: the
+        #: methodology is pinned to the record at ``start``, so neither a
+        #: ``--methodology`` override (AUD-02) nor a mid-pipeline manifest edit
+        #: (AUD-03) can swap the gate set out from under a pipeline in flight.
+        self.machine = load_pipeline_machine(manifest, host_agents=self._host_agents)
+        #: Whether :attr:`machine` already carries the guidelines landing gates.
+        self._configured_ruleset = bool(manifest.get("guidelines.ruleset"))
+        #: Injected by the CLI (ADR-002 D2). ``None`` here is normal and
+        #: harmless: transitions record ``usage: None`` and the report says so.
+        self.watermarks = watermarks
+        self.clock = clock
+        #: The host adapter's instruction files, handed to every gate on the
+        #: rule context: ``guidelines.generated_current`` at the landing reads
+        #: them as the default of ``guidelines.instruction_files`` (ADR-012
+        #: D3). Injected by the CLI, because no domain imports a host.
+        self.host_instruction_files = tuple(host_instruction_files)
+
+    def _reading(self, host_session_id: str | None) -> tuple[dict | None, str | None]:
+        """Read the watermark and the counter it came from, or give up quietly.
+
+        Telemetry may never be a reason a transition refuses. ADR-002 rejects
+        gating on the report for the same reason it rejects gating teardown:
+        the step that records what happened must not acquire new ways to fail.
+
+        The reading and the host session travel together because a cumulative
+        count means nothing without the transcript it was counted against. A
+        forced rebind moves the binding mid-pipeline, and without the second
+        half of this pair the difference between the readings either side is
+        well-formed, meaningless, and indistinguishable from a measurement
+        (BUG_014).
+        """
+        if self.watermarks is None or not host_session_id:
+            return None, None
+        try:
+            usage = self.watermarks.watermark(host_session_id)
+        except Exception:  # noqa: BLE001 - see the docstring
+            return None, None
+        if not isinstance(usage, Usage):
+            return None, None
+        return usage.to_dict(), host_session_id
+
+    def relpath(self, session_id: str) -> str:
+        """Where a session's pipeline record lives, under the state root.
+
+        Public because a reader that watches the record rather than loading it
+        (the oracle's gate cache keys on its modification time) must name the
+        same file this domain writes, not a second spelling of it.
+        """
+        return f"pipelines/{session_id}.json"
+
+    def machine_for(self, pipeline: Pipeline) -> Machine:
+        """The machine this pipeline runs under — read from the RECORD.
+
+        ``pipeline start --methodology`` used to swap the machine in memory
+        only, so the very next invocation loaded the manifest default and asked
+        it about a state it does not have. That wedged ``status``, ``gates``
+        and ``advance``, and — through the hook's fail-open path — turned all
+        enforcement off (AUD-02). Reading the persisted methodology also means
+        editing ``methodology.pipeline`` mid-pipeline cannot silently swap a
+        running pipeline's gate set (AUD-03); the change applies from the next
+        ``start``.
+        """
+        # A pinned ruleset keeps the ``guidelines.*`` landing gates on, whatever
+        # the manifest says now; nothing pinned leaves it to the manifest.
+        guidelines = True if pipeline.ruleset is not None else None
+        same_machine = not pipeline.methodology or pipeline.methodology == self.machine.id
+        if same_machine and (guidelines is None or self._configured_ruleset):
+            return self.machine
+        return load_pipeline_machine(
+            self.manifest,
+            pipeline.methodology or None,
+            guidelines=guidelines,
+            host_agents=self._host_agents,
+        )
+
+    # -- lookup --------------------------------------------------------
+
+    def current(self, session_id: str) -> Pipeline | None:
+        raw = self.store.read(self.relpath(session_id), {})
+        current = raw.get("current") if isinstance(raw, dict) else None
+        return Pipeline.from_dict(current) if current else None
+
+    def require(self, session_id: str) -> Pipeline:
+        pipeline = self.current(session_id)
+        if pipeline is None:
+            raise UsageError(
+                "no pipeline is running for this session; start one with "
+                "'invariant pipeline start --task \"<what you are doing>\"'"
+            )
+        return pipeline
+
+    def history(self, session_id: str) -> list[dict]:
+        raw = self.store.read(self.relpath(session_id), {})
+        return list(raw.get("completed", [])) if isinstance(raw, dict) else []
+
+    # -- lifecycle -----------------------------------------------------
+
+    def start(
+        self,
+        session_id: str,
+        methodology: str | None = None,
+        task: str = "",
+        host_session_id: str | None = None,
+        session: dict | None = None,
+        cwd: Path | None = None,
+    ) -> Pipeline:
+        """Start a pipeline, pinning its methodology and its guidelines ruleset.
+
+        ``session`` and ``cwd`` say which tree the ruleset is read from: the
+        session's worktree when it has one, else ``cwd`` (``load_ruleset``'s
+        tree in hand).
+        """
+        self._refuse_a_running_pipeline(self.current(session_id))
+
+        # An explicit override for this one task, without editing the manifest
+        # — a chore in a TDD project is the motivating case. Resolved here and
+        # PERSISTED on the record; nothing is swapped in memory, because the
+        # in-memory swap died with this call and wedged every later one
+        # (AUD-02), and mutating the shared manifest object was itself an
+        # unobserved gate-set change (AUD-03).
+        machine = (
+            load_pipeline_machine(self.manifest, methodology, host_agents=self._host_agents)
+            if methodology
+            else self.machine
+        )
+
+        baseline, baseline_host = self._reading(host_session_id)
+        pinned = ruleset_pin(
+            RuleContext(manifest=self.manifest, cwd=Path(cwd or Path.cwd()), session=session)
+        )
+        pipeline = Pipeline(
+            session_id=session_id,
+            methodology=machine.id,
+            task=task,
+            state=machine.initial,
+            started=self.clock(),
+            usage_at_start=baseline,
+            usage_at_start_host=baseline_host,
+            ruleset=pinned,
+        )
+        # Asked again under the lock: the pin above is a read of the tree, and
+        # another `start` may have landed while it ran.
+        with self._record_lock(session_id):
+            existing = self.current(session_id)
+            self._refuse_a_running_pipeline(existing)
+            self._save(session_id, pipeline, archive=existing)
+        return pipeline
+
+    def _refuse_a_running_pipeline(self, existing: Pipeline | None) -> None:
+        """Refuse to start over a pipeline that has not finished."""
+        if not existing:
+            return
+        try:
+            terminal = self.machine_for(existing).terminal
+        except InvariantError:
+            # The recorded machine no longer loads — a deleted project
+            # machine file, say. Every other operation on that pipeline
+            # honestly refuses, so starting a fresh one, which ARCHIVES
+            # the old record rather than discarding it, is the one route
+            # out that loses nothing.
+            return
+        if existing.state not in terminal:
+            raise UsageError(
+                f"a pipeline is already running in state {existing.state!r}; "
+                f"finish or abandon it first"
+            )
+
+    # -- gates ---------------------------------------------------------
+
+    def gates_for(
+        self, source: str, target: str | None, machine: Machine | None = None
+    ) -> list[str]:
+        """What ONE edge owes: the source's exit gates plus the target's entry gates.
+
+        ``machine`` is the machine the states belong to — for a running
+        pipeline, :meth:`machine_for`'s answer, not the manifest default.
+
+        With no ``target`` this answers about *leaving* the state and nothing
+        else, which since BUG_037 is a much smaller set than it used to be:
+        the gates that permit an outcome now hang off that outcome, so a review
+        state's own exit set is usually empty. Callers asking "what is owed
+        here" want :meth:`gates_by_destination`, not this with ``None``.
+        """
+        machine = machine or self.machine
+        if target and ABANDON_ROLE in machine.state(target).roles:
+            # Giving up owes nothing that landing owes. Every exit gate on the
+            # state being left exists to protect an OUTCOME, and abandonment is
+            # the outcome where there is none to protect — the work is being
+            # dropped. Holding it to them means the only supported way to stop
+            # is to finish first, and what people actually do from there is
+            # `--force`, which is the outcome this library treats as its own
+            # defect (BUG_037). The destination's own entry gates still apply:
+            # if a machine wants to demand something before abandoning, that is
+            # where it says so.
+            return list(machine.state(target).entry_gates)
+        gates = list(machine.state(source).exit_gates) if source else []
+        if target:
+            gates += [g for g in machine.state(target).entry_gates if g not in gates]
+        return gates
+
+    def gates_by_destination(
+        self, source: str, machine: Machine | None = None
+    ) -> dict[str, list[str]]:
+        """Every legal edge out of ``source``, and what each of them owes.
+
+        The question `invariant context` and `invariant pipeline gates` are
+        really asking. They used to ask :meth:`gates_for` with no target, which
+        was a fair paraphrase while every gate hung off the state being left —
+        one set applied to every edge, so naming the edge added nothing. That
+        stopped being true when the gates moved to the outcomes they protect
+        (BUG_037), and it was never quite true anyway: `reviewing` advertised
+        four successors and refused two of them, and nothing in "gates owed
+        here" said which two.
+
+        Ordered as the machine declares its successors, so the forward edge
+        reads first.
+        """
+        machine = machine or self.machine
+        return {
+            target: self.gates_for(source, target, machine)
+            for target in machine.next_states(source)
+        }
+
+    def evaluate_gates(
+        self,
+        session_id: str,
+        target: str | None = None,
+        session: dict | None = None,
+        cwd: Path | None = None,
+    ) -> list[Evaluated]:
+        """Verdicts for one edge, or for everything reachable from here.
+
+        With a ``target`` this is the edge's own obligation, which is what a
+        transition evaluates. Without one it is the UNION over every legal
+        destination — because the alternative, after BUG_037 moved the gates
+        onto the outcomes they protect, is that `pipeline gates` in a review
+        state reports nothing owed right up until the advance refuses. A gate
+        that only appears at the moment it blocks is the shape this library
+        exists to remove. :meth:`evaluate_gates_by_destination` says which edge
+        each verdict belongs to.
+        """
+        pipeline = self.require(session_id)
+        machine = self.machine_for(pipeline)
+        if target is None:
+            gate_ids: list[str] = []
+            for edge_gates in self.gates_by_destination(pipeline.state, machine).values():
+                gate_ids += [g for g in edge_gates if g not in gate_ids]
+        else:
+            gate_ids = self.gates_for(pipeline.state, target, machine)
+        ctx = RuleContext(
+            manifest=self.manifest,
+            cwd=Path(cwd or Path.cwd()),
+            session=session,
+            pipeline=pipeline.to_dict(),
+            host_instruction_files=self.host_instruction_files,
+            host_agent_plan=self.host_agent_plan,
+        )
+        return apply_acknowledgements(pipeline.to_dict(), evaluate(gate_ids, ctx))
+
+    def evaluate_gates_by_destination(
+        self,
+        session_id: str,
+        session: dict | None = None,
+        cwd: Path | None = None,
+    ) -> dict[str, list[Evaluated]]:
+        """The same verdicts as :meth:`evaluate_gates`, attributed to their edges.
+
+        Evaluated ONCE over the union and then distributed, rather than per
+        destination: several edges share a gate, and a rule that shells out to
+        git would otherwise run once per edge — and, worse, could answer
+        differently between two of them and produce a report that contradicts
+        itself.
+        """
+        pipeline = self.require(session_id)
+        machine = self.machine_for(pipeline)
+        verdicts = {
+            v.rule_id: v
+            for v in self.evaluate_gates(session_id, session=session, cwd=cwd)
+        }
+        return {
+            target: [verdicts[g] for g in gates if g in verdicts]
+            for target, gates in self.gates_by_destination(
+                pipeline.state, machine
+            ).items()
+        }
+
+    def acknowledge(self, session_id: str, rule_id: str, reason: str) -> Pipeline:
+        """Record a deliberate decision to proceed against an advisory gate.
+
+        Refused for a gate that stops work. Allowing it there would make
+        ``block`` and ``warn`` the same level with different spelling, and the
+        whole design rests on those being different: an enforced gate is dealt
+        with, or overridden where the override is recorded.
+        """
+        if not reason or not reason.strip():
+            raise UsageError(
+                "acknowledging a gate requires --reason. An acknowledgement "
+                "with no stated reason is a silencer, and a silencer is the "
+                "thing this is designed not to be."
+            )
+
+        spec = rule_spec(self.manifest, rule_id)
+        if spec is None:
+            raise UsageError(
+                f"no rule {rule_id!r}; 'invariant rules list' shows them all"
+            )
+
+        level = self.manifest.rule_level(rule_id)
+        if level in (Level.BLOCK, Level.ASK):
+            try:
+                machine = self.machine_for(self.require(session_id))
+            except InvariantError:
+                machine = self.machine
+            raise UsageError(
+                f"{rule_id} {level.value}s in this project and cannot be "
+                f"acknowledged.\n"
+                + _override_routes(rule_id, spec.events, machine)
+            )
+        if level is Level.OFF:
+            raise UsageError(f"{rule_id} is off in this project; nothing to acknowledge")
+
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            _evidence_mapping(pipeline, "acknowledged")[rule_id] = reason.strip()
+            self._save(session_id, pipeline)
+        return pipeline
+
+    def advance(
+        self,
+        session_id: str,
+        target: str,
+        force: bool = False,
+        reason: str | None = None,
+        session: dict | None = None,
+        cwd: Path | None = None,
+    ) -> tuple[Pipeline, list[Evaluated]]:
+        """Walk one edge, if the record its gates judged is still the record.
+
+        The gates are evaluated outside the record's lock, because they can run
+        git and read the tree, and every hook in the session would wait behind
+        them. So the verdicts answer about what the record held when they were
+        reached. Under the lock the record is read again and compared with what
+        the evaluation started from, as a gate can read it: the audit record is
+        left out, because no gate can see it and it lands on nearly every
+        subagent's first call. The same record takes the transition, and any
+        audit write made meanwhile is kept, because the transition is applied to
+        the re-read record. Any other change, to the state or to a piece of
+        evidence, sends the whole decision round again, edge and gates, because a
+        red run that landed during the evaluation is exactly what a stale green
+        verdict must not pass over (BUG_107). A gate is a read, so evaluating it
+        twice costs only the time. A record that never holds still is refused
+        with nothing written.
+
+        The project's steps at ``pipeline.enter.<target>`` run first, once,
+        and are recorded, so the gates read their runs (ADR-021 D3). A forced
+        advance runs none: its gates are passed, and recorded, as any are.
+        """
+        if not force:
+            self.run_steps(session_id, target, session=session, cwd=cwd)
+        for _ in range(ADVANCE_ATTEMPTS):
+            seen = self.require(session_id)
+            machine = self.machine_for(seen)
+
+            structural_override = False
+            if seen.state != target:
+                try:
+                    machine.require_edge(seen.state, target)
+                except TransitionError:
+                    if not force:
+                        raise
+                    structural_override = True
+
+            verdicts = self.evaluate_gates(session_id, target, session=session, cwd=cwd)
+            blocking = [v for v in verdicts if v.blocks]
+
+            if blocking and not force:
+                raise GateFailure(
+                    f"{len(blocking)} gate(s) block {seen.state!r} -> {target!r}",
+                    verdicts=verdicts,
+                )
+
+            overriding = force and (blocking or structural_override)
+            if overriding and not reason:
+                raise UsageError(
+                    "--force requires --reason: an override that records no "
+                    "rationale is indistinguishable from the gate never having "
+                    "run"
+                )
+
+            host_session_id = (session or {}).get("host_session_id")
+            usage, usage_host = self._reading(host_session_id)
+
+            with self._record_lock(session_id):
+                pipeline = self.require(session_id)
+                if _without_audit(pipeline.to_dict()) != _without_audit(seen.to_dict()):
+                    continue
+                if overriding:
+                    pipeline.overrides.append(
+                        {
+                            "from": pipeline.state,
+                            "to": target,
+                            "reason": reason,
+                            "structural": structural_override,
+                            "gates": [v.rule_id for v in blocking],
+                        }
+                    )
+
+                # ADR-002 D3. `elapsed` is derived from an anchor reconstructed
+                # out of the durations already recorded, and the watermark is a
+                # pair of counters — so per-state attribution costs no stored
+                # clock time, and spend has no boundary problem: it is a
+                # subtraction of two counts rather than an arbitrary assignment
+                # of a response to one side of a transition.
+                now = self.clock()
+                entered = pipeline.state_entered()
+                pipeline.history.append(
+                    {
+                        "from": pipeline.state,
+                        "to": target,
+                        "reason": reason,
+                        "forced": bool(force),
+                        "elapsed": None if entered is None else max(0.0, now - entered),
+                        "usage": usage,
+                        "usage_host": usage_host,
+                    }
+                )
+                if LANDING_ROLE in machine.state(target).roles:
+                    landing = guidelines_landing(
+                        pipeline.state, target, forced=bool(force), verdicts=verdicts
+                    )
+                    if landing is not None:
+                        _evidence_list(pipeline, LANDINGS_KEY).append(landing)
+                pipeline.state = target
+                if target in machine.terminal:
+                    pipeline.finished = now
+                self._save(session_id, pipeline)
+                return pipeline, verdicts
+
+        raise StateError(
+            f"the pipeline record changed during each of {ADVANCE_ATTEMPTS} evaluations "
+            f"of the gates on {target!r}, so no answer was about the record as it "
+            "stood. Nothing was recorded; run the advance again once the parallel "
+            "work has settled."
+        )
+
+    def run_steps(
+        self,
+        session_id: str,
+        target: str,
+        session: dict | None = None,
+        cwd: Path | None = None,
+    ) -> list[dict]:
+        """Run the project's steps due on entering ``target`` and record them
+        (ADR-021 D2). Nothing runs on an edge the pipeline's machine does not
+        have; the advance refuses that edge itself."""
+        from .steps import StepsDomain
+
+        pipeline = self.require(session_id)
+        machine = self.machine_for(pipeline)
+        if target not in machine.states or not machine.can(pipeline.state, target):
+            return []
+        return StepsDomain(self.manifest, self.store).run_due(
+            f"{steps_reader.PIPELINE_ENTER}{target}", session=session,
+            cwd=Path(cwd or self.manifest.root),
+        )
+
+    # -- evidence ------------------------------------------------------
+
+    def record_docs_read(
+        self, session_id: str, path: str, under: dict | None = None
+    ) -> None:
+        """Note a docs read. ``under`` is ``{"lease", "unit"}`` for a read of a
+        store policy path (ADR-014 D5, increment 4b), and the row is then
+        ``{"path", "lease", "unit"}``; any other read is the path, as always."""
+        row: str | dict = path if under is None else {"path": path, **under}
+
+        def apply(pipeline: Pipeline) -> bool:
+            read = _evidence_list(pipeline, "docs_read")
+            if row in read:
+                return False
+            read.append(row)
+            return True
+
+        # No pipeline: reading docs outside one is fine, just unrecorded.
+        self._change(session_id, apply)
+
+    def record_agent_run(
+        self, session_id: str, agent_type: str, *, how: str = VIA_DISPATCH
+    ) -> str:
+        """Note that a subagent ran in this pipeline, and say what happened.
+
+        Returns one of :data:`RECORDED`, :data:`ALREADY` or
+        :data:`NO_PIPELINE`. The return value is the point. This used to be a
+        bare ``return`` when there was no pipeline, defended as "dispatching an
+        agent before starting one is allowed, it just cannot be evidence for a
+        gate that does not exist yet". The permission is right and is kept —
+        nothing here raises, and no dispatch is refused. What was wrong is the
+        silence: ``agents.*_ran`` is block-level, so the caller learns its
+        evidence went nowhere at the gate, at the end of the phase, with no way
+        left to satisfy it (BUG_028). A caller that is told can say so.
+
+        ``how`` records WHY this agent is here, because the two routes are not
+        equally strong and a reader of the record cannot otherwise tell them
+        apart. :data:`VIA_DISPATCH` means a parent asked for this agent and the
+        request resolved to this session. :data:`VIA_ACTOR` means the host
+        named this agent as the one making a call that landed in this
+        pipeline — the agent's own work, not somebody's account of it. An actor
+        reading is never downgraded to a dispatch reading.
+        """
+        def apply(pipeline: Pipeline) -> bool:
+            ran = _evidence_list(pipeline, "agents_run")
+            via = _evidence_mapping(pipeline, "agents_run_how")
+            changed = False
+            if agent_type not in ran:
+                ran.append(agent_type)
+                changed = True
+            if via.get(agent_type) not in (VIA_ACTOR, how):
+                via[agent_type] = how
+                changed = True
+            return changed
+
+        changed = self._change(session_id, apply)
+        if changed is None:
+            return NO_PIPELINE
+        return RECORDED if changed else ALREADY
+
+    def record_verdicts(self, session_id: str, records: Sequence[Mapping[str, Any]]) -> int:
+        """Append accepted judgement verdicts to ``evidence["verdicts"]`` (ADR-012 D5).
+
+        Append-only: a later verdict on a rule is added beside the earlier
+        one, never written over it, so the record keeps what was said and
+        when in the order it was said. Which one answers a rule is the gate's
+        question (A4.3). The records come from ``core.rules.plan_verdicts``,
+        through ``domains/guidelines``, already checked; this only writes.
+
+        Each record names the state it was checked in. A pipeline that has
+        moved since is refused, with nothing written: the review-role check
+        (DN-2) was made against a state the pipeline is no longer in.
+        """
+        from ..core.rules import VerdictRefused
+
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            moved = sorted({
+                str(r.get("state")) for r in records if r.get("state") != pipeline.state
+            })
+            if moved:
+                raise VerdictRefused.precondition(
+                    f"pipeline: the pipeline moved to {pipeline.state!r} after the verdicts "
+                    f"were checked in {', '.join(moved)}; fix: submit them again"
+                )
+            _evidence_list(pipeline, "verdicts").extend(dict(r) for r in records)
+            self._save(session_id, pipeline)
+        return len(records)
+
+    def stamp_verdict_agent(
+        self, session_id: str, token: Any, agent: Any, model: Any = None
+    ) -> int:
+        """Set the acting agent on the verdicts one submission recorded (A4.8).
+
+        ADR-012 DN-12 and the user's rulings: a host that can name the agent
+        acting in a verdict command reads the submission's ``token`` out of
+        that command's output and passes it here with the agent, an opaque
+        string this never interprets. Every record in
+        ``evidence["verdicts"]`` carrying exactly that token and no agent yet
+        gets it. Set once (ruling a): a record that has an agent keeps it, and
+        nothing else on any record changes. Returns how many got an agent.
+
+        ``model`` is the model the host observed that agent running on, also
+        opaque, stamped the same way (the A7 ruling 11): set once, only on a
+        record of this token whose agent is this agent, because the stamp says
+        what the record's own agent ran on. No model stamps none.
+
+        Audit only (D1 item 2): no gate, standing or landing record reads
+        ``agent``, ``model`` or ``token``. An empty token or agent, no
+        pipeline, or no record carrying the token stamps nothing and writes
+        nothing; none of them is a refusal, because the verdict was accepted
+        already.
+        """
+        if not isinstance(token, str) or not token or not isinstance(agent, str) or not agent:
+            return 0
+        model = _text_or_none(model)
+        stamped = 0
+
+        def apply(pipeline: Pipeline) -> bool:
+            nonlocal stamped
+            stamped = 0
+            modelled = False
+            recorded = pipeline.evidence.get("verdicts")
+            for record in recorded if isinstance(recorded, list) else ():
+                if not isinstance(record, dict) or record.get("token") != token:
+                    continue
+                if record.get("agent") is None:
+                    record["agent"] = agent
+                    stamped += 1
+                if model is not None and record["agent"] == agent and record.get("model") is None:
+                    record["model"] = model
+                    modelled = True
+            return bool(stamped or modelled)
+
+        return stamped if self._change(session_id, apply) else 0
+
+    def audit_unread(self, session_id: str, agent: Any, run: Any) -> bool:
+        """Does this subagent run still owe the audit record its one read?
+
+        Asked by a host before it opens anything, because it is asked on every
+        call a subagent makes and the answer is nearly always no. ``run`` is the
+        host's id for the run. A host that has none reads once per agent. No
+        pipeline, no agent or a malformed record owes nothing.
+        """
+        pipeline = self.current(session_id)
+        if pipeline is None or not isinstance(agent, str) or not agent:
+            return False
+        if AUDIT_KEY not in pipeline.evidence:
+            return True
+        audit = pipeline.evidence[AUDIT_KEY]
+        agents = audit.get("agents") if isinstance(audit, dict) else None
+        if not isinstance(agents, dict):
+            return False
+        if agent not in agents:
+            return True
+        runs = agents[agent].get("runs") if isinstance(agents[agent], dict) else None
+        if not isinstance(runs, list):
+            return False
+        return isinstance(run, str) and bool(run) and run not in runs
+
+    def record_audit(
+        self,
+        session_id: str,
+        *,
+        host: Any,
+        agent: Any,
+        tier: Any = None,
+        requested: Any = None,
+        rendered: Any = None,
+        model: Any = None,
+        run: Any = None,
+    ) -> bool:
+        """Add what a host learned about a subagent to ``evidence["audit"]``.
+
+        ADR-012 D1 item 2 and the A7 rulings 9 and 10. Every value is an opaque
+        string this never interprets, and anything else counts as not known: a
+        missing fact stays null, and a null never clears a fact.
+
+        ``requested`` is the model a dispatch asked for and ``rendered`` the one
+        on the agent's installed line. Both answer ``asked``, and the request
+        wins whichever arrives first, because a foreground subagent acts before
+        the host sees the dispatch that started it. ``model`` is observed, never
+        derived from either, and gathers once per value, as ``run`` does.
+
+        Returns whether anything was written. No pipeline, no host, no agent or
+        a malformed record records nothing and is no refusal: the record is
+        audit only, so it may never cost the call that fed it. No gate can read
+        any of this, because ``RuleContext`` removes it.
+        """
+        host = _text_or_none(host)
+        agent = _text_or_none(agent)
+        if host is None or agent is None:
+            return False
+
+        def apply(pipeline: Pipeline) -> bool:
+            audit = pipeline.evidence.get(AUDIT_KEY, {"host": host, "agents": {}})
+            agents = audit.get("agents") if isinstance(audit, dict) else None
+            if not isinstance(agents, dict):
+                return False
+            before = copy.deepcopy(audit)
+            entry = agents.setdefault(
+                agent, {"tier": None, "asked": None, "models": [], "runs": []}
+            )
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("models"), list)
+                or not isinstance(entry.get("runs"), list)
+            ):
+                return False
+            entry["tier"] = _text_or_none(tier) or entry.get("tier")
+            entry["asked"] = (
+                _text_or_none(requested) or entry.get("asked") or _text_or_none(rendered)
+            )
+            for key, value in (("models", model), ("runs", run)):
+                value = _text_or_none(value)
+                if value is not None and value not in entry[key]:
+                    entry[key].append(value)
+            if audit == before:
+                return False
+            pipeline.evidence[AUDIT_KEY] = audit
+            return True
+
+        return bool(self._change(session_id, apply))
+
+    def _fresh_bundle(self, session_id: str, kind: str) -> Path:
+        """A per-run result-bundle path, per SESSION and per KIND, never shared.
+
+        Two concurrent sessions writing one bundle would overwrite each other's
+        measurements while both reported success.
+        """
+        return fresh_bundle(Path(self.store.root) / "coverage" / f"{session_id}.{kind}.xcresult")
+
+    def run_coverage(
+        self,
+        session_id: str,
+        cwd: Path | None = None,
+        selectors: Sequence[str] | None = None,
+    ) -> dict:
+        """Run the configured coverage command and record what it measured.
+
+        This is the missing half of ``coverage.meets_floor``. The rule, the
+        manifest slot and every adapter's parser all existed; nothing ever
+        called them, so the gate blocked on evidence no code path could
+        produce and advised running "the configured coverage command" — which
+        no command ever ran. A blocking gate that cannot be satisfied does not
+        enforce a standard, it teaches people to reach for --force.
+
+        ``selectors`` runs ``commands.coverage_one`` instead, the scoped
+        sibling (ADR-010): the figure is a lower bound, and the record says the
+        run was scoped so no gate reads it as a whole-scheme measurement.
+        """
+        self.require(session_id)
+        root = Path(cwd or self.manifest.root)
+        selectors = [s for s in (selectors or ()) if s]
+        ecosystem = ecosystem_of(self.manifest, selectors)
+        adapter = get_adapter(ecosystem)
+
+        # A per-run path, supplied here rather than configured. Writing a
+        # result-bundle path into a manifest would make it shared state between
+        # concurrent sessions, and two runs would overwrite each other's
+        # measurements while both reported success.
+        extra = {}
+        if selectors:
+            if not self.manifest.command_template("coverage_one", ecosystem):
+                key = self.manifest.command_key("coverage_one", ecosystem)
+                raise UsageError(
+                    f"a scoped coverage run needs {key}, the "
+                    "coverage command with {selector} substituted, and none is "
+                    "configured or supplied by the adapter. Nothing was run."
+                )
+            extra["selector"] = joined_selectors(adapter, selectors)
+        bundle = self._fresh_bundle(session_id, "coverage")
+        command = self.manifest.command_for(
+            "coverage_one" if selectors else "coverage",
+            ecosystem,
+            result_bundle=str(bundle),
+            **extra,
+        )
+        run = measure_coverage(
+            self.manifest, adapter, command, bundle, root,
+            selectors=selectors, ecosystem=ecosystem,
+        )
+        outcome = run.outcome
+
+        self.record_coverage(session_id, run.measured)
+
+        # A coverage run IS a test run — it runs the suite. Not recording it
+        # left `test.all_pass` reading the last `pipeline test` entry, which
+        # could be an older, narrower, greener run, and answering about that
+        # one as though it were current. A whole-suite run with 625 failures
+        # sat beside a rule saying "the suite is green and the pass is
+        # trustworthy", because the rule was never shown this run at all.
+        self._record_test_run(
+            session_id, "coverage", command, outcome, selectors=selectors,
+            ecosystem=ecosystem,
+            discovered=self.manifest.discovered_in(
+                "coverage_one" if selectors else "coverage",
+                ecosystem, result_bundle=str(bundle), **extra,
+            ),
+        )
+
+        # The suite's state at the moment of measurement, kept with it. A file
+        # at 100% measured on a run where twelve tests failed is a different
+        # fact from the same number measured on a green run, and the record
+        # should not flatten them into one.
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            pipeline.evidence["coverage_run"] = {
+                # The resolved command, as test_runs already records. Without it,
+                # a reader of this evidence cannot tell WHICH run produced the
+                # numbers — scoped or whole-suite, which simulator, which flags —
+                # and that ambiguity is not recoverable later. A peer hit exactly
+                # that: unable to tell whether an annotation was missing because
+                # nothing was recorded or because nothing needed annotating.
+                "command": command,
+                # And said outright, because a held path under a sweep cadence
+                # owes a FULL run, and a command string is not a reliable answer
+                # to "was this one" (ADR-010 D1, D8).
+                "selectors": list(selectors),
+                "scope": _scope(selectors),
+                # Whose command ran and whose adapter read it (ADR-013 D2).
+                "ecosystem": ecosystem,
+                "executed": outcome.total,
+                "failed": outcome.failed,
+                "exit_code": run.exit_code,
+                # Kept apart on purpose. One number used to stand for both, and
+                # which one it stood for depended on which command the shell
+                # happened to finish with — so the evidence could not answer "did
+                # the suite fail, or did the reader fail?" at all.
+                "report_command": run.report_command,
+                "report_exit_code": run.report_exit,
+                "suite_passed": outcome.passed,
+                # A hazard on the measuring run travels with the measurement. Exit
+                # 65 can mean whole suites never ran, which makes coverage
+                # UNDERSTATED — and an understated number is still a number
+                # somebody will act on. Annotating beats silently trusting, for the
+                # same reason TestResult.trustworthy is narrower than passed.
+                "hazards": [h.id for h in outcome.hazards],
+                # Split at record time, because the reader of the evidence cannot
+                # re-derive it: the adapter knows which way each hazard bends a
+                # measurement, the rule does not.
+                "overstating_hazards": [
+                    h.id for h in outcome.hazards if h.may_overstate
+                ],
+            }
+            self._save(session_id, pipeline)
+
+        return {
+            "command": command,
+            "exit_code": run.exit_code,
+            "report_command": run.report_command,
+            "report_exit_code": run.report_exit,
+            "files": len(run.measured),
+            "coverage": run.measured,
+            "selectors": list(selectors),
+            "scope": _scope(selectors),
+            "executed": outcome.total,
+            "failed": outcome.failed,
+            # These were missing, and their absence made describe_run silent
+            # about the very thing it was added to announce: a console fallback
+            # rendered identically to a bundle read, so a scraped count that
+            # was wrong by 400x printed with no caveat at all.
+            "failed_tests": outcome.failed_tests,
+            "skipped": outcome.skipped,
+            "source": outcome.source,
+            "device": outcome.device,
+            "note": outcome.note,
+            "suite_passed": outcome.passed,
+        }
+
+    def record_coverage(self, session_id: str, coverage: dict[str, float]) -> None:
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            pipeline.evidence["coverage"] = dict(coverage)
+            self._save(session_id, pipeline)
+
+    def run_tests(
+        self,
+        session_id: str,
+        phase: str | None = None,
+        selectors: Sequence[str] | None = None,
+        cwd: Path | None = None,
+    ) -> dict:
+        """Run the configured suite and record what actually happened.
+
+        ``selectors`` is a list because a caller may legitimately ask for
+        several. Whether several fit in one command is the adapter's answer;
+        what to do when they do not is this domain's, and the answer is to
+        refuse. A refusal costs the caller one retry, and the alternative —
+        running a subset — costs them the belief that the scope was covered
+        (BUG_031). The selectors also decide WHOSE run it is: in a project
+        declaring several ecosystems, the one that owns them supplies the
+        command and reads the result (ADR-013).
+        """
+        pipeline = self.require(session_id)
+        selectors = [s for s in (selectors or ()) if s]
+        ecosystem = ecosystem_of(self.manifest, selectors)
+        # The docs project is never the content a run's notes describe
+        # (ADR-020 D8), so the adapter is told where the tree's is.
+        adapter = get_adapter(
+            ecosystem,
+            docs_srcdir=needs.srcdir_of(self.manifest, Path(cwd or self.manifest.root)),
+        )
+        command_key = "test_one" if selectors else "test"
+        extra = {}
+        if selectors:
+            extra["selector"] = joined_selectors(adapter, selectors)
+        bundle = self._fresh_bundle(session_id, "test")
+        command = self.manifest.command_for(
+            command_key, ecosystem, result_bundle=str(bundle), **extra
+        )
+
+        proc = run_command(command, Path(cwd or self.manifest.root))
+        result = adapter.annotate(
+            adapter.read_run(proc.stdout, proc.stderr, proc.returncode, bundle=bundle),
+            Path(cwd or self.manifest.root),
+        )
+        phase = phase or pipeline.state
+        result, read_as_red = self._read_red_phase_run(
+            pipeline, phase, adapter, result, selectors, cwd or self.manifest.root
+        )
+
+        return self._record_test_run(
+            session_id, phase, command, result, read_as_red=read_as_red,
+            selectors=selectors, ecosystem=ecosystem,
+            discovered=self.manifest.discovered_in(
+                command_key, ecosystem, result_bundle=str(bundle), **extra
+            ),
+        )
+
+    def _read_red_phase_run(
+        self, pipeline, phase, adapter, result, selectors, root
+    ) -> tuple[Any, bool]:
+        """In the red phase, a strict expected failure that fails is red.
+
+        The committed form of a repro is wrapped in a strict expected-failure
+        marker, and such a run exits clean: read on exit status alone it was a
+        PASS, so ``test.new_test_fails`` could not be satisfied until the fixer
+        removed the wrapper (BUG_066). Here, and only in the phase the machine
+        names as its proof of red, a clean run whose only outcome is expected
+        failures the adapter confirms are strict is recorded as failing, those
+        failures counted — ``_why_not_proof`` asks for a parsed, non-zero
+        failure count, and flipping ``passed`` alone would not supply one.
+
+        Everywhere else the exit status stands. In a green run a strict
+        expected failure still failing is the tripwire holding, not a failure,
+        and reading it as one would block ``test.all_pass`` on every suite
+        carrying a committed repro. The exit code is recorded unchanged either
+        way, and ``read_as_red`` says which reading was taken.
+
+        A selector is required: a whole-suite run cannot say WHICH test
+        xfailed, and every other committed repro in the suite is a strict
+        expected failure too.
+        """
+        expected = result.expected_failures
+        if not expected or not result.passed or result.failed:
+            return result, False
+        try:
+            red_phase = self.machine_for(pipeline).red_phase or "red"
+        except InvariantError:
+            return result, False
+        if phase != red_phase:
+            return result, False
+
+        strict = (
+            adapter.expected_failures_are_strict(Path(root), selectors)
+            if selectors
+            else None
+        )
+        if strict is not True:
+            why = (
+                "the run named no selector, so which test failed cannot be told"
+                if not selectors
+                else "the adapter could not confirm its marker is strict"
+            )
+            note = (
+                f"{expected} expected failure(s) ran, but {why}, so the run is "
+                "recorded as it exited — mark the repro strict "
+                "(pytest: xfail(strict=True)) and name it with --selector, or "
+                "record the red run with the wrapper off"
+            )
+            return replace(result, note=_joined(result.note, note)), False
+
+        note = (
+            f"{expected} strict expected failure(s) read as red: the wrapped "
+            "test failed as intended, and the run exited 0 because of the marker"
+        )
+        return (
+            replace(result, passed=False, failed=expected, note=_joined(result.note, note)),
+            True,
+        )
+
+    def _record_test_run(
+        self,
+        session_id: str,
+        phase: str,
+        command: str,
+        result,
+        read_as_red=False,
+        selectors: Sequence[str] = (),
+        ecosystem: str | None = None,
+        discovered: Mapping[str, str] | None = None,
+    ):
+        """Append one run to the evidence every test rule reads.
+
+        Shared so that every path which runs the suite lands here. A path that
+        ran the suite and recorded it somewhere else left the test rules
+        answering about a different run than the one that just happened.
+        """
+        record = {
+            "phase": phase,
+            # The RESOLVED command, placeholders substituted. A discovered
+            # value that picked the wrong thing — another session's simulator,
+            # say — is otherwise invisible: nothing in the output names what
+            # was chosen, so a run against the wrong device is indistinguishable
+            # from a run against the right one.
+            "command": command,
+            # Which tests were asked for, and so whether this was the whole
+            # suite. A held path under a sweep cadence owes a full run, and a
+            # resolved command string cannot be relied on to say (ADR-010 D1).
+            "selectors": list(selectors),
+            "scope": _scope(selectors),
+            # The placeholders this run's discovery resolved, by key. The
+            # session's own shell may be what made them resolvable (its own
+            # exported simulator, say), and a replay from anywhere else needs
+            # them handed back to the project's discovery (BUG_093). Under the
+            # state root, machine-local, never committed.
+            "discovered": dict(discovered or {}),
+            # Whose command ran and whose adapter read it (ADR-013 D2).
+            "ecosystem": ecosystem or self.manifest.primary_ecosystem,
+            "passed": result.passed,
+            "exit_code": result.exit_code,
+            "executed": result.total,
+            "failed": result.failed,
+            "failed_tests": result.failed_tests,
+            # Where the counts came from, and what they ran on. Both were
+            # unanswerable from the record until now, and both mattered: one
+            # session's numbers came from a peer's simulator, and another's
+            # came from a console layout that under-reported by 400x.
+            "source": result.source,
+            "device": result.device,
+            "skipped": result.skipped,
+            # BUG_066. `read_as_red` marks the one case where `passed` is not
+            # the exit status: a strict expected failure counted as red in the
+            # machine's red phase. `exit_code` above stays the process's own.
+            "expected_failures": result.expected_failures,
+            "read_as_red": read_as_red,
+            "hazards": [h.id for h in result.hazards],
+            "note": result.note,
+        }
+        with self._record_lock(session_id):
+            pipeline = self.require(session_id)
+            _evidence_list(pipeline, "test_runs").append(record)
+            self._save(session_id, pipeline)
+        return record
+
+    # -- internals -----------------------------------------------------
+
+    def _record_lock(self, session_id: str):
+        """The lock every read-modify-write of this session's record holds.
+
+        Held across the load and the save and for nothing slower. Taking it
+        twice in one call waits out the timeout (`JsonStore.lock`).
+        """
+        return self.store.lock(self.relpath(session_id), timeout=self.lock_timeout)
+
+    def _change(self, session_id: str, apply: Callable[[Pipeline], bool]) -> bool | None:
+        """One conditional write: ``apply`` mutates and says whether it did.
+
+        For the writers a hook calls, most of whose calls change nothing. An
+        agent already on the record is the usual answer on every tool call it
+        makes, so that answer is taken from a plain read, which needs no lock
+        and cannot wait behind one. Anything else is decided again from a read
+        under the lock, so ``apply`` runs twice and must only touch the record
+        it is given. Returns ``None`` when there is no pipeline.
+        """
+        seen = self.current(session_id)
+        if seen is None:
+            return None
+        if not apply(seen):
+            return False
+        with self._record_lock(session_id):
+            pipeline = self.current(session_id)
+            if pipeline is None:
+                return None
+            if not apply(pipeline):
+                return False
+            self._save(session_id, pipeline)
+        return True
+
+    def _save(
+        self, session_id: str, pipeline: Pipeline, archive: Pipeline | None = None
+    ) -> None:
+        """Write the record. The caller holds :meth:`_record_lock`."""
+        self.store.ensure_root()
+        raw = self.store.read(self.relpath(session_id), {}) or {}
+        completed = list(raw.get("completed", []))
+        if archive is not None:
+            completed.append(archive.to_dict())
+        self.store.write(
+            self.relpath(session_id),
+            {"current": pipeline.to_dict(), "completed": completed},
+        )
+
+
+def _evidence_list(pipeline: Pipeline, key: str) -> list:
+    """The list this evidence field holds, for a writer to add to.
+
+    A field of the wrong shape reads as empty and is replaced: it says nothing a
+    reader could use, and raising here would cost the write this caller came to
+    make. A hook swallows that failure and exits 0, so a recorded fact would
+    vanish with nothing said until a gate missed it (ADR-012, A7 increment 4).
+    """
+    return _evidence_field(pipeline, key, list)
+
+
+def _evidence_mapping(pipeline: Pipeline, key: str) -> dict:
+    """The mapping this evidence field holds, as :func:`_evidence_list` says."""
+    return _evidence_field(pipeline, key, dict)
+
+
+def _evidence_field(pipeline: Pipeline, key: str, shape: type) -> Any:
+    value = pipeline.evidence.get(key)
+    if not isinstance(value, shape):
+        value = pipeline.evidence[key] = shape()
+    return value
+
+
+def audit_line(evidence: Mapping[str, Any]) -> str | None:
+    """The audit record as the one line ``pipeline status`` prints, or ``None``.
+
+    No record, or none readable, is no line: a pipeline older than the record
+    has nothing to say. A fact it does not hold reads as ``none``.
+    """
+    audit = evidence.get(AUDIT_KEY)
+    agents = audit.get("agents") if isinstance(audit, dict) else None
+    if not isinstance(agents, dict):
+        return None
+    described = []
+    for name, entry in agents.items():
+        if not isinstance(entry, dict):
+            continue
+        models = entry.get("models")
+        observed = " + ".join(str(m) for m in models) if isinstance(models, list) else ""
+        described.append(
+            f"{name} tier {entry.get('tier') or 'none'}, "
+            f"asked {entry.get('asked') or 'none'}, observed {observed or 'none'}"
+        )
+    if not described:
+        return None
+    return f"{audit.get('host') or 'unknown'}: " + "; ".join(described)
+
+
+#: The evidence key each landing's guidelines record is appended to
+#: (ADR-012 DN-7, A4.6).
+LANDINGS_KEY = "guidelines_landings"
+#: Every gate of the guidelines family is named under this prefix.
+GUIDELINES_FAMILY = "guidelines."
+
+
+def guidelines_landing(
+    source: str, target: str, *, forced: bool, verdicts: Sequence[Evaluated]
+) -> dict[str, Any] | None:
+    """What the guidelines family decided at one landing, as the record keeps it.
+
+    ADR-012 DN-7 (A4.6). Copied from the verdicts the advance evaluated, never
+    derived again: each ``guidelines.*`` gate's outcome at the level it ran
+    at, the digest it judged against, ``mechanical_clean``'s findings and
+    ``verdicts_complete``'s standings, and every grant either gate read,
+    spent or held as ``grant_outcomes`` decides, which is the CLI's spend
+    decision too. ``None`` when no guidelines gate was evaluated (no ruleset
+    configured or pinned), so such a landing records nothing. No clock time.
+    """
+    family = [v for v in verdicts if v.rule_id.startswith(GUIDELINES_FAMILY)]
+    if not family:
+        return None
+    return {
+        "from": source,
+        "to": target,
+        "forced": forced,
+        "gates": [_landing_gate(v) for v in family],
+        "grants": [o.record() for v in family for o in grant_outcomes(v)],
+    }
+
+
+def _landing_gate(evaluated: Evaluated) -> dict[str, Any]:
+    verdict = evaluated.verdict
+    gate: dict[str, Any] = {
+        "rule": evaluated.rule_id,
+        "level": evaluated.level.value,
+        "ok": verdict.ok,
+        "skipped": verdict.skipped,
+        "blocks": evaluated.blocks,
+        "message": verdict.message,
+    }
+    # Each key only where the gate computed it, as the verdict payload does.
+    if verdict.ruleset is not None:
+        gate["ruleset"] = verdict.ruleset
+    if verdict.findings is not None:
+        gate["findings"] = [dict(f) for f in verdict.findings]
+    if verdict.standings is not None:
+        gate["standings"] = [dict(s) for s in verdict.standings]
+    return gate
+
+
+#: What a grant naming a guideline passes at each family gate it reaches
+#: (ADR-012 ruling 4; the verdict gate since A4 increment 5).
+_GUIDELINE_GRANT_PASSES = {
+    MECHANICAL_GATE: "that guideline's new findings",
+    VERDICTS_GATE: "that guideline's missing, stale or failing verdict",
+}
+
+
+def _override_routes(rule_id: str, events: tuple[str, ...], machine: Machine) -> str:
+    """The commands that can actually pass THIS rule, and only those.
+
+    This message is the one place in the library where overriding a gate that
+    stops work is discussed, and it used to name `pipeline advance --force`
+    unconditionally. For a rule that fires on a TOOL CALL there is no
+    transition to force — the block happened at `pre-tool-use` or at `stop` —
+    so the single piece of advice on offer pointed at a command that could not
+    help, which is worse than saying there is no override (AUTH-01).
+
+    Both halves are checked against what is actually true here rather than
+    assumed. A rule can be both — `privacy.clean` fires on an edit AND guards
+    this machine's `reviewing` exit — and a rule can be neither: `docs.updated`
+    guards a state of `spec-first` and of no other shipped methodology, so in a
+    `tdd` project the advice to force a transition names a transition that does
+    not exist. Where neither route is real the message says so, which is the
+    one answer the old text could never give.
+    """
+    routes = []
+    if events:
+        routes.append(
+            f"    invariant override {rule_id} --reason '<why>'\n"
+            f"      (it fires on {', '.join(events)}; one call, then it is spent)"
+        )
+    if rule_id in machine.gate_ids():
+        if rule_id in _GUIDELINE_GRANT_PASSES:
+            # ADR-012 ruling 4: one guideline at a time, the others in force.
+            routes.append(
+                "    invariant override <guideline-id> --reason '<why>'\n"
+                f"      (passes {_GUIDELINE_GRANT_PASSES[rule_id]} in one "
+                "evaluation; the advance it lets through spends it)"
+            )
+        routes.append(
+            "    invariant pipeline advance <state> --force --reason '<why>'\n"
+            f"      (it gates a state of the {machine.id!r} pipeline)"
+        )
+    if not routes:
+        return (
+            f"  Nothing can override it here: it fires at no host event and "
+            f"gates no state of\n  the {machine.id!r} pipeline. Satisfy it, or "
+            f"change its level in the manifest."
+        )
+    return (
+        "  Satisfy it, or record a deliberate override — where it is RECORDED:\n"
+        + "\n".join(routes)
+    )
+
+
+def _joined(note: str, extra: str) -> str:
+    return f"{note}; {extra}" if note else extra
+
+
+def describe_run(record: dict) -> str:
+    """One line naming each number's UNIT.
+
+    `executed=14 failed=6` invites the reader to look for six failing tests
+    among fourteen; there were two, and the six were assertions. Two numbers in
+    one line counted in different things is the same species of defect as a
+    number that lies outright — it just makes the reader do the lying.
+    """
+    executed = record.get("executed")
+    parts = [f"{executed if executed is not None else '?'} test(s) executed"]
+
+    failed_tests = record.get("failed_tests")
+    failed = record.get("failed")
+    if failed is None:
+        parts.append("failure count unknown")
+    elif failed_tests is not None and failed_tests != failed:
+        parts.append(f"{failed} assertion(s) failed in {failed_tests} test(s)")
+    elif failed:
+        parts.append(f"{failed} failure(s)")
+    else:
+        parts.append("no failures")
+
+    if record.get("read_as_red"):
+        parts.append(
+            f"{record.get('expected_failures')} strict expected failure(s) read as red"
+        )
+    elif record.get("expected_failures"):
+        parts.append(f"{record['expected_failures']} expected failure(s)")
+    if record.get("skipped"):
+        parts.append(f"{record['skipped']} skipped")
+    # Where the number came from, because a console fallback and a bundle read
+    # produce the same-looking line and are not equally trustworthy.
+    if record.get("source") == "console":
+        parts.append("counts scraped from console output")
+    if record.get("device"):
+        parts.append(f"on {record['device']}")
+    return ", ".join(parts)
+
+
+def summarise(verdicts: list[Evaluated]) -> str:
+    """A short, honest rendering: what blocked, what warned, what was inert."""
+    if not verdicts:
+        return "no gates on this transition"
+    blocked = [v for v in verdicts if v.blocks]
+    warned = [v for v in verdicts if v.warns]
+    skipped = [v for v in verdicts if v.verdict.skipped]
+    passed = [v for v in verdicts if v.verdict.ok and not v.verdict.skipped]
+    parts = [f"{len(passed)} passed"]
+    if blocked:
+        parts.append(f"{len(blocked)} blocking")
+    if warned:
+        parts.append(f"{len(warned)} warning")
+    if skipped:
+        # Reported separately from passes on purpose: a gate that did not
+        # apply has not vouched for anything. The blocking ones are named
+        # within that count because "an advisory gate did not apply" and "a
+        # gate this project enforces did not apply" are not the same news.
+        inert_blocking = [v for v in skipped if v.skipped_blocking]
+        note = f"{len(skipped)} not applicable"
+        if inert_blocking:
+            note += f" ({len(inert_blocking)} blocking)"
+        parts.append(note)
+    return ", ".join(parts)

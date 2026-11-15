@@ -1,0 +1,7 @@
+version: 1
+entries:
+  - id: DUP-01
+    paths: [legacy.py]
+    status: resolved
+    class: contained
+    note: retired before this change

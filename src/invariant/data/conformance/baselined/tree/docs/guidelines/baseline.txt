@@ -1,0 +1,2 @@
+# rule-id  path  fingerprint  count  (written by invariant guidelines baseline; ADR-012 D6)
+style.no-print  app.py  66de9fe2b4b1  1

@@ -1,0 +1,3239 @@
+"""The session domain.
+
+The only domain with genuine cross-process concurrency: several sessions run
+against one repository at once, which is the situation the whole isolation
+protocol exists for. Per-session documents are written by their owner alone;
+the registry that indexes them is written by everyone and is therefore the only
+locked file.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import time
+import uuid
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ..core import doclock, git, storemigrate
+from ..core import plan as plan_reader
+from ..core import steps as steps_reader
+from ..core.errors import (
+    GateFailure,
+    ManifestError,
+    StateError,
+    TransitionError,
+    UsageError,
+)
+from ..core.fsm import Machine
+from ..core.machines import ABANDON_ROLE, load_session_machine
+from ..core.manifest import MANIFEST_RELPATH, manifest_tracking
+from ..core.rules import (
+    Evaluated,
+    RuleContext,
+    evaluate,
+    get_rule,
+    guideline_gate_of,
+    guideline_override_refusal,
+    is_exempt_path,
+)
+from ..core.stats import Usage, WatermarkSource
+from ..core.store import JsonStore, PreservesUnknownKeys
+from .steps import StepsDomain
+
+REGISTRY = "registry.json"
+
+#: The two states a session does not come back from. The registry indexes
+#: sessions in flight, so a write to a finished record must not re-register it.
+_FINISHED = frozenset({"torn_down", "abandoned"})
+
+#: The edge an edit fires, ``isolated --> working: first edit``. Named once so
+#: that :meth:`SessionDomain.advance_on_edit` and its documentation cannot
+#: disagree about which edge it is.
+_FIRST_EDIT_FROM = "isolated"
+_FIRST_EDIT_TO = "working"
+
+#: The states that free every docs-lock unit a session holds: it landed, it
+#: was torn down, or it was abandoned (ADR-014 D5).
+_RELEASES_DOCS_LOCK = frozenset({"merged", "torn_down", "abandoned"})
+
+#: The rule id a landing override is recorded under: a forced abandon of a
+#: session whose docs landed, and a finish forced past a store that no longer
+#: holds them (ADR-014 D6).
+LANDING_RULE = "session.landing"
+
+#: Context a gate needs to know which question it is being asked, derived from
+#: the state being ENTERED. ``session.ff_merge_target`` and
+#: ``session.push_barrier`` serve double duty — they also fire from the
+#: pre-tool-use hook on raw ``git merge`` / ``git push`` commands — so without
+#: these flags they would read an empty command string on a machine
+#: transition and abstain, which is exactly the inertness AUD-05 describes.
+_GATE_EXTRA_BY_TARGET: dict[str, dict[str, Any]] = {
+    "merged": {"merging": True},
+    "pushed": {"pushing": True},
+}
+
+
+#: Routes that IDENTIFIED the session, as against merely nominating one.
+#:
+#: Every member names the session from something the call itself carried: an
+#: explicit id, the host identifier, the path the call is aimed at, the
+#: worktree the brief names, or the worktree the call is standing in. ``origin``
+#: is deliberately absent — it is the last-resort guess, "the only session
+#: registered at or above here", and it is the route by which a FOREIGN
+#: session's agent was recorded as evidence on a pipeline that never dispatched
+#: it (BUG_028). A guess is fine for deciding what to *display*; it is not fine
+#: for writing evidence a block-level gate will then read as fact.
+PROVEN_ROUTES = frozenset({"explicit", "host", "target", "prompt", "cwd"})
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """Which session, and on what evidence.
+
+    ``how`` is not decoration. A caller that wants to *record* an attribution —
+    binding a host identifier to a session so later calls resolve cheaply, or
+    writing pipeline evidence — may only do so when the evidence actually
+    identified the session. Learning the wrong mapping from a weak signal would
+    be worse than not learning one.
+    """
+
+    session: Session | None
+    #: explicit | host | target | prompt | cwd | origin | ambiguous | none
+    how: str
+    candidates: tuple[Session, ...] = ()
+
+    @property
+    def proven(self) -> bool:
+        """Did the call name this session, or did we pick the only one left?
+
+        The distinction the evidence writers turn on. ``session is not None``
+        is not the same question: ``origin`` returns a real session and is
+        still a guess.
+        """
+        return self.session is not None and self.how in PROVEN_ROUTES
+
+
+@dataclass
+class Session(PreservesUnknownKeys):
+    """One session's whole record.
+
+    ``to_dict`` and ``from_dict`` come from `core.store.PreservesUnknownKeys`
+    and carry the round trip in BOTH directions: a field written before it
+    existed loads at its default, and a field this build has never heard of is
+    written back rather than deleted (BUG_061).
+    """
+
+    id: str
+    name: str
+    state: str = "registered"
+    branch: str | None = None
+    worktree: str | None = None
+    #: Where the session was registered. A session that has not isolated yet
+    #: has no worktree, and without this it would be unfindable — which would
+    #: make the very next step, isolating it, impossible.
+    origin: str | None = None
+    #: The agent host's own session identifier. The only attribution signal
+    #: that survives a host resetting the working directory between calls.
+    host_session_id: str | None = None
+    #: Set when the host session that owned this one ended. The record stays —
+    #: it is the evidence of what happened — but a session whose host is gone
+    #: is nobody's current session and must stop competing for attribution.
+    #:
+    #: Spent, not final. A spent binding is exactly the state
+    #: :meth:`SessionDomain.resume` picks up from, and replacing it is not the
+    #: hand-over ADR-001 D19 forbids: nobody is on the other end to have a
+    #: pipeline taken away from them.
+    host_ended: bool = False
+    #: How many times a host session picked this one up. The count of
+    #: :meth:`SessionDomain.resume` calls that succeeded, which is how many
+    #: agent-host sessions this one has outlived.
+    resumed_count: int = 0
+    #: Every host session this one was bound to BEFORE the current one, oldest
+    #: first. Provenance, so that a record spanning four Claude sessions can
+    #: say which four.
+    #:
+    #: The *current* binding is ``host_session_id`` and is deliberately not
+    #: repeated here: one fact in two places makes "which one is live" a
+    #: question about list position. A legacy record seeds this list from the
+    #: scalar the first time the binding moves, so nothing has to be migrated
+    #: for a session to acquire its own history.
+    hosts: list[str] = field(default_factory=list)
+    #: The branch this session's worktree was cut from and will merge back
+    #: into. Chosen ONCE, in :meth:`SessionDomain.start` — derived from the
+    #: main checkout or passed explicitly — and never guessed after that. The
+    #: default here is the loader's, for a document missing the key; every
+    #: document this library writes carries one.
+    base: str = "master"
+    files: list[str] = field(default_factory=list)
+    #: The deliverable set this session owes, in the order it was recorded.
+    #: ``[{"n": int, "title": str, "done": bool, "done_at": float | None}]``.
+    #:
+    #: A field rather than a file. It is per-session, it is read on the same
+    #: turn as the state it qualifies, and it is small — so a second document
+    #: would buy a second thing to keep consistent and a second thing to lose.
+    #: ``core/plan`` holds every question asked of it; this domain holds the
+    #: mutations.
+    plan: list[dict] = field(default_factory=list)
+    #: When the plan last MOVED. Deliberately **not** ``heartbeat``: that field
+    #: anchors the per-transition ``elapsed`` telemetry (ADR-002 D3), so
+    #: stamping it on a checklist edit would silently shorten the next
+    #: transition's recorded duration — an edit to the record of what a state
+    #: cost, made by an operation that is not a transition at all.
+    plan_touched: float = 0.0
+    #: The decisions this session made (ADR-018 D9), in the order declared:
+    #: ``[{"n": int, "id": str | None, "draft": str | None}]``. An entry with
+    #: no ``id`` is a draft, which ``docs.decisions_recorded`` holds at the
+    #: landing until ``session decisions resolve`` names the need it became.
+    #: A field for the reasons ``plan`` is one.
+    decisions: list[dict] = field(default_factory=list)
+    push_count: int = 0
+    history: list[dict] = field(default_factory=list)
+    #: Overrides that have been SPENT — a forced transition, a structural edge
+    #: walked deliberately, or a one-shot token consumed at a hook. The audit
+    #: trail. Silent is not an option the API has.
+    overrides: list[dict] = field(default_factory=list)
+    #: Overrides the operator has GRANTED and nothing has spent yet: one entry
+    #: per rule, carrying the reason and how many calls are left on it.
+    #:
+    #: This is the appeal that reaches the delivery surface. Every gate the
+    #: CLI evaluates could already be passed with `--force --reason`, and the
+    #: gates that actually stop an agent are not evaluated by the CLI — twelve
+    #: rules fire from hooks, where a blocking verdict was final: no flag, no
+    #: marker, no prompt, no recorded exception (BUG_049). A grant here is
+    #: consumed by the next evaluation of that rule at a hook, and consuming it
+    #: moves a record into `overrides` above.
+    pending_overrides: list[dict] = field(default_factory=list)
+    #: Enforcement held for an INTERVAL rather than for a call, or ``None``.
+    #:
+    #: The other half of the position. `pending_overrides` above answers "let
+    #: this call through"; this answers "stop asking for the next while", and
+    #: they are different wants even though they share a seam. Carries the
+    #: reason, the scope that ends it, and the ids explicitly folded in — see
+    #: `core.rules.standdown_in_force`, which derives whether it still holds
+    #: rather than trusting a flag somebody has to remember to clear.
+    standdown: dict | None = None
+    heartbeat: float = 0.0
+    #: The usage watermark at registration (ADR-002 D3). The earlier reading
+    #: the first state's spend is subtracted from; ``None`` where it could not
+    #: be observed, which the report renders as such rather than as zero.
+    #:
+    #: Written and not yet read: the session-side breakdown is forward-looking,
+    #: kept in step with the pipeline's rather than removed, and recorded as
+    #: such in ADR-002's Consequences (BUG_016 F4).
+    usage_at_start: dict | None = None
+    #: The host session that baseline was counted against, so a later reader
+    #: can tell whether it is commensurable with the readings that follow it.
+    #: A rebind moves the binding and leaves this pointing at the old counter,
+    #: which is exactly what makes the crossing visible instead of plausible.
+    usage_at_start_host: str | None = None
+    #: What this session told the NEXT one, oldest first:
+    #: ``{"note", "name", "at", "state"}`` per ``invariant session handoff``,
+    #: plus ``"consumed": {"at", "how", "session", "host"}`` once a session
+    #: claimed the note or somebody dismissed it (IDEA_008). An entry without
+    #: that key is unconsumed, so a record written before it existed reads
+    #: exactly as it did.
+    #:
+    #: A field rather than a store, for the reasons ``plan`` is one. And kept
+    #: on a record that may already be torn down: a handoff is normally the
+    #: LAST thing a session does, after its merge and teardown, so the record
+    #: that outlives the worktree is the only place it can live. ``at`` is the
+    #: same epoch reading ``heartbeat`` holds, in the machine-local state root.
+    handoffs: list[dict] = field(default_factory=list)
+    #: The session's legs beyond its repository (ADR-014 D5). The repository
+    #: leg is the record's own ``worktree``, ``branch`` and ``base``, so a
+    #: record written before legs existed is already a one-repo session and
+    #: loads unchanged. A store project adds one store leg,
+    #: ``{"kind": "store", "root", "lock_spans": [...]}``, whose spans say
+    #: when the session held each docs-lock unit: ``lease``, ``unit``,
+    #: ``acquired_at``, ``acquired_at_sha``, then at release ``released_at``,
+    #: ``released_at_sha`` and ``changed`` (the unit's paths that differ
+    #: across the span, empty when nothing was written). A span closed by a
+    #: back-off carries ``backed_off``; one taken from the session carries
+    #: ``taken_over``, ``taken_by`` and ``reason``.
+    legs: list[dict] = field(default_factory=list)
+    #: How the store's last pull went, for a store project (ADR-014 D7):
+    #: ``stale`` when session start, resume or ``docs lock`` could not reach
+    #: the store's remote and carried on with the local copy, ``current``
+    #: once a pull reached it; ``None`` when no pull ran.
+    store_pull: str | None = None
+    #: Where each leg landed, for a store project (ADR-014 D6): ``store``, the
+    #: store's sha once a release left the session holding no docs-lock unit
+    #: (cleared when it takes one again); ``repo``, the base's sha after the
+    #: repo merge; ``failed``, the last repo merge that failed
+    #: (``{"at", "detail", "head", "base"}``), cleared when the merge lands.
+    #: ``None`` for an in-repo project, whose landing is the merge alone.
+    landing: dict | None = None
+    #: The move this session carries, for one ``store migrate`` started
+    #: (ADR-014 D12, increment 7a): ``to``, ``store`` (the store's main
+    #: checkout), ``identity``, ``wiring`` (which committed wiring becomes
+    #: local after the merge), ``roots`` and ``finished`` (when the move
+    #: completed after its repository leg landed). A migrate session keeps its
+    #: landing record whichever home its tree resolves to. ``None`` otherwise.
+    migrate: dict | None = None
+    #: Keys a document carried that this build does not declare, kept verbatim
+    #: so that saving the record cannot delete them. Never written under this
+    #: name — `to_dict` merges it back at the top level. See
+    #: `core.store.PreservesUnknownKeys`.
+    _extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_stranded(self) -> bool:
+        """Recorded a worktree that is no longer on disk.
+
+        Touches the filesystem, deliberately: git prunes worktree metadata
+        lazily, so ``git worktree list`` still names a directory somebody
+        deleted by hand. The directory's existence is the signal that does not
+        lag. A session that never isolated is not stranded — it has nothing to
+        be missing.
+        """
+        if not self.worktree:
+            return False
+        try:
+            return not Path(self.worktree).exists()
+        except OSError:
+            return False
+
+    # -- the plan, read through the one module that owns the questions --
+    #
+    # Four one-line properties rather than four call sites doing the
+    # arithmetic. `plan_complete` is the reason: an empty plan is *unplanned*
+    # rather than finished, a later increment switches an entire mode on that,
+    # and the obvious inline spelling (`done == total`) gets it backwards for
+    # exactly the case that matters.
+
+    @property
+    def plan_total(self) -> int:
+        return plan_reader.progress(self.plan).total
+
+    @property
+    def plan_open(self) -> list[dict]:
+        """The deliverables still owed, in the order they were recorded."""
+        return list(plan_reader.progress(self.plan).remaining)
+
+    @property
+    def plan_done_count(self) -> int:
+        return plan_reader.progress(self.plan).done
+
+    @property
+    def plan_complete(self) -> bool:
+        """Every recorded deliverable is done, and there is at least one."""
+        return plan_reader.progress(self.plan).complete
+
+    @property
+    def landing_state(self) -> str | None:
+        """How far the session has landed (ADR-014 D6), or ``None``.
+
+        ``docs_landed``: the store leg landed and the repo has not, the normal
+        state during implementation. ``half_landed``: the same, after a repo
+        merge failed. ``landed``: the repo merge landed too. ``None`` when no
+        store leg landed and no merge did (every in-repo session).
+        """
+        landing = self.landing or {}
+        if landing.get("repo"):
+            return "landed"
+        if not landing.get("store"):
+            return None
+        return "half_landed" if landing.get("failed") else "docs_landed"
+
+
+class SessionDomain:
+    def __init__(
+        self,
+        manifest,
+        store: JsonStore | None = None,
+        watermarks: WatermarkSource | None = None,
+        clock=time.time,
+        host_alive=None,
+    ) -> None:
+        self.manifest = manifest
+        self.store = store or JsonStore(manifest.state_root)
+        #: Whether a docs-lease holder's host process runs (ADR-014 D5):
+        #: ``lease -> True | False | None``. Injected by the CLI, which may read
+        #: the oracle's attention sidecar; ``None`` here means nobody can tell,
+        #: so a lease goes stale on its heartbeat alone.
+        self.host_alive = host_alive
+        self.machine: Machine = load_session_machine(manifest)
+        #: Injected by the CLI (ADR-002 D2). ``None`` is normal: transitions
+        #: then record ``usage: None``, which the report reads as "not
+        #: observed" and never as "cost nothing".
+        self.watermarks = watermarks
+        self.clock = clock
+
+    def _reading(self, host_session_id: str | None) -> tuple[dict | None, str | None]:
+        """Read the watermark and the counter it came from, or give up quietly.
+
+        A transition is the record that something happened. Letting a
+        telemetry read fail it would make measurement a reason for the engine
+        to refuse — the trade ADR-002 declines everywhere else too.
+
+        The host session travels with the reading for the reason
+        ``domains/pipeline`` records it too: a cumulative count is
+        commensurable only with another taken from the same transcript, and
+        :meth:`adopt_host_session` can move the binding underneath a session
+        that has already recorded some.
+        """
+        if self.watermarks is None or not host_session_id:
+            return None, None
+        try:
+            usage = self.watermarks.watermark(host_session_id)
+        except Exception:  # noqa: BLE001 - see the docstring
+            return None, None
+        if not isinstance(usage, Usage):
+            return None, None
+        return usage.to_dict(), host_session_id
+
+    # -- lookup --------------------------------------------------------
+
+    def _path(self, session_id: str) -> str:
+        return f"sessions/{session_id}.json"
+
+    def get(self, session_id: str) -> Session | None:
+        raw = self.store.read(self._path(session_id))
+        return Session.from_dict(raw) if raw else None
+
+    def require(self, session_id: str) -> Session:
+        session = self.get(session_id)
+        if session is None:
+            raise UsageError(
+                f"no session {session_id!r}; 'invariant session list' shows the "
+                f"registered ones"
+            )
+        return session
+
+    def list(self) -> list[Session]:
+        return [
+            s
+            for s in (self.get(sid) for sid in self.store.list_ids("sessions"))
+            if s is not None
+        ]
+
+    def current(
+        self,
+        cwd: Path | None = None,
+        *,
+        strict: bool = True,
+        target: Path | str | None = None,
+        host_session_id: str | None = None,
+    ) -> Session | None:
+        """The session this invocation belongs to.
+
+        Resolution order, most reliable first:
+
+        1. An explicit ``INVARIANT_SESSION_ID``.
+        2. The **host's** session identifier, when the caller supplies one.
+        3. The session whose worktree contains the **file the call names** —
+           written to, or read.
+        4. The session whose worktree contains the working directory.
+        5. The single session registered at or above the working directory.
+
+        Orders 2 and 3 exist because order 4 cannot be relied on. A host may
+        reset the working directory to the project root between tool calls, and
+        when it does, every concurrent session looks identical from the main
+        checkout — so cwd-based attribution fails precisely when more than one
+        session is live, which is the case the isolation rules exist for.
+
+        Order 3 is what unblocks an edit. The host identifier is only present
+        on a hook payload, and a session registered before it was recorded has
+        none, so order 2 can be silently unavailable — and the documented
+        remedy, ``INVARIANT_SESSION_ID``, is an environment variable that an
+        Edit tool call has no way to carry. The destination path does not
+        depend on the caller's environment at all. It is not only for edits:
+        recording a docs read resolves through the same order, because a read
+        names its path in the same payload key and for the same reason
+        (BUG_010).
+
+        ``target`` ranks below the host identifier deliberately: who is writing
+        beats where the bytes land, so a session writing into a peer's worktree
+        stays attributed to the writer and remains a detectable violation
+        rather than a silent reattribution.
+
+        ``strict=False`` turns an unresolvable origin into ``None`` rather than
+        an error. Ambiguity is a normal state for an advisory caller — a hook
+        firing in the main checkout while several sessions are live — and one
+        that must not be reported by failing, because a hook that fails denies
+        the tool call that would have resolved it.
+        """
+        resolution = self.resolve(cwd, target=target, host_session_id=host_session_id)
+        if resolution.how == "ambiguous" and strict:
+            raise UsageError(ambiguity_message(list(resolution.candidates)))
+        return resolution.session
+
+    def resolve(
+        self,
+        cwd: Path | None = None,
+        *,
+        target: Path | str | None = None,
+        host_session_id: str | None = None,
+    ) -> Resolution:
+        """:meth:`current`, plus *how* it decided.
+
+        Callers that only need the answer use ``current``. The ``how`` matters
+        to one caller: a hook that has just learned which session a host
+        identifier belongs to, which may only record that mapping when the
+        evidence actually identified the editor.
+        """
+        explicit = os.environ.get("INVARIANT_SESSION_ID")
+        if explicit:
+            return Resolution(self.get(explicit), "explicit")
+
+        matched = self.by_host_session(host_session_id)
+        if matched is not None:
+            return Resolution(matched, "host")
+
+        # The edit's destination, not the caller's location. A host runs hooks
+        # from the project root and resets the working directory between tool
+        # calls, so with several sessions live, cwd names nobody — which is
+        # exactly when the isolation rules need an answer. The path being
+        # written to is inside one session's worktree and no other's.
+        if target is not None:
+            owner = self.by_worktree_containing(target)
+            if owner is not None:
+                return Resolution(owner, "target")
+
+        cwd = Path(cwd or Path.cwd()).resolve()
+        here = self.by_worktree_containing(cwd)
+        if here is not None:
+            return Resolution(here, "cwd")
+
+        # No worktree contains the working directory. Fall back to where the
+        # session was registered: a session that has not isolated yet has no
+        # worktree at all, and one that just isolated leaves the caller
+        # standing in the origin. Both need to stay addressable.
+        candidates = self.origin_candidates(cwd, host_session_id=host_session_id)
+        if len(candidates) == 1:
+            return Resolution(candidates[0], "origin")
+        if len(candidates) > 1:
+            return Resolution(None, "ambiguous", tuple(candidates))
+        return Resolution(None, "none")
+
+    def resolve_name(self, query: str) -> tuple[Session | None, list[Session]]:
+        """Find a session by the thing a human would type.
+
+        A ladder, first hit wins, and each rung is narrower than the one below
+        so that an exact answer is never beaten by a fuzzy one:
+
+        1. an exact session **id**;
+        2. an exact **name** — which carries the id, so it is unique;
+        3. a **bare slug** — the name without its id, which is what somebody
+           reading a task list would type;
+        4. a unique **name prefix**.
+
+        Rungs 2 to 4 are :func:`name_rank`'s, which is where their order is
+        written down. ``domains/stats`` climbs the same three over telemetry
+        records, and a second spelling of this precedence would drift without
+        either copy ever looking wrong.
+
+        Returns ``(session, [])`` on a hit, ``(None, candidates)`` when a rung
+        matched more than one, and ``(None, [])`` when nothing matched.
+        Ambiguity is handed back rather than raised because this is also the
+        lookup a *display* caller uses, and it must be able to describe the
+        situation without failing; the caller that needs a refusal builds one
+        from :func:`name_ambiguity_message`.
+
+        Rungs 2 to 4 are scoped to :meth:`live`, because a torn-down session is
+        not something to resume by name. Rung 1 is **not**, deliberately: an id
+        that names a finished session should be told it is finished, and "no
+        session 'abcd1234'" is a worse answer than "that one was torn down".
+        """
+        if not query:
+            return None, []
+
+        by_id = self.get(query)
+        if by_id is not None:
+            return by_id, []
+
+        ranked = [(name_rank(s.name, s.id, query), s) for s in self.live()]
+        for rung in (RANK_FULL_NAME, RANK_BARE_SLUG, RANK_NAME_PREFIX):
+            hits = [s for rank, s in ranked if rank == rung]
+            if len(hits) == 1:
+                return hits[0], []
+            if len(hits) > 1:
+                return None, hits
+        return None, []
+
+    def by_worktree_containing(self, path: Path | str) -> Session | None:
+        """The live session whose worktree contains ``path``, deepest first."""
+        try:
+            resolved = Path(path).resolve()
+        except OSError:
+            return None
+        best: Session | None = None
+        best_len = -1
+        for session in self.list():
+            if session.state in {"torn_down", "abandoned"}:
+                continue
+            if not session.worktree or session.is_stranded:
+                continue
+            try:
+                worktree = Path(session.worktree).resolve()
+            except OSError:
+                continue
+            # Deepest match wins, so a nested worktree beats its parent.
+            inside = resolved == worktree or worktree in resolved.parents
+            if inside and len(str(worktree)) > best_len:
+                best, best_len = session, len(str(worktree))
+        return best
+
+    def live(self) -> list[Session]:
+        return [s for s in self.list() if s.state not in {"torn_down", "abandoned"}]
+
+    def attributable(self, host_session_id: str | None = None) -> list[Session]:
+        """Live sessions that could plausibly be the caller.
+
+        Three kinds are excluded, and each exclusion removes a candidate that
+        was never a real answer:
+
+        * **Stranded** — a worktree was recorded and is no longer on disk. The
+          session cannot be worked in, and left in the list it pads every
+          ambiguity report forever.
+        * **Host ended** — the host session that owned it is gone. Whoever is
+          asking, it is not them.
+        * **Bound elsewhere** — owned by a different host session. Under a 1:1
+          binding that is a definite no, not an unknown.
+
+        A session with no worktree at all is *not* excluded: registering
+        without isolating is legitimate — a device soak owns no code — and the
+        binding is host-to-session, never host-to-worktree.
+        """
+        out = []
+        for session in self.live():
+            if session.host_ended or session.is_stranded:
+                continue
+            if (
+                host_session_id
+                and session.host_session_id
+                and session.host_session_id != host_session_id
+            ):
+                continue
+            out.append(session)
+        return out
+
+    def origin_candidates(
+        self, cwd: Path | None = None, host_session_id: str | None = None
+    ) -> list[Session]:
+        """Attributable sessions registered at or above ``cwd``.
+
+        Split out from :meth:`current` so that a caller which must not fail on
+        ambiguity can still describe it.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        return [
+            s
+            for s in self.attributable(host_session_id)
+            if s.origin and _contains(Path(s.origin), cwd)
+        ]
+
+    def by_host_session(self, host_session_id: str | None) -> Session | None:
+        """Find the session belonging to a host session identifier.
+
+        Matches a recorded identifier exactly, and otherwise falls back to the
+        derived short form. The fallback is what makes this work for sessions
+        registered before the identifier was recorded at all — no migration,
+        no re-registration.
+        """
+        if not host_session_id:
+            return None
+
+        # A session whose host ended is not a match for anyone, including the
+        # host id it used to carry: a new host session reusing the record would
+        # inherit somebody else's pipeline and file set.
+        live = [s for s in self.live() if not s.host_ended]
+
+        for session in live:
+            if session.host_session_id and session.host_session_id == host_session_id:
+                return session
+
+        slug = host_slug(host_session_id)
+        if not slug:
+            return None
+        for session in live:
+            # Only an *unbound* session may be claimed by the derived short
+            # form. One already bound to a different host is a coincidence of
+            # naming, not a match.
+            if session.id == slug and not session.host_session_id:
+                return session
+        return None
+
+    def adopt_host_session(
+        self, session_id: str, host_session_id: str, force: bool = False
+    ) -> Session:
+        """Bind a host session to this session, 1:1 in both directions.
+
+        Rebinding is refused rather than silently allowed. A session that
+        changes hands keeps its pipeline, its evidence and its declared file
+        set, so the new owner would inherit work it never did — and the old
+        owner would keep editing a session that no longer answers to it.
+
+        What a forced rebind deliberately does **not** do is touch the usage
+        watermarks already recorded. They were counted against the outgoing
+        host session's transcript and re-baselining them would invent readings
+        nobody took. Each is stored with the counter it came from, so the one
+        state that spans the rebind is declined by ``core/stats`` and named as
+        unattributable instead of rendering as a measured spend (BUG_014).
+        """
+        session = self.require(session_id)
+
+        # `and not session.host_ended` narrows this by one clause, and the
+        # clause is the whole session-outlives-its-host feature. A binding
+        # whose host has ENDED is spent: there is nobody on the other end to
+        # have a pipeline, an evidence trail or a file set taken away from
+        # them, so replacing it is not the hand-over this refusal exists to
+        # prevent. Only a LIVE binding is.
+        if (
+            not force
+            and session.host_session_id
+            and not session.host_ended
+            and session.host_session_id != host_session_id
+        ):
+            raise UsageError(
+                f"session {session.id} is bound to a LIVE host session. "
+                f"Rebinding would hand over its pipeline and file set to an "
+                f"owner that never did the work; pass force to do it "
+                f"deliberately.\n"
+                f"  A binding whose host has ENDED is spent, and picking the "
+                f"session up again is not that hand-over:\n"
+                f"    invariant session resume {session.name}"
+            )
+
+        if not force:
+            other = self.by_host_session(host_session_id)
+            if other is not None and other.id != session.id:
+                raise UsageError(
+                    f"this host session already owns session {other.id} "
+                    f"({other.name}). One host session, one invariant session."
+                )
+
+        return self._bind_host(session, host_session_id)
+
+    def _bind_host(self, session: Session, host_session_id: str) -> Session:
+        """Write the binding. The one place any route does it.
+
+        Extracted so that :meth:`adopt_host_session` and :meth:`resume` cannot
+        disagree about what binding a host *means*, because two of the three
+        things it does are easy to leave out and expensive to leave out:
+
+        * **``host_ended`` is cleared.** :meth:`by_host_session` filters on it,
+          so a session whose binding was replaced while the flag was still set
+          resolves to nobody for every subsequent hook in the new host — the
+          session would be picked up and instantly unaddressable.
+        * **The outgoing id is kept.** A record spanning several host sessions
+          should be able to say which ones. The list seeds itself from the
+          scalar the first time the binding moves, so a legacy record acquires
+          its own history without a migration, and an id already in the list is
+          not appended twice: how *many* times the session was picked up is
+          ``resumed_count``'s question, not this list's.
+        """
+        outgoing = session.host_session_id
+        if outgoing and outgoing != host_session_id and outgoing not in session.hosts:
+            session.hosts.append(outgoing)
+        session.host_session_id = host_session_id
+        session.host_ended = False
+        self._save(session)
+        self._register(session)
+        return session
+
+    def end_host_session(self, host_session_id: str) -> Session | None:
+        """Note that the host session owning a session has ended.
+
+        The session is *not* abandoned. It may hold unmerged work in a live
+        worktree, and destroying that because a terminal closed would be the
+        library doing the one thing it exists to prevent. It stops being an
+        attribution candidate, which is the part that was causing harm, and
+        ``doctor`` reports it as needing a decision.
+        """
+        session = self.by_host_session(host_session_id)
+        if session is None:
+            return None
+        session.host_ended = True
+        self._save(session)
+        self._register(session)
+        return session
+
+    # -- outliving a host session --------------------------------------
+
+    def resumable(self, cwd: Path | None = None) -> list[Session]:
+        """Sessions waiting to be picked up by a new host session.
+
+        The **exact complement** of :meth:`attributable`'s host-ended
+        exclusion. That method answers "who could be calling right now", and a
+        session whose host is gone is definitely not the caller; this one
+        answers "what did somebody put down here", and only a session whose
+        host is gone qualifies. The two lists are disjoint by construction and
+        that is the point of writing this from :meth:`live` rather than
+        widening ``attributable`` with a flag: widening it would make every
+        caller of the attribution path — the hooks that decide whether an edit
+        is allowed — start seeing candidates that are provably not them, which
+        is the ambiguity the 1:1 binding exists to remove.
+
+        The other two filters remove candidates that are not really on offer.
+        A **stranded** session has no worktree to work in. A session registered
+        somewhere else is somebody else's; ``origin`` is compared the same way
+        :meth:`origin_candidates` compares it, so "here" means the same thing
+        in both.
+
+        Ordered by when the session last MOVED — the later of the plan's last
+        edit and the last transition — because the useful default when a list
+        is offered is the thing most recently put down.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        out = [
+            s
+            for s in self.live()
+            if s.host_ended
+            and not s.is_stranded
+            and s.origin
+            and _contains(Path(s.origin), cwd)
+        ]
+        out.sort(key=lambda s: max(s.plan_touched, s.heartbeat), reverse=True)
+        return out
+
+    def resume(
+        self,
+        session_id: str,
+        host_session_id: str | None = None,
+        force: bool = False,
+    ) -> Session:
+        """Bind a new host session to work that is already under way.
+
+        The operation this whole increment exists for: a plan needing several
+        agent-host sessions runs on ONE invariant session, and merges once, at
+        the end. Without it the second host session starts a second session,
+        the plan forks, and two branches hold half the work each.
+
+        Resumption is never automatic. A host session that finds a resumable
+        session has not thereby claimed it — picking up somebody's unfinished
+        work is a decision with consequences (its pipeline state, its declared
+        file set and its branch all come along), so it is a command somebody
+        runs.
+
+        What it refuses, and why each refusal is a refusal rather than a
+        warning:
+
+        * **Torn down or abandoned.** There is nothing to resume. The record is
+          kept as evidence and the work, if any, is elsewhere.
+        * **Merged or pushed**, without ``force``. The deliverable set already
+          landed. Accumulating new commits onto a merged branch puts them
+          behind a spent ``push_barrier``, so they would be finished work with
+          no route out of the session that holds them.
+        * **Stranded.** The worktree is gone. The branch may still hold the
+          commits, so this says so rather than offering a cleanup that would
+          discard them.
+        * **Bound to a live host.** That is the hand-over ADR-001 D19 forbids,
+          and resume must not become a back door to it.
+        * **The resuming host already owns a live session.** One host session,
+          one invariant session — the same rule :meth:`start` enforces, in the
+          same shape, because arriving at it by a different command does not
+          make it a different rule.
+        """
+        host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
+        session = self.require(session_id)
+
+        if session.state in {"torn_down", "abandoned"}:
+            raise UsageError(
+                f"session {session.name} is {session.state}; there is nothing "
+                f"to resume — start a new one with "
+                f"'invariant session start <task-name>'"
+            )
+        if session.state in {"merged", "pushed"} and not force:
+            raise UsageError(
+                f"session {session.name} is {session.state}: its deliverable "
+                f"set already landed.\n"
+                f"  Accumulating onto a merged branch puts those commits "
+                f"behind a spent push_barrier, with no route out of this "
+                f"session.\n"
+                f"  Start a new session for the next piece of work, or pass "
+                f"force if this really is the same one."
+            )
+        if session.is_stranded:
+            raise UsageError(
+                f"session {session.name} recorded a worktree that is no longer "
+                f"on disk:\n"
+                f"  {session.worktree}\n"
+                f"  The branch {session.branch or '(none recorded)'} may still "
+                f"hold the work; 'invariant session reap' abandons the session "
+                f"only once the branch is gone too."
+            )
+        if (
+            not force
+            and session.host_session_id
+            and not session.host_ended
+            and session.host_session_id != host_session_id
+        ):
+            raise UsageError(
+                f"session {session.name} is bound to a LIVE host session. "
+                f"Resuming it would hand its pipeline and file set to an "
+                f"owner that never did the work — the hand-over the binding "
+                f"refuses everywhere else, and this must not be a back door "
+                f"to it. Wait for that host to end, or pass force to take it "
+                f"over deliberately."
+            )
+        if not force and host_session_id:
+            other = self.by_host_session(host_session_id)
+            if other is not None and other.id != session.id:
+                raise UsageError(
+                    f"this host session already owns session {other.id} "
+                    f"({other.name}, {other.state}).\n"
+                    f"  Finish it first: invariant session teardown --id "
+                    f"{other.id}\n"
+                    f"  Or end it deliberately: invariant session transition "
+                    f"abandoned --id {other.id} --force --reason '<why>'"
+                )
+
+        previous_host = session.host_session_id
+        if host_session_id:
+            self._bind_host(session, host_session_id)
+        # No host identifier to bind to: the record keeps its spent binding
+        # untouched. Clearing `host_ended` with a stale id would hand the
+        # session straight back to the host that ended, through
+        # `by_host_session`, and put it back into `attributable` for everyone
+        # else — the widening this method is careful not to do.
+
+        session.resumed_count += 1
+        # Recorded AFTER the rebind, so the row's `usage` watermark is read
+        # from the NEW host — the seam where the counter changes identity sits
+        # on a row that says it is a seam (ADR-002 D3, BUG_014).
+        now = self._note(
+            session,
+            "resumed",
+            extra={
+                "resumed": True,
+                "host": host_session_id,
+                "previous_host": previous_host,
+            },
+        )
+        session.plan_touched = now
+        self._save(session)
+        self._register(session)
+        return session
+
+    def reap_stranded(self, dry_run: bool = False) -> list[Session]:
+        """Abandon sessions whose worktree *and* branch are both gone.
+
+        Deliberately narrow. A missing worktree alone is not enough — a
+        worktree can be removed while its branch still holds unmerged commits,
+        and that work is recoverable. Once the branch is gone too there is
+        nothing left to protect, and the record is kept as evidence rather than
+        deleted.
+        """
+        existing = {
+            b.strip().lstrip("+* ")
+            for b in _branch_names(self.manifest.root)
+        }
+        reaped: list[Session] = []
+        for session in self.live():
+            if not session.is_stranded:
+                continue
+            if session.branch and session.branch in existing:
+                continue
+            if session.landing_state in ("docs_landed", "half_landed"):
+                continue  # held out of abandoned unless forced (ADR-014 D6)
+            reaped.append(session)
+            if not dry_run:
+                self.release_docs_lock(session)
+                session.state = "abandoned"
+                session.history.append(
+                    {
+                        "from": session.state,
+                        "to": "abandoned",
+                        "reason": "worktree and branch both gone",
+                    }
+                )
+                self._save(session)
+                self._deregister(session.id)
+        return reaped
+
+    # -- lifecycle -----------------------------------------------------
+
+    def start(
+        self,
+        name: str,
+        session_id: str | None = None,
+        base: str | None = None,
+        host_session_id: str | None = None,
+        force: bool = False,
+        parked: bool = False,
+    ) -> Session:
+        """Register a session.
+
+        ``parked`` registers one for a later host to pick up rather than for
+        the caller: no host is bound, whatever the environment says, its
+        identifier is fresh rather than the caller's, and it is recorded as
+        put down, so :meth:`resumable` offers it and ``session resume`` binds
+        it. The plan `docs assess --plan` records sits on one (ADR-016
+        ruling 9); the command that records it is not the one that does the
+        work.
+        """
+        if parked:
+            host_session_id = None
+            if session_id is None:
+                session_id = uuid.uuid4().hex[:8]
+                while self.get(session_id) is not None:
+                    session_id = uuid.uuid4().hex[:8]
+        else:
+            host_session_id = host_session_id or os.environ.get("INVARIANT_HOST_SESSION_ID")
+        slug = _slug(name)
+
+        # Checked before the identifier is settled, so the refusal explains the
+        # real problem. Deriving the id from the host means a second attempt
+        # collides on the id too, and "session 'aaaa1111' already exists" tells
+        # nobody that the rule they hit was one-session-per-host.
+        #
+        # One host session owns at most one LIVE invariant session. Two would
+        # reintroduce the ambiguity the binding exists to remove, and the
+        # second would be indistinguishable from the first for the rest of its
+        # life. Owning a *worktree* stays optional — a device soak with no code
+        # is a legitimate session — so this is a check on the binding, never on
+        # isolation.
+        if host_session_id:
+            existing = self.by_host_session(host_session_id)
+            if existing is not None:
+                raise UsageError(
+                    f"this host session already owns session {existing.id} "
+                    f"({existing.name}, {existing.state}).\n"
+                    f"  Finish it first: invariant session teardown --id "
+                    f"{existing.id}\n"
+                    f"  Or end it deliberately: invariant session transition "
+                    f"abandoned --id {existing.id} --force --reason '<why>'"
+                )
+
+        origin = str(git.toplevel(self.manifest.root) or self.manifest.root)
+
+        # The base is the branch the main checkout is on, unless the caller
+        # named one. It used to default to a literal `master`, and a
+        # repository whose default branch is `main` found out at
+        # `isolate --execute` — `fatal: invalid reference: master` — because a
+        # base is read by nothing before the step that cannot proceed without
+        # it. A checkout that cannot name its branch (detached, or not a
+        # repository) REFUSES rather than falling back: a wrong base is
+        # discovered at isolate or merge time, which is the worst place.
+        if base is None:
+            base = git.current_branch(Path(origin))
+            if not base:
+                raise UsageError(
+                    f"cannot derive a base branch: {origin} has no branch "
+                    f"checked out (detached HEAD, or not a git repository).\n"
+                    f"  Name one: invariant session start {name} --base <branch>"
+                )
+
+        # The failure this whole feature exists to prevent: a plan silently
+        # forking into two sessions because the second Claude session started
+        # a fresh one under the same task name. A warning printed above a
+        # successful `start` is prose-as-control-flow — it does not stop the
+        # fork, and by the time anyone reads it there are two branches holding
+        # half the work each. So it refuses, in the same shape as the
+        # one-session-per-host refusal above: name the address, say what state
+        # it is in and how far along, give the command that picks it up, and
+        # offer the escape for a genuinely separate session.
+        #
+        # Scoped to RESUMABLE sessions, not to live ones. A name in use by a
+        # session somebody is currently working in is not a plan waiting to be
+        # picked up, and refusing there would block a second concurrent
+        # session on a related task for no reason.
+        if not force:
+            for candidate in self.resumable(cwd=Path(origin)):
+                if candidate.name == qualified_name(slug, candidate.id):
+                    raise UsageError(self._would_fork_a_plan_message(candidate))
+
+        # Prefer the host's own short form as the identifier, so a session
+        # registered by hand and one seen by a hook agree without being told.
+        requested = session_id or os.environ.get("INVARIANT_SESSION_ID")
+        if requested:
+            if self.get(requested) is not None:
+                raise UsageError(f"session {requested!r} already exists")
+            session_id = requested
+        else:
+            # A DERIVED identifier that is taken is not an error: a host
+            # session that finished one session and starts another derives the
+            # same slug from the same host id, and the record of the finished
+            # one is deliberately kept. Falling back keeps that legal.
+            session_id = host_slug(host_session_id) or uuid.uuid4().hex[:8]
+            if self.get(session_id) is not None:
+                session_id = uuid.uuid4().hex[:8]
+
+        baseline, baseline_host = self._reading(host_session_id)
+        session = Session(
+            id=session_id,
+            # Qualified HERE, after the identifier is settled — including on
+            # the uuid4 fallback path, where until this line there is no id to
+            # append.
+            name=qualified_name(slug, session_id),
+            base=base,
+            origin=origin,
+            host_session_id=host_session_id,
+            heartbeat=self.clock(),
+            usage_at_start=baseline,
+            usage_at_start_host=baseline_host,
+            host_ended=parked,
+        )
+        self._save(session)
+        self._register(session)
+        return session
+
+    def _would_fork_a_plan_message(self, candidate: Session) -> str:
+        """What to do instead of starting a second session for one plan."""
+        lines = [
+            (
+                "a session for this task is already open and waiting for a "
+                "host session:"
+            ),
+            (
+                f"  {candidate.name}  [{candidate.state}]  "
+                f"{plan_reader.progress(candidate.plan).describe()}"
+            ),
+        ]
+        lines += [f"    {line}" for line in plan_reader.render_lines(candidate.plan)]
+        lines += [
+            (
+                "Its plan is the one this work belongs to. Pick it up rather "
+                "than forking it:"
+            ),
+            f"  invariant session resume {candidate.name}",
+            (
+                "If this really is a separate piece of work that happens to "
+                "share a name, add --force."
+            ),
+        ]
+        return "\n".join(lines)
+
+    def isolation_plan(self, session: Session) -> dict[str, str]:
+        """Where this session's worktree and branch would go.
+
+        Derived from the session identifier so that two sessions never collide.
+        Placed beside the repository by default, so that the worktree is not
+        itself a tracked path; ``session.worktree_dir`` moves it, including to a
+        directory inside the repository, for hosts that trust one location and
+        confirm every other.
+        """
+        root = git.toplevel(self.manifest.root) or self.manifest.root
+        prefix = self.manifest.get("session.worktree_prefix") or f"{root.name}-wt"
+        parent = root.parent
+        configured = self.manifest.get("session.worktree_dir")
+        if configured:
+            configured = Path(str(configured)).expanduser()
+            parent = configured if configured.is_absolute() else root / configured
+        return {
+            "worktree": str(parent / f"{prefix}-{session.id}"),
+            "branch": f"session/{session.id}",
+            "base": session.base,
+        }
+
+    def isolate(self, session_id: str, execute: bool = False) -> dict[str, Any]:
+        session = self.require(session_id)
+        plan = self.isolation_plan(session)
+        if not execute:
+            plan["command"] = (
+                f"git worktree add {plan['worktree']} -b {plan['branch']} {plan['base']}"
+            )
+            return plan
+
+        if Path(plan["worktree"]).exists():
+            raise UsageError(
+                f"{plan['worktree']} already exists; remove it or pick another "
+                f"session identifier"
+            )
+        proc = subprocess.run(
+            ["git", "worktree", "add", plan["worktree"], "-b", plan["branch"], plan["base"]],
+            cwd=str(self.manifest.root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise StateError(f"worktree creation failed: {proc.stderr.strip()}")
+
+        plan["manifest_copied"] = self._copy_local_manifest(Path(plan["worktree"]))
+        session.worktree = plan["worktree"]
+        session.branch = plan["branch"]
+        self._advance(session, "isolated", reason="worktree created")
+        return plan
+
+    def _copy_local_manifest(self, worktree: Path) -> bool:
+        """Copy a manifest kept out of git into a new worktree (ADR-020 D11).
+
+        A worktree holds only committed files, so a manifest hidden through
+        ``.git/info/exclude`` would leave the worktree with no project. The
+        exclude file is shared by every worktree of the clone, so the copy is
+        ignored there too and can never be committed. A manifest the base
+        carries is never overwritten.
+        """
+        target = worktree / MANIFEST_RELPATH
+        if manifest_tracking(self.manifest.root) != "local" or target.exists():
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.manifest.root / MANIFEST_RELPATH, target)
+        return True
+
+    def transition(
+        self,
+        session_id: str,
+        target: str,
+        reason: str | None = None,
+        force: bool = False,
+        cwd: Path | None = None,
+        run_steps: bool = False,
+    ) -> Session:
+        """Walk one edge. ``run_steps`` runs the project's steps due on it
+        first (ADR-021 D3), unless forced: `session transition` asks for it,
+        and `session merge`'s own transition after the merge does not, having
+        run them before it."""
+        session = self.require(session_id)
+        if run_steps and not force:
+            self.run_steps(session, target, cwd=cwd)
+        self._advance(session, target, reason=reason, force=force, cwd=cwd)
+        return session
+
+    def run_steps(self, session: Session, target: str, cwd: Path | None = None) -> list[dict]:
+        """Run the project's steps due on the edge into ``target`` and record
+        them (ADR-021 D2, D3): ``session.before_merge`` into ``merged`` and
+        ``session.before_teardown`` into ``torn_down``. Nothing runs on an
+        edge the machine does not have; the gates then read the records."""
+        at = next(
+            (point for point, state in steps_reader.SESSION_STATES.items() if state == target),
+            None,
+        )
+        if at is None or not self.machine.can(session.state, target):
+            return []
+        return StepsDomain(self.manifest, self.store).run_due(
+            at, session=session.to_dict(), cwd=Path(cwd or self.manifest.root)
+        )
+
+    def run_after_merge(self, session: Session, cwd: Path | None = None) -> list[dict]:
+        """Run the project's ``session.after_merge`` steps and record them
+        (ADR-021 D2, D5). `session merge` calls it once the fast-forward has
+        happened and the session is ``merged``: the merge stands whatever
+        they do, and a failing ``block`` one holds ``torn_down`` and the
+        handoff through its rule, which reads the record."""
+        return StepsDomain(self.manifest, self.store).run_due(
+            steps_reader.AFTER_MERGE,
+            session=session.to_dict(),
+            cwd=Path(cwd or self.manifest.root),
+        )
+
+    def advance_on_edit(
+        self,
+        target: Path | str,
+        *,
+        cwd: Path | None = None,
+        host_session_id: str | None = None,
+    ) -> Session | None:
+        """Fire ``isolated --> working: first edit`` for an edit that landed.
+
+        The state model drew this edge from the start and nothing fired it, so
+        a session sat in ``isolated`` through every commit it made and
+        ``session review`` refused it until somebody named the edge by hand
+        (BUG_062). The caller is a host hook that has watched an edit tool
+        complete; it reports WHERE the bytes landed and WHO it is, and every
+        judgement about whether that was this session's first edit is made
+        here, where the transition lives.
+
+        Advances only when all of these hold, and otherwise returns ``None``
+        having written nothing:
+
+        * the writer is IDENTIFIED (:attr:`Resolution.proven`) — the ``origin``
+          route names the only session left standing, which is a guess;
+        * that session is in ``isolated``. Any other state is left alone: a
+          ``working`` session's next edit is not an event the machine records
+          (``working --> working`` is the commit loop), and an edit after
+          ``reviewed`` must not quietly retreat the session;
+        * the edit landed in THAT session's own worktree. An edit into a peer's
+          worktree is nobody's first edit — the writer did not edit its own
+          tree and the owner did not edit at all;
+        * the path is not exempt from isolation. The work-item store and
+          ``session.exempt_paths`` are exempt because writing them is not work
+          on the branch, so writing them is not the session starting its work.
+
+        Never forced, and a refusal is not an error: a blocking gate or a
+        machine without the edge leaves the session where it was, because the
+        caller is a hook and a hook must never fail a tool call that has
+        already run. A store that cannot be read or written still raises, as
+        it does everywhere in this domain; the hook absorbs that one.
+        """
+        cwd = Path(cwd or Path.cwd())
+        path = Path(target)
+        if not path.is_absolute():
+            path = cwd / path
+
+        resolution = self.resolve(cwd, target=path, host_session_id=host_session_id)
+        session = resolution.session
+        if not resolution.proven or session.state != _FIRST_EDIT_FROM:
+            return None
+        owner = self.by_worktree_containing(path)
+        if owner is None or owner.id != session.id:
+            return None
+        worktree = Path(session.worktree).resolve()
+        if is_exempt_path(self.manifest, worktree, path):
+            return None
+
+        relative = path.resolve().relative_to(worktree)
+        try:
+            self._advance(
+                session, _FIRST_EDIT_TO, reason=f"first edit: {relative}", cwd=cwd
+            )
+        except (GateFailure, TransitionError):
+            return None
+        return session
+
+    #: Longer than any path this could name. macOS caps a path at 1024 bytes
+    #: and Linux at 4096, so a string past the larger bound is not a path that
+    #: was mistyped — it is not a path at all.
+    _PATH_MAX = 4096
+
+    def add_files(self, session_id: str, paths: list[str]) -> Session:
+        session = self.require(session_id)
+        for path in paths:
+            self._reject_if_not_a_path(path)
+            if path not in session.files:
+                session.files.append(path)
+        self._save(session)
+        return session
+
+    def _reject_if_not_a_path(self, path: str) -> None:
+        """Refuse a string that cannot name a file, before it is written down.
+
+        A declared set is only useful if every entry can be opened, and an
+        entry that cannot is worse than a missing one: `privacy.clean` unions
+        this list in at the review boundary, fails to scan the impossible
+        entry, and blocks the merge on a path nobody can delete — the CLI
+        offering `add` and, until now, no way back.
+
+        The observed cause was shell word-splitting: `session files add $FILES`
+        unquoted under zsh, which does NOT split on whitespace, so 48 paths
+        arrived as ONE argument. That is why the length bound is the check and
+        a space is not — a filename may legitimately contain spaces, while
+        nothing on any supported platform may exceed PATH_MAX.
+        """
+        if not path or not path.strip():
+            raise UsageError(
+                "a declared path cannot be empty. An empty entry scans as "
+                "nothing and blocks as something."
+            )
+        if "\n" in path or "\r" in path:
+            raise UsageError(
+                f"a declared path cannot contain a newline (got {len(path)} "
+                "characters). This is usually a command substitution that "
+                "produced a list where one path was expected."
+            )
+        if len(path) > self._PATH_MAX:
+            raise UsageError(
+                f"a declared path cannot exceed {self._PATH_MAX} characters "
+                f"(got {len(path)}). Under zsh an unquoted $VAR does NOT "
+                "word-split, so a whole file list arrives as a single "
+                "argument. Quote the expansion, or pass the paths as "
+                "separate arguments: invariant session files add a.py b.py"
+            )
+
+    # -- the deliverables plan -----------------------------------------
+    #
+    # `plan_reopen` and `plan_remove` exist from day one, and that is a
+    # decision rather than completeness for its own sake. `session files add`
+    # shipped without a `remove`, and the result was a declared set with no way
+    # back: a path nobody could delete blocked the review boundary until the
+    # missing command was written (BUG_057). A `done` that cannot be undone is
+    # that bug one field over, against a gate that blocks a turn.
+
+    def plan_add(self, session_id: str, title: str) -> Session:
+        """Record a deliverable this session owes."""
+        session = self.require(session_id)
+        self._reject_if_not_a_deliverable(title)
+        session.plan.append(
+            {
+                "n": plan_reader.next_n(session.plan),
+                "title": title.strip(),
+                "done": False,
+                "done_at": None,
+            }
+        )
+        self._touch_plan(session, self.clock())
+        return session
+
+    def plan_done(self, session_id: str, n: int) -> Session:
+        """Mark deliverable ``n`` done."""
+        session = self.require(session_id)
+        entry = self._plan_entry(session, n)
+        now = self.clock()
+        # The moment it was FIRST finished. Marking a done entry done again is
+        # not an event, and re-stamping would quietly move the record of when
+        # the work actually landed.
+        if not entry.get("done"):
+            entry["done_at"] = now
+        entry["done"] = True
+        self._touch_plan(session, now)
+        return session
+
+    def plan_reopen(self, session_id: str, n: int) -> Session:
+        """Undo a `plan done`. The way back from marking the wrong number."""
+        session = self.require(session_id)
+        entry = self._plan_entry(session, n)
+        entry["done"] = False
+        entry["done_at"] = None
+        self._touch_plan(session, self.clock())
+        return session
+
+    def plan_remove(self, session_id: str, n: int) -> Session:
+        """Drop a deliverable. Its number is retired, never reissued."""
+        session = self.require(session_id)
+        self._plan_entry(session, n)
+        session.plan = [e for e in session.plan if e.get("n") != n]
+        self._touch_plan(session, self.clock())
+        return session
+
+    # -- the declared decisions (ADR-018 D9) ------------------------------
+
+    def decisions_add(
+        self, session_id: str, need_id: str | None = None, draft: str | None = None
+    ) -> Session:
+        """Declare a decision: the id of its need, or a one-line draft."""
+        session = self.require(session_id)
+        if (need_id is None) == (draft is None):
+            raise UsageError(
+                "declare a decision by the id of its need or by --draft \"<one "
+                "line>\", one of the two"
+            )
+        entry = {"n": self._next_decision(session), "id": None, "draft": None}
+        if need_id is not None:
+            entry["id"] = self._decision_id(need_id)
+        else:
+            self._reject_if_not_a_deliverable(draft)
+            entry["draft"] = draft.strip()
+        session.decisions.append(entry)
+        self._save(session)
+        return session
+
+    def decisions_resolve(self, session_id: str, n: int, need_id: str) -> Session:
+        """Name the need draft ``n`` became; the draft's text is kept."""
+        session = self.require(session_id)
+        entry = self._decision_entry(session, n)
+        entry["id"] = self._decision_id(need_id)
+        self._save(session)
+        return session
+
+    def decisions_remove(self, session_id: str, n: int) -> Session:
+        """Drop a declared decision. Its number is retired, never reissued."""
+        session = self.require(session_id)
+        self._decision_entry(session, n)
+        session.decisions = [e for e in session.decisions if e.get("n") != n]
+        self._save(session)
+        return session
+
+    def _decision_id(self, need_id: str) -> str:
+        """``need_id``, refused unless it is a need id of a decision type."""
+        from ..core import needs
+
+        need_id = need_id.strip()
+        prefixes = needs.prefixes_of(needs.types_of(self.manifest), ("decision",))
+        if not needs.is_need_id(need_id) or not need_id.startswith(prefixes):
+            raise UsageError(
+                f"{need_id!r} is not the id of a decision need: one starts with "
+                f"{', '.join(prefixes)} (docs.needs.types). Mint one with "
+                f"'invariant docs decision new \"<title>\"', or declare a draft "
+                f"with --draft."
+            )
+        return need_id
+
+    @staticmethod
+    def _next_decision(session: Session) -> int:
+        """``max + 1``, as a plan numbers its deliverables (``core/plan.next_n``)."""
+        numbers = [e.get("n") for e in session.decisions if isinstance(e, dict)]
+        return max([n for n in numbers if isinstance(n, int)], default=0) + 1
+
+    def _decision_entry(self, session: Session, n: int) -> dict:
+        for entry in session.decisions:
+            if isinstance(entry, dict) and entry.get("n") == n:
+                return entry
+        known = ", ".join(
+            str(e.get("n")) for e in session.decisions if isinstance(e, dict)
+        )
+        raise UsageError(
+            f"no decision {n} in session {session.name}; this session has "
+            f"{known or 'no decision declared'}"
+        )
+
+    def _plan_entry(self, session: Session, n: int) -> dict:
+        """The RAW stored entry, so a caller can change it.
+
+        Deliberately not routed through ``core.plan.entries``, which hands back
+        copies: a mutation applied to a copy saves nothing and reports success.
+        """
+        for entry in session.plan:
+            if isinstance(entry, dict) and entry.get("n") == n:
+                return entry
+        known = ", ".join(str(e["n"]) for e in plan_reader.entries(session.plan))
+        raise UsageError(
+            f"no deliverable {n} in session {session.name}; this session has "
+            f"{known or 'no deliverables recorded'}"
+        )
+
+    def _touch_plan(self, session: Session, now: float) -> None:
+        """Stamp the plan's own clock and save. Never the heartbeat.
+
+        ``heartbeat`` anchors the per-transition ``elapsed`` telemetry, so
+        stamping it here would shorten the next transition's recorded duration
+        by however long the checklist edit happened to be after the last one —
+        a plan edit silently rewriting the record of what a *state* cost.
+
+        ``now`` is passed in rather than read here because each mutation must
+        take exactly one reading: two calls to a clock are two different times,
+        and an entry whose ``done_at`` and whose ``plan_touched`` disagree by a
+        few microseconds is a record with two answers to one question.
+        """
+        session.plan_touched = now
+        self._save(session)
+
+    def _reject_if_not_a_deliverable(self, title: str) -> None:
+        """Refuse a string that cannot name a deliverable.
+
+        The same three guards as :meth:`_reject_if_not_a_path`, and the same
+        bound, because the failure they catch belongs to the SHELL rather than
+        to the field: `session plan add $TITLES` unquoted under zsh does not
+        word-split, so a whole list arrives as one argument. A length bound
+        catches that where a space cannot — a deliverable may legitimately
+        contain spaces, and does.
+        """
+        if not title or not title.strip():
+            raise UsageError(
+                "a deliverable cannot be empty. An unnamed entry is a thing "
+                "the plan is waiting for that nobody can do."
+            )
+        if "\n" in title or "\r" in title:
+            raise UsageError(
+                f"a deliverable cannot contain a newline (got {len(title)} "
+                "characters). This is usually a command substitution that "
+                "produced a list where one title was expected."
+            )
+        if len(title) > self._PATH_MAX:
+            raise UsageError(
+                f"a deliverable cannot exceed {self._PATH_MAX} characters "
+                f"(got {len(title)}). Under zsh an unquoted $VAR does NOT "
+                "word-split, so a whole list arrives as a single argument. "
+                "Quote the expansion, or add the deliverables one at a time."
+            )
+
+    def remove_files(self, session_id: str, paths: list[str]) -> Session:
+        """Drop declared paths. The way back from a bad `add`.
+
+        `add` without `remove` meant a session could record a path it could
+        never un-record, and the only routes left were editing the state file
+        by hand — which the engine correctly refuses — or an override, which
+        spends a gate's credibility on a typo.
+        """
+        session = self.require(session_id)
+        wanted = set(paths)
+        session.files = [f for f in session.files if f not in wanted]
+        self._save(session)
+        return session
+
+    # -- one-shot overrides -------------------------------------------
+    #
+    # The appeal that reaches a hook. Everything the CLI evaluates already had
+    # one — `session transition --force`, `pipeline advance --force`, `item
+    # transition --force`, each appending an override to the record. The gates
+    # that actually stop an agent are not evaluated by the CLI: seven rules
+    # fire at `pre-tool-use` and five at `stop`, and a blocking verdict there
+    # was final, with the only relief a permanent edit to project policy made
+    # mid-task to get past a single call (BUG_049).
+    #
+    # Deliberately a GRANT and not a flag. A tool call carries no arguments the
+    # operator can add and no environment a running host will re-read, so the
+    # override has to be written down before the call and found by it — which
+    # also means it cannot be spent without leaving a record, and that is the
+    # property that makes it an override rather than a hole.
+
+    def grant_override(
+        self,
+        session_id: str,
+        rule_id: str,
+        reason: str,
+        calls: int = 1,
+        cwd: Path | None = None,
+    ) -> Session:
+        """Let the next ``calls`` evaluations of ``rule_id`` at a hook through.
+
+        ``rule_id`` may name a guideline instead (ADR-012 ruling 4, D12): the
+        grant then passes that guideline in one evaluation of its family
+        gate, and the pipeline advance it lets through spends it. For a
+        pattern, boundary or cochange guideline that is its new blocker
+        findings at ``guidelines.mechanical_clean``; for a judgement
+        guideline, its missing, stale or failing verdict at
+        ``guidelines.verdicts_complete`` (A4.5, DN-9). The id is checked
+        against the ruleset of the tree in hand, read from ``cwd`` as the
+        gates read it, and no guideline id is a rule id (DN-15), so the grant
+        is held in the same shape either way.
+        """
+        if not reason or not reason.strip():
+            raise UsageError(
+                "an override requires --reason. An override with no stated "
+                "reason is indistinguishable from the gate never having run, "
+                "which is the thing this library exists to remove."
+            )
+        session = self.require(session_id)
+        if get_rule(rule_id) is None:
+            # The same loudness `core.rules.evaluate` already applies to a gate
+            # naming a rule that does not exist, for the same reason: a typo
+            # here is an authority the operator believes they exercised and did
+            # not (BUG_050 is this fault at the configuration layer). An id
+            # naming no rule is held only when it names a guideline a gate can
+            # be stopped by.
+            here = RuleContext(
+                manifest=self.manifest,
+                cwd=Path(cwd or self.manifest.root),
+                session=session.to_dict(),
+            )
+            refusal = guideline_override_refusal(here, rule_id)
+            if refusal is not None:
+                raise UsageError(refusal)
+            if calls != 1:
+                raise UsageError(
+                    f"a grant naming the guideline {rule_id!r} is good for one "
+                    f"evaluation of {guideline_gate_of(here, rule_id)} (ADR-012 "
+                    f"ruling 4); drop --calls"
+                )
+        if calls < 1:
+            raise UsageError("--calls must be at least 1")
+
+        session.pending_overrides = [
+            o for o in session.pending_overrides if o.get("rule") != rule_id
+        ]
+        session.pending_overrides.append(
+            {
+                "rule": rule_id,
+                "reason": reason.strip(),
+                "calls": int(calls),
+                "granted": self.clock(),
+            }
+        )
+        self._save(session)
+        return session
+
+    def clear_override(self, session_id: str, rule_id: str | None = None) -> Session:
+        """Withdraw an unspent grant, or all of them."""
+        session = self.require(session_id)
+        session.pending_overrides = (
+            []
+            if rule_id is None
+            else [o for o in session.pending_overrides if o.get("rule") != rule_id]
+        )
+        self._save(session)
+        return session
+
+    def consume_override(
+        self, session_id: str, rule_id: str, surface: str
+    ) -> dict | None:
+        """Spend one call of a grant for ``rule_id``, or answer ``None``.
+
+        Spending it appends to ``overrides`` — the same list a forced
+        transition writes to — so the compliance record shows a gate that was
+        passed deliberately rather than a gate that quietly did not fire.
+        """
+        session = self.get(session_id)
+        if session is None:
+            return None
+        grant = next(
+            (o for o in session.pending_overrides if o.get("rule") == rule_id), None
+        )
+        if grant is None:
+            return None
+
+        remaining = int(grant.get("calls", 1)) - 1
+        if remaining > 0:
+            grant["calls"] = remaining
+        else:
+            session.pending_overrides.remove(grant)
+
+        spent = {
+            "rule": rule_id,
+            "reason": grant.get("reason", "overridden"),
+            "surface": surface,
+            "one_shot": True,
+            "remaining": max(0, remaining),
+        }
+        session.overrides.append(spent)
+        self._save(session)
+        return spent
+
+    # -- the store's docs lock (ADR-014 D5) -----------------------------
+
+    def _docs_lock(self, config: doclock.DocsLockConfig | None = None) -> doclock.DocsLock:
+        return doclock.DocsLock(
+            self.manifest, clock=self.clock, alive=self.host_alive, config=config
+        )
+
+    def _docs_unit(self, path: str | Path) -> tuple[doclock.DocsLockConfig, str | None]:
+        """The lock's config and the unit ``path`` falls under, if governed.
+
+        Classified before any :class:`doclock.DocsLock` is built, so a tool
+        call on a path the lock does not govern costs no lock at all.
+        """
+        config = doclock.read_config(doclock.store_of(self.manifest))
+        _, unit = doclock.classify(self.manifest, config, path)
+        return config, unit
+
+    def _holder(self, session: Session) -> doclock.Holder:
+        link = self.manifest.store
+        return doclock.Holder(
+            session=session.id,
+            identity=link.key if link is not None else None,
+            host=session.host_session_id,
+            state_root=str(self.manifest.state_root),
+        )
+
+    def docs_lock(self, session_id: str, units: Sequence[str] = ()) -> doclock.Outcome:
+        """Take the named units in key order, or report where the lease stands.
+
+        Grants or queues and returns at once; it never loops. An argument is
+        an area's name, a unit key, or a store path (:func:`doclock.resolve_unit`).
+        """
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        keys = [doclock.resolve_unit(self.manifest, lock.config, u) for u in units]
+        out = lock.acquire(self._holder(session), keys) if keys else lock.outcome(session.id)
+        lock.touch(session.id)
+        self._record_spans(session, lock, out)
+        self._save(session)
+        return out
+
+    def docs_releasable(self, session_id: str, units: Sequence[str] = ()) -> list[str]:
+        """The held units ``docs unlock`` would release, refused while one is dirty.
+
+        Asked before the release's fetch and replay (ADR-014 D6), so a dirty
+        unit stops the command before anything reaches the store's remote.
+        """
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        keys = [doclock.resolve_unit(self.manifest, lock.config, u) for u in units] or None
+        return lock.releasable(session.id, keys)
+
+    def docs_unlock(self, session_id: str, units: Sequence[str] = ()) -> doclock.Outcome:
+        """Release the named units, or every one; refused while one is dirty.
+
+        A release that leaves the session holding no unit lands the store
+        leg (ADR-014 D6): ``landing.store`` is the store's sha it released at.
+        """
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        keys = [doclock.resolve_unit(self.manifest, lock.config, u) for u in units] or None
+        out = lock.release(session.id, keys)
+        self._record_spans(session, lock, out)
+        if out.closed and not out.held and not self.open_spans(session):
+            self._landing(session)["store"] = out.closed[-1].get("released_at_sha")
+        self._save(session)
+        return out
+
+    # -- the landing record (ADR-014 D6) ---------------------------------
+
+    def store_root_of(self, session: Session) -> Path | None:
+        """The store a session's docs landed in: the project's, or for a
+        migrate session the one its move writes, whichever home the tree in
+        hand resolves to (ADR-014 D12)."""
+        if self.manifest.store is not None:
+            return Path(self.manifest.store.root)
+        if session.migrate and session.migrate.get("store"):
+            return Path(session.migrate["store"])
+        return None
+
+    def record_migrate(self, session_id: str, migrate: dict) -> Session:
+        """Record the move ``session_id`` carries, and the marker that names it
+        while neither home is complete (ADR-014 D12)."""
+        session = self.require(session_id)
+        session.migrate = {**migrate, "finished": None}
+        self._save(session)
+        storemigrate.write_marker(
+            self.manifest.state_root,
+            {
+                "session": session.id,
+                "to": migrate.get("to"),
+                "store": migrate.get("store"),
+                "identity": migrate.get("identity"),
+            },
+        )
+        return session
+
+    def record_store_landed(self, session_id: str) -> Session:
+        """A migrate session's store leg landed (ADR-014 D6): ``landing.store``
+        is the store's HEAD when the release left it unset, which is a move
+        that wrote no policy path and so took no docs-lock unit."""
+        session = self.require(session_id)
+        root = self.store_root_of(session)
+        landing = self._landing(session)
+        if landing.get("store") is None and root is not None:
+            landing["store"] = git.resolve_commit(root, "HEAD")
+            self._save(session)
+        return session
+
+    def finish_migrate(self, session_id: str) -> Session:
+        """The move is complete: its repository leg landed and what follows
+        the landing ran. The marker goes with it."""
+        session = self.require(session_id)
+        if session.migrate is not None and session.migrate.get("finished") is None:
+            session.migrate["finished"] = self.clock()
+            self._save(session)
+        storemigrate.clear_marker(self.manifest.state_root, session.id)
+        return session
+
+    @staticmethod
+    def _landing(session: Session) -> dict:
+        if session.landing is None:
+            session.landing = {"store": None, "repo": None, "failed": None}
+        return session.landing
+
+    @staticmethod
+    def open_spans(session: Session) -> list[dict]:
+        """The docs-lock spans still open on the session's store leg."""
+        return [
+            span
+            for leg in session.legs if leg.get("kind") == "store"
+            for span in leg.get("lock_spans") or []
+            if not span.get("released_at")
+        ]
+
+    def record_repo_failure(
+        self, session_id: str, detail: str, head: str | None
+    ) -> Session:
+        """Record a repo merge that failed (D6), in a store project only.
+
+        The session stays where it was; with its docs landed it is
+        half-landed, and ``session merge`` or ``session resume`` finishes it.
+        An in-repo session records nothing, exactly as before.
+        """
+        session = self.require(session_id)
+        if self.manifest.store is None and session.migrate is None:
+            return session
+        self._landing(session)["failed"] = {
+            "at": self.clock(),
+            "detail": detail,
+            "head": head,
+            "base": session.base,
+        }
+        self._save(session)
+        return session
+
+    def record_repo_landed(self, session_id: str, sha: str | None) -> Session:
+        """Record the repo leg landed at the base's ``sha`` (D6), in a store
+        project only; the failure the merge finished is cleared."""
+        session = self.require(session_id)
+        if self.manifest.store is None and session.migrate is None:
+            return session
+        landing = self._landing(session)
+        landing["repo"], landing["failed"] = sha, None
+        self._save(session)
+        return session
+
+    def store_landing_mismatch(self, session: Session) -> tuple[str, str | None] | None:
+        """``(recorded, store HEAD)`` when the store no longer holds the sha
+        the session's docs landed at, else ``None`` (D6: "git containment is
+        checked against the record"). A store git cannot read is a mismatch,
+        never a pass."""
+        landed = (session.landing or {}).get("store")
+        root = self.store_root_of(session)
+        if not landed or root is None:
+            return None
+        if git.is_ancestor(root, landed, "HEAD"):
+            return None
+        return landed, git.resolve_commit(root, "HEAD")
+
+    def record_landing_override(
+        self, session_id: str, recorded: str, head: str | None
+    ) -> Session:
+        """Record a finish forced past a store that no longer holds the sha
+        the session's docs landed at (D6): both values, never silent."""
+        session = self.require(session_id)
+        session.overrides.append(
+            {
+                "rule": LANDING_RULE,
+                "store": recorded,
+                "store_head": head,
+                "reason": "finished with --force past a store that no longer "
+                "contains the landed sha",
+                "at": self.clock(),
+            }
+        )
+        self._save(session)
+        return session
+
+    def landed_store_commits(self, session: Session) -> list[str]:
+        """``<sha> <subject>`` of every store commit the session's spans
+        landed, newest first: what stays on the store's main line when the
+        session is abandoned (D5's cost, D6)."""
+        root = self.store_root_of(session)
+        if root is None:
+            return []
+        out: list[str] = []
+        for leg in session.legs:
+            if leg.get("kind") != "store":
+                continue
+            for span in leg.get("lock_spans") or []:
+                changed = span.get("changed") or []
+                start, end = span.get("acquired_at_sha"), span.get("released_at_sha")
+                if not changed or not start or not end:
+                    continue
+                for line in git.commit_lines(root, start, end, changed) or []:
+                    if line not in out:
+                        out.append(line)
+        return out
+
+    def _hold_landed_abandon(self, session: Session, force: bool, reason: str | None) -> None:
+        """A session whose docs landed and whose repo has not is held out of
+        ``abandoned`` unless forced (D6); a forced abandon records the store
+        commits that stay landed. There is no rollback (ruling 8)."""
+        if session.landing_state not in ("docs_landed", "half_landed"):
+            return
+        commits = self.landed_store_commits(session)
+        landed = session.landing["store"]
+        if not force:
+            named = "".join(f"\n    {c[:12]}{c[40:]}" for c in commits) or (
+                f"\n    (store at {landed[:12]}; the spans changed nothing)"
+            )
+            raise UsageError(
+                f"session {session.id} has its docs landed in the store and its "
+                f"code not (ADR-014 D6), so it is not abandoned. These store "
+                f"commits would stay landed, describing code that never lands:"
+                f"{named}\n  Finish it with 'invariant session merge', or abandon "
+                f"it deliberately with --force --reason '<why>'; nothing is "
+                f"rolled back (ruling 8)."
+            )
+        session.overrides.append(
+            {
+                "rule": LANDING_RULE,
+                "from": session.state,
+                "to": "abandoned",
+                "reason": reason or "forced",
+                "store": landed,
+                "store_commits": commits,
+                "at": self.clock(),
+            }
+        )
+
+    def docs_wait(self, session_id: str, timeout: float) -> doclock.Outcome:
+        """Block until the session's lease waits for nothing, or ``timeout``."""
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        out = lock.wait(session.id, timeout)
+        self._record_spans(session, lock, out)
+        self._save(session)
+        return out
+
+    def docs_take_over(self, session_id: str, unit: str, reason: str) -> doclock.Outcome:
+        """Take one unit of a stale lease over, recorded in both sessions' overrides."""
+        session = self.require(session_id)
+        lock = self._docs_lock()
+        key = doclock.resolve_unit(self.manifest, lock.config, unit)
+        out, previous = lock.take_over(self._holder(session), key, reason)
+        now = self.clock()
+        session.overrides.append(
+            {
+                "rule": doclock.TAKEOVER_RULE,
+                "unit": key,
+                "reason": reason.strip(),
+                "taken_from": previous.get("session"),
+                "stale": previous.get("why"),
+                "at": now,
+            }
+        )
+        self._record_spans(session, lock, out)
+        self._save(session)
+        self._record_taken(previous, key, reason.strip(), session.id, now)
+        return out
+
+    def _record_taken(
+        self, previous: dict, unit: str, reason: str, by: str, now: float
+    ) -> None:
+        """Write the takeover into the previous holder's own record.
+
+        That session may live in another repository's state root, since a
+        store serves several. Its lease was stale, so it is not writing its
+        record at the same time; a record that cannot be found is skipped.
+        """
+        sid, root = previous.get("session"), previous.get("state_root")
+        if not sid or not root:
+            return
+        store = self.store if Path(root) == Path(self.manifest.state_root) else JsonStore(Path(root))
+        raw = store.read(self._path(sid))
+        if not raw:
+            return
+        victim = Session.from_dict(raw)
+        leg = self._store_leg(victim)
+        span = previous.get("span") or {}
+        for entry in leg["lock_spans"]:
+            if entry.get("unit") == unit and not entry.get("released_at"):
+                entry.update({k: v for k, v in span.items() if k not in ("lease", "unit")})
+                break
+        else:
+            leg["lock_spans"].append(dict(span))
+        victim.overrides.append(
+            {"rule": doclock.TAKEOVER_RULE, "unit": unit, "reason": reason, "taken_by": by, "at": now}
+        )
+        store.write(self._path(sid), victim.to_dict())
+
+    def release_docs_lock(self, session: Session) -> doclock.Outcome | None:
+        """Free every unit ``session`` holds or waits for: it landed, was torn
+        down or was abandoned. Never refused for uncommitted changes, which
+        the closed span names instead; a store that cannot be read leaves the
+        units to go stale, to be taken over with a reason."""
+        if self.manifest.store is None:
+            return None
+        try:
+            lock = self._docs_lock()
+            out = lock.release(session.id, None, check=False)
+        except (StateError, ManifestError, UsageError):
+            return None
+        self._record_spans(session, lock, out)
+        return out
+
+    def docs_units(self) -> list[dict]:
+        """Every held unit of the project's store, or none for an in-repo project."""
+        if self.manifest.store is None:
+            return []
+        return self._docs_lock().units()
+
+    def docs_access(self, session_id: str, path: str | Path) -> doclock.Outcome | None:
+        """The host's on-access grant (D5, increment 4b), before the rule reads.
+
+        A tool call about to read or write a store policy path takes the
+        path's unit when it is free (:meth:`doclock.DocsLock.grant_free`),
+        refreshes the heartbeat, and brings the store leg in line with the
+        lease record, so a unit passed to this session by another's release
+        opens its span here. ``None`` for an in-repo project and for a path
+        the lock does not govern. The caller has already proven the session
+        (D5: holding the lock never turns a guess into a proof).
+        """
+        if self.manifest.store is None:
+            return None
+        config, unit = self._docs_unit(path)
+        if unit is None:
+            return None
+        lock = self._docs_lock(config)
+        session = self.require(session_id)
+        before = json.dumps(session.legs, sort_keys=True, default=str)
+        out = lock.grant_free(self._holder(session), unit)
+        lock.touch(session.id)
+        self._record_spans(session, lock, out)
+        if json.dumps(session.legs, sort_keys=True, default=str) != before:
+            self._save(session)
+        return out
+
+    def docs_write(
+        self, session_id: str | None, paths: Sequence[str | Path], *, proven: bool = True
+    ) -> None:
+        """A CLI write into a store's policy (ADR-014 D5, increment 4c-2).
+
+        ``guidelines render``, ``guidelines baseline`` and ``init``'s starter
+        ask this with every path they are about to write, before the first.
+        Each governed path's unit is taken through the on-access grant
+        (:meth:`docs_access`'s), so the write is made under the session's
+        lease and attributed to its span; a unit that cannot be granted
+        refuses the whole write, naming the unit, its holder and ``docs
+        lock``. A session the call only guesses (``proven`` false) is granted
+        nothing and must already hold the unit, as at the host. With no
+        session (``init``, a shell outside every session) there is no lease
+        to write under, so the write goes ahead only into units nobody holds
+        or queues for. Paths the lock does not govern, and every path of an
+        in-repo project, are admitted as they are.
+        """
+        if self.manifest.store is None:
+            return
+        config = doclock.read_config(doclock.store_of(self.manifest))
+        units = sorted({
+            unit
+            for path in paths
+            if (unit := doclock.classify(self.manifest, config, path)[1]) is not None
+        })
+        if not units:
+            return
+        lock = self._docs_lock(config)
+        refused: list[str] = []
+        if session_id is None:
+            record = lock.read()
+            for unit in units:
+                entry = record["units"].get(unit) or {}
+                holder = (record["leases"].get(entry.get("holder") or "") or {}).get("session")
+                if holder or entry.get("queue"):
+                    refused.append(
+                        f"{unit} is held by session {holder}" if holder
+                        else f"{unit} has sessions queued for it"
+                    )
+            fix = "run it from the session that holds the unit, or once it is released"
+        else:
+            session = self.require(session_id)
+            if proven:
+                before = json.dumps(session.legs, sort_keys=True, default=str)
+                for unit in units:
+                    self._record_spans(
+                        session, lock, lock.grant_free(self._holder(session), unit)
+                    )
+                lock.touch(session.id)
+                if json.dumps(session.legs, sort_keys=True, default=str) != before:
+                    self._save(session)
+            for unit in units:
+                standing = lock.standing(session.id, unit)
+                if standing["held"]:
+                    continue
+                if standing["position"] is not None:
+                    refused.append(
+                        f"session {session.id} is queued for {unit} at position "
+                        f"{standing['position']}, behind session {standing['holder']}"
+                    )
+                elif standing["holder"]:
+                    refused.append(f"{unit} is held by session {standing['holder']}")
+                else:
+                    refused.append(
+                        f"session {session.id} does not hold {unit}, and it was not "
+                        f"taken for it here"
+                    )
+            fix = f"invariant docs lock {' '.join(units)} --id {session.id}"
+        if refused:
+            raise UsageError(
+                "this write into the store's policy is refused, and nothing was "
+                "written: " + "; ".join(refused) + ". A store's policy is written "
+                "only under its docs lock (ADR-014 D5).\n  fix: " + fix
+                + "\n  see: invariant docs lock"
+            )
+
+    def docs_read_lease(self, session_id: str, path: str | Path) -> dict | None:
+        """The lease and unit a read of ``path`` is made under (D5, increment 4b).
+
+        ``None`` when the lock does not govern the path, so the read is
+        recorded as it always was; else ``{"lease", "unit"}``, the lease
+        ``None`` when the session does not hold the unit.
+        """
+        if self.manifest.store is None:
+            return None
+        config, unit = self._docs_unit(path)
+        if unit is None:
+            return None
+        lock = self._docs_lock(config)
+        record = lock.read()
+        lid = lock.lease_id(record, session_id)
+        holder = (record["units"].get(unit) or {}).get("holder")
+        return {"lease": lid if lid is not None and holder == lid else None, "unit": unit}
+
+    def docs_heartbeat(self, session_id: str) -> bool:
+        """The hooks' heartbeat (D5, increment 4b): at most once a minute."""
+        if self.manifest.store is None:
+            return False
+        return self._docs_lock().touch(session_id)
+
+    def docs_notice(self, session_id: str) -> dict | None:
+        """What the turn context tells a session about its docs lock, read only.
+
+        ``new`` lists the units the lease holds with no open span on the
+        store leg: passed to it by another session's release since it last
+        looked, so it is told before it designs on them (D5). ``held`` is
+        every held unit, ``waiting`` the unit it queues for (``unit``,
+        ``position``, ``holder``) and ``pending`` what follows. ``None`` with
+        no lease, and for an in-repo project. Nothing is written: the span
+        opens at the session's next store call or ``docs`` command.
+        """
+        if self.manifest.store is None:
+            return None
+        session = self.require(session_id)
+        out = self._docs_lock().outcome(session.id)
+        if out.lease is None:
+            return None
+        open_units = {
+            span.get("unit")
+            for leg in session.legs if leg.get("kind") == "store"
+            for span in leg.get("lock_spans") or []
+            if not span.get("released_at")
+        }
+        return {
+            "held": list(out.held),
+            "new": [u for u in out.held if u not in open_units],
+            "waiting": out.waiting,
+            "pending": list(out.pending),
+        }
+
+    def record_store_pull(self, session_id: str, state: str | None) -> Session:
+        """Record how the store's pull went (ADR-014 D7): ``stale`` or
+        ``current``. ``None`` records nothing, since no pull reached a verdict."""
+        session = self.require(session_id)
+        if state is not None and session.store_pull != state:
+            session.store_pull = state
+            self._save(session)
+        return session
+
+    def _store_leg(self, session: Session) -> dict:
+        for leg in session.legs:
+            if leg.get("kind") == "store":
+                leg.setdefault("lock_spans", [])
+                return leg
+        root = self.manifest.store.root if self.manifest.store is not None else None
+        leg = {"kind": "store", "root": str(root) if root else None, "lock_spans": []}
+        session.legs.append(leg)
+        return leg
+
+    def _record_spans(
+        self, session: Session, lock: doclock.DocsLock, out: doclock.Outcome
+    ) -> None:
+        """Bring the session's store leg in line with the lease record.
+
+        Spans the call opened or closed are written as they are; a unit the
+        lease gained by hand-over since the session last looked opens its span
+        from the record's own ``since`` and ``sha``.
+        """
+        if not out.opened and not out.closed and out.lease is None and not any(
+            leg.get("kind") == "store" for leg in session.legs
+        ):
+            return
+        leg = self._store_leg(session)
+        spans = leg["lock_spans"]
+        for opened in out.opened:
+            spans.append(dict(opened))
+        for closed in out.closed:
+            for entry in reversed(spans):
+                if entry.get("unit") == closed["unit"] and not entry.get("released_at"):
+                    entry.update({k: v for k, v in closed.items() if k != "unit"})
+                    break
+            else:
+                spans.append(dict(closed))
+        record = lock.read()
+        lid = out.lease or lock.lease_id(record, session.id)
+        open_units = {e.get("unit") for e in spans if not e.get("released_at")}
+        for key, unit in sorted(record["units"].items()):
+            if lid and unit.get("holder") == lid and key not in open_units:
+                spans.append(
+                    {
+                        "lease": lid,
+                        "unit": key,
+                        "acquired_at": unit.get("since"),
+                        "acquired_at_sha": unit.get("sha"),
+                    }
+                )
+        # A unit held again means the docs are not landed (ADR-014 D6): they
+        # land at the release that leaves the session holding none.
+        if session.landing and session.landing.get("store") and self.open_spans(session):
+            session.landing["store"] = None
+
+    # -- stand-down ----------------------------------------------------
+
+    def stand_down(
+        self,
+        session_id: str,
+        reason: str,
+        until: str = "pipeline",
+        include: Sequence[str] = (),
+        pipeline_started: float | None = None,
+    ) -> Session:
+        """Hold every gate, reversibly, without editing project policy.
+
+        The want this exists for is not convenience. A tool that cannot be told
+        to stand down for one task gets uninstalled during that task, and what
+        returns afterwards is usually nothing. The README already argues the
+        adjacent half — *"a gate that fights legitimate exceptions gets the
+        whole tool switched off"* — and this is the supported, recorded version
+        of what an operator improvises instead. Improvised it leaves no record;
+        this leaves one.
+
+        The routes that looked like this were not it. `loose` is an observation
+        mode and still blocks; `INVARIANT_DISABLE` takes exact ids with no
+        wildcard and does not reach a hook mid-session, because the hook
+        subprocess inherits the environment the host was launched with; and a
+        manifest edit is permanent by construction — a temporary policy change
+        living in committed configuration either lands in a commit by accident
+        or quietly becomes the project's real policy.
+        """
+        if not reason or not reason.strip():
+            raise UsageError(
+                "standing enforcement down requires --reason. This is the one "
+                "state that must never be discoverable only by noticing that "
+                "nothing is stopping you."
+            )
+        if until not in ("pipeline", "session"):
+            raise UsageError(
+                f"--until takes 'pipeline' or 'session', not {until!r}"
+            )
+        for rule_id in include:
+            if get_rule(rule_id) is None:
+                raise UsageError(
+                    f"no rule {rule_id!r}; 'invariant rules list' shows them all"
+                )
+
+        session = self.require(session_id)
+        session.standdown = {
+            "reason": reason.strip(),
+            "until": until,
+            "include": sorted(set(include)),
+            "pipeline_started": pipeline_started if until == "pipeline" else None,
+            "granted": self.clock(),
+        }
+        self._save(session)
+        return session
+
+    def stand_up(self, session_id: str) -> Session:
+        """Lift a stand-down. Idempotent — lifting nothing is not an error."""
+        session = self.require(session_id)
+        session.standdown = None
+        self._save(session)
+        return session
+
+    def record_push(
+        self,
+        session_id: str,
+        cwd: Path | None = None,
+        force: bool = False,
+        reason: str | None = None,
+    ) -> Session:
+        session = self.require(session_id)
+        # Advance FIRST, then count. `pushed`'s entry gates include the push
+        # barrier, and incrementing before evaluating would make the very push
+        # being recorded read as a second one.
+        self._advance(session, "pushed", reason=reason or "push recorded",
+                      force=force, cwd=cwd)
+        session.push_count += 1
+        self._save(session)
+        self._register(session)
+        return session
+
+    # -- handing off to the next host session --------------------------
+    #
+    # A handoff is an EVENT, not an edge. It changes nothing the machine
+    # governs — no worktree, no branch, no gate — so it is legal in every
+    # state, terminal ones included, and is recorded the way `resume` is: a
+    # standstill row in `history`. Routing it through `_advance` would evaluate
+    # the current state's entry gates on something that is not an entry, and
+    # from `torn_down`, where the documented handoff happens, there is no edge
+    # to walk at all (ADR-005 D2).
+
+    def vet_handoff_note(self, note: str) -> str:
+        """The note, stripped, or a refusal saying why it cannot be written down.
+
+        Public so that ``--dry-run`` refuses exactly what the real run would.
+        The note is written into the session record and handed to a new host
+        session as its first prompt — and from there into that host's
+        transcript, which this library does not own and cannot scrub. So the
+        privacy patterns run here, before any of that, with the project's own
+        configuration, and a finding REFUSES: the remedy is a rewritten note,
+        which costs the caller one retry.
+
+        The exemption marker is refused outright rather than honoured. In a
+        document it marks a place a reviewer can see; in a one-line note it
+        would exempt the whole note from the only scan it gets.
+        """
+        from ..core.privacy import EXEMPTION_MARKER, PrivacyScanner
+
+        text = (note or "").strip()
+        if not text:
+            raise UsageError("a handoff note cannot be empty")
+        if "\n" in text or "\r" in text:
+            raise UsageError(
+                "a handoff note is one line — a terse keyword line the next "
+                "session reads as its first prompt. Join it with ' · '."
+            )
+        if len(text) > HANDOFF_NOTE_MAX:
+            raise UsageError(
+                f"a handoff note is a keyword line, not a document: "
+                f"{len(text)} characters against a bound of {HANDOFF_NOTE_MAX}"
+            )
+        if EXEMPTION_MARKER in text:
+            raise GateFailure(
+                f"a handoff note cannot carry the {EXEMPTION_MARKER!r} marker: "
+                f"it would exempt the whole note from the one scan it gets"
+            )
+        findings = PrivacyScanner.from_manifest(self.manifest).scan_text(text)
+        if findings:
+            lines = [
+                (
+                    "the handoff note carries personal or operational data, so "
+                    "it is not recorded and no session is started:"
+                )
+            ]
+            lines += [f"  {finding.describe()}" for finding in findings]
+            lines.append(
+                "  Describe it by its characteristics instead, and run the "
+                "handoff again."
+            )
+            raise GateFailure("\n".join(lines))
+        return text
+
+    def record_handoff(self, session_id: str, note: str, name: str) -> Session:
+        """Write the handoff onto the session record, in any state.
+
+        A torn-down or abandoned session is saved but NOT re-registered: the
+        registry indexes sessions in flight, teardown removed this one from it,
+        and a handoff must not put it back.
+        """
+        session = self.require(session_id)
+        text = self.vet_handoff_note(note)
+        now = self._note(session, "handoff", extra={"handoff": name})
+        session.handoffs.append(
+            {"note": text, "name": name, "at": now, "state": session.state}
+        )
+        self._save(session)
+        if session.state not in _FINISHED:
+            self._register(session)
+        return session
+
+    def handoff_candidate(
+        self, cwd: Path | None = None, host_session_id: str | None = None
+    ) -> Session | None:
+        """The session a handoff from here belongs to, when nothing names one.
+
+        The most recently MOVED session registered at or above ``cwd``, in any
+        state — including torn down, because handing off is normally the last
+        step, after teardown has already made the session unattributable. A
+        session bound to ``host_session_id``, now or earlier, wins over one
+        that was not: it is the one this host was working in.
+
+        A fallback, and the command says which session it chose, because
+        "most recent here" is a guess and a guess is fine to act on only where
+        the reader can see it.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        here = [
+            s for s in self.list() if s.origin and _contains(Path(s.origin), cwd)
+        ]
+        if host_session_id:
+            mine = [
+                s
+                for s in here
+                if s.host_session_id == host_session_id or host_session_id in s.hosts
+            ]
+            here = mine or here
+        if not here:
+            return None
+        return max(here, key=lambda s: max(s.heartbeat, s.plan_touched))
+
+    def latest_handoff(
+        self, cwd: Path | None = None
+    ) -> tuple[Session, dict] | None:
+        """The newest handoff recorded here, while it is still fresh.
+
+        "Fresh" is ``session.plan_stale_days`` — the threshold this domain
+        already uses to tell a paused piece of work from an abandoned one —
+        DERIVED on every read rather than cleared by a later command, because
+        an expiry that depends on something else running is one that does not
+        happen. A read, and only a read: the greeting calls it on every
+        ``SessionStart``.
+
+        A CONSUMED entry is skipped — claimed by the session its launcher
+        named, or dismissed by hand — and the newest entry still open answers
+        instead. Skipping is per note: a handoff recorded after the one a
+        session claimed is still offered.
+        """
+        cwd = Path(cwd or Path.cwd()).resolve()
+        days = self.manifest.get("session.plan_stale_days", 7)
+        try:
+            horizon = float(days) * 86400.0
+        except (TypeError, ValueError):
+            horizon = 7 * 86400.0
+        now = self.clock()
+        best: tuple[Session, dict] | None = None
+        for session in self.list():
+            if not session.origin or not _contains(Path(session.origin), cwd):
+                continue
+            for entry in session.handoffs:
+                if entry.get("consumed"):
+                    continue
+                at = entry.get("at")
+                if not isinstance(at, (int, float)) or now - at > horizon:
+                    continue
+                if best is None or at > best[1]["at"]:
+                    best = (session, entry)
+        return best
+
+    def claim_handoff(
+        self, token: str, session_id: str | None, host_session_id: str | None
+    ) -> dict | None:
+        """Mark the note ``token`` names as claimed by the session acting on it.
+
+        The token is what the handoff launcher put in front of ``claude``
+        (:func:`handoff_token`), so it names EXACTLY one note: the one this
+        host session was launched to pick up. Never "every fresh note", and
+        there is deliberately no fallback that consumes by time — a note
+        launched by hand carries no token and leaves only by dismissal or by
+        going stale.
+
+        Freshness is not asked. The token is proof the note was acted on, and
+        an old note marked so is still the truth about it.
+
+        Returns the consumed entry, or ``None`` when there is nothing to do: a
+        token that does not parse, names no session or no note, or names a
+        note already consumed. The first claim wins, so the token a host keeps
+        for its whole life cannot re-claim on a later ``start``. The caller is
+        a hook, and a hook must never fail a command that has already run, so
+        none of these is an error.
+        """
+        found = self._handoff_by_token(token)
+        if found is None:
+            return None
+        session, entry = found
+        if entry.get("consumed"):
+            return None
+        return self._consume_handoff(
+            session, entry, "claimed", session_id, host_session_id
+        )
+
+    def dismiss_handoff(
+        self,
+        cwd: Path | None = None,
+        session_id: str | None = None,
+        host_session_id: str | None = None,
+    ) -> tuple[Session, dict]:
+        """Retire the latest fresh note here without acting on it.
+
+        For a handoff somebody decided not to take up. It is recorded as
+        ``dismissed``, not ``claimed``, so the history says nobody acted on
+        it. One note per call — the one the greeting is showing — so a
+        dismissal never silences a note the caller has not seen.
+        """
+        session, entry = self.dismissable_handoff(cwd)
+        consumed = self._consume_handoff(
+            session, entry, "dismissed", session_id, host_session_id
+        )
+        return session, consumed
+
+    def dismissable_handoff(self, cwd: Path | None = None) -> tuple[Session, dict]:
+        """The note ``dismiss_handoff`` would retire, or the refusal it gives.
+
+        Public so that ``--dry-run`` names, and refuses, exactly what the real
+        run would.
+        """
+        found = self.latest_handoff(cwd)
+        if found is None:
+            raise UsageError(
+                "no fresh handoff here to dismiss: nothing recorded at or above "
+                "this directory is both unconsumed and younger than "
+                "session.plan_stale_days"
+            )
+        return found
+
+    def _handoff_by_token(self, token: str | None) -> tuple[Session, dict] | None:
+        session_id, sep, at_text = (token or "").partition(":")
+        if not sep or not session_id:
+            return None
+        try:
+            at = float(at_text)
+        except ValueError:
+            return None
+        session = self.get(session_id)
+        if session is None:
+            return None
+        for entry in session.handoffs:
+            if entry.get("at") == at:
+                return session, entry
+        return None
+
+    def _consume_handoff(
+        self,
+        session: Session,
+        entry: dict,
+        how: str,
+        session_id: str | None,
+        host_session_id: str | None,
+    ) -> dict:
+        """Write the marker onto the entry and a standstill row onto the record.
+
+        The shape the handoff itself took (ADR-005 D2): an event, not an edge,
+        on a record that is usually torn down — so it is saved and never
+        re-registered, and it passes and forces no gate.
+        """
+        now = self._note(
+            session,
+            f"handoff {how}",
+            extra={"handoff_consumed": entry.get("name"), "how": how},
+        )
+        entry["consumed"] = {
+            "at": now,
+            "how": how,
+            "session": session_id,
+            "host": host_session_id,
+        }
+        self._save(session)
+        return entry
+
+    def teardown(
+        self,
+        session_id: str,
+        remove_worktree: bool = True,
+        remove_branch: bool = True,
+        cwd: Path | str | None = None,
+        force: bool = False,
+    ) -> Session:
+        """End the session: worktree gone, branch gone, registry entry gone.
+
+        The branch is deleted with ``git branch -d``, never ``-D``. A safe
+        delete refuses a branch holding commits the base does not have, and
+        that refusal is the whole point: reaching teardown is supposed to mean
+        the work is merged, so a branch that will not delete is evidence the
+        merge did not do what it appeared to. Forcing it would destroy the only
+        copy of that work and report success.
+
+        The third precondition is not a git question, and it is the one that
+        was missing (BUG_009): git will happily remove a directory another
+        system is standing in. When an agent host is standing in it the result
+        is not an inconvenience — that host's own worktree isolation refuses
+        every subsequent shell call and orders the caller back into the path
+        just deleted, and the commands that would repair it sit behind that
+        same refusal. The deadlock is self-sealing, which is why this refuses
+        rather than warns: nobody scrolls past a wedged session back into a
+        working one.
+
+        The check is a **conjunction**, and dropping either half breaks it in
+        a different direction:
+
+        * **The binding is live** — ``host_session_id`` set and ``host_ended``
+          false, which is what `docs/architecture/state_model.rst` "Host
+          binding" defines as live, ``SessionEnd`` being what marks it spent.
+          Alone this is far too broad: a session torn down the documented way
+          is bound to the very host session running the teardown, so every
+          healthy ending carries a live binding.
+        * **The worktree is occupied** — the caller is standing inside it.
+          Alone this is too broad the other way: with the binding already
+          spent, a stranded shell recovers with one ``cd``. Occupancy is
+          measured from the caller's own working directory because that is the
+          only evidence available; the binding is a scalar with no notion of
+          where its host stands (BUG_010), so a *different* host wedged in this
+          worktree remains invisible here.
+        """
+        session = self.require(session_id)
+
+        # Read BEFORE anything is removed, which is the entire point. Teardown
+        # reads the binding afterwards too — for the transition's telemetry
+        # watermark, and again when the record is serialised — and neither of
+        # those is in time to be a precondition on the removal.
+        bound_to = session.host_session_id
+        binding_is_spent = session.host_ended
+        binding_is_live = bool(bound_to) and not binding_is_spent
+
+        if (
+            remove_worktree
+            and not force
+            and binding_is_live
+            and session.worktree
+            and _contains(Path(session.worktree), _resolved(cwd))
+        ):
+            raise UsageError(self._occupied_worktree_message(session))
+
+        # Run git from the MAIN checkout, not from wherever the manifest was
+        # loaded. Those are the same directory in the ordinary case and are
+        # not when teardown is invoked from inside the session's own worktree:
+        # `git worktree remove` then deletes the directory the *next* git call
+        # is standing in, and that call fails with an unrelated ENOENT after
+        # the removal has already happened — worktree gone, branch alive, no
+        # transition recorded. Reachable deliberately through ``force``, so it
+        # has to be correct there rather than merely refused everywhere else.
+        repo = str(git.main_checkout(self.manifest.root) or self.manifest.root)
+
+        # `torn_down`'s gates are asked BEFORE anything is removed, as `session
+        # merge` asks `merged`'s before git runs: a refusal after the removal
+        # would be a report, not a gate. The project's `session.before_teardown`
+        # steps run first, in the worktree about to go (ADR-021 D2, D5), and a
+        # refusal removes nothing. The advance below reuses these verdicts:
+        # with the worktree gone, a step's rule could no longer read its tree.
+        self.run_steps(session, "torn_down", cwd=cwd)
+        verdicts = self.pending_gates(session, "torn_down", cwd=_resolved(cwd))
+        blocking = [v for v in verdicts if v.blocks]
+        if blocking:
+            raise GateFailure(
+                f"{len(blocking)} gate(s) block {session.state!r} -> 'torn_down'; "
+                f"nothing was removed",
+                verdicts=verdicts,
+            )
+
+        if remove_worktree and session.worktree and Path(session.worktree).exists():
+            proc = subprocess.run(
+                ["git", "worktree", "remove", session.worktree],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise StateError(
+                    f"could not remove {session.worktree}: {proc.stderr.strip()}"
+                )
+
+        if remove_branch and session.branch:
+            proc = subprocess.run(
+                ["git", "branch", "-d", session.branch],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0 and "not found" not in proc.stderr.lower():
+                raise StateError(
+                    f"could not delete {session.branch}: {proc.stderr.strip()}\n"
+                    f"A safe delete refuses a branch whose commits are not in "
+                    f"the base — which means this session's work is not merged "
+                    f"after all. Merge it, or abandon the session deliberately."
+                )
+
+        self._advance(session, "torn_down", reason="teardown", judged=verdicts)
+        self._deregister(session.id)
+        return session
+
+    def _occupied_worktree_message(self, session: Session) -> str:
+        """How to get out of the way, spelled as commands.
+
+        A caller who hits this cannot read the source from inside the deadlock
+        it is describing, and by the time the deadlock exists it cannot run
+        anything at all. So the message carries the way out rather than a
+        diagnosis of what went wrong.
+        """
+        elsewhere = (
+            git.main_checkout(self.manifest.root)
+            or session.origin
+            or "<the main checkout>"
+        )
+        return (
+            f"session {session.id} is bound to a LIVE host session, and this "
+            f"command is running inside the worktree it would remove:\n"
+            f"  {session.worktree}\n"
+            f"Removing it would strand that host in a directory that no longer "
+            f"exists. Its own worktree isolation then refuses every shell call "
+            f"and orders the caller back into the removed path, and the "
+            f"commands that would repair that sit behind the same refusal — "
+            f"there is no in-band recovery, which is why this is refused "
+            f"rather than warned about.\n"
+            f"  Step out of it first, then tear down:\n"
+            f"    cd {elsewhere} && invariant session teardown --id "
+            f"{session.id}\n"
+            f"  The binding is spent once the host session ends (SessionEnd); "
+            f"a spent binding, or none at all, tears down from anywhere.\n"
+            f"  Deliberately, knowing the host has already moved elsewhere: "
+            f"add --force."
+        )
+
+    # -- maintenance ---------------------------------------------------
+
+    def repair(self, dry_run: bool = False) -> list[str]:
+        """Reconcile the registry against session files and real worktrees.
+
+        A session whose worktree no longer exists is marked abandoned rather
+        than deleted: the record of what happened is the thing that makes a
+        crashed session diagnosable afterwards.
+        """
+        actions: list[str] = []
+        # Registered with git AND present on disk. Git prunes worktree metadata
+        # lazily, so a directory someone deleted by hand is still listed —
+        # which is exactly the crashed-session case this has to catch. The
+        # directory's existence is the signal that does not lag.
+        registered = {str(w.path.resolve()) for w in git.worktrees(self.manifest.root)}
+        live_worktrees = {p for p in registered if Path(p).is_dir()}
+
+        for session in self.list():
+            if session.state in {"torn_down", "abandoned"}:
+                continue
+            if session.worktree and str(Path(session.worktree).resolve()) not in live_worktrees:
+                if session.landing_state in ("docs_landed", "half_landed"):
+                    actions.append(
+                        f"{session.id}: worktree is gone, but its docs landed in the "
+                        f"store, so it is held out of abandoned (ADR-014 D6); "
+                        f"'invariant session transition abandoned --force' ends it"
+                    )
+                    continue
+                actions.append(
+                    f"{session.id}: worktree is gone, marking abandoned "
+                    f"(was {session.state})"
+                )
+                if not dry_run:
+                    self.release_docs_lock(session)
+                    session.state = "abandoned"
+                    session.history.append(
+                        {"to": "abandoned", "reason": "worktree no longer exists", "repair": True}
+                    )
+                    self._save(session)
+                    self._deregister(session.id)
+
+        known = set(self.store.list_ids("sessions"))
+        registry = self.store.read(REGISTRY, {"sessions": {}})
+        for session_id in list(registry.get("sessions", {})):
+            if session_id not in known:
+                actions.append(f"{session_id}: registry entry with no session file")
+                if not dry_run:
+                    self._deregister(session_id)
+        return actions
+
+    # -- internals -----------------------------------------------------
+
+    def _pipeline_record(self, session_id: str) -> dict | None:
+        """The session's current pipeline, read for gate evaluation.
+
+        Read from the shared store rather than through ``PipelineDomain`` —
+        the gates want the record, not the operations, and constructing the
+        sibling domain here would couple their lifecycles for one dict.
+        """
+        raw = self.store.read(f"pipelines/{session_id}.json", {})
+        current = raw.get("current") if isinstance(raw, dict) else None
+        return current if isinstance(current, dict) else None
+
+    def pending_gates(
+        self,
+        session: Session,
+        target: str,
+        cwd: Path | None = None,
+        extra: dict | None = None,
+    ) -> list[Evaluated]:
+        """The machine's gates for ``state -> target``, evaluated, no advance.
+
+        Exit gates of the state being left plus entry gates of the one being
+        entered — the same shape as ``PipelineDomain.gates_for``. Public so
+        that a command with an irreversible step (`session merge`, `session
+        push`) can ask BEFORE running it; the transition afterwards evaluates
+        the same list, so the two cannot drift apart.
+        """
+        # A state the machine does not know has no readable gate list. That is
+        # the forced-recovery case — a hand-repaired or legacy record — and
+        # the structural check has already refused it or been deliberately
+        # forced past; failing HERE would wedge the one route out (AUD-01's
+        # class of harm). The known side's gates still run.
+        # An abandon destination takes only its OWN entry gates, matching
+        # `PipelineDomain.gates_for`. The exit gates of the state being left
+        # exist to protect the merge, and this is the edge that never reaches
+        # it — holding it to them makes finishing the precondition of stopping
+        # (BUG_037).
+        try:
+            abandoning = ABANDON_ROLE in self.machine.state(target).roles
+        except UsageError:
+            abandoning = False
+        sources = [] if abandoning else [(session.state, "exit_gates")]
+
+        gate_ids: list[str] = []
+        for state_id, which in [*sources, (target, "entry_gates")]:
+            try:
+                declared = getattr(self.machine.state(state_id), which)
+            except UsageError:
+                continue
+            gate_ids += [g for g in declared if g not in gate_ids]
+        if not gate_ids:
+            return []
+        merged_extra = dict(_GATE_EXTRA_BY_TARGET.get(target, {}))
+        merged_extra.update(extra or {})
+        ctx = RuleContext(
+            manifest=self.manifest,
+            cwd=Path(cwd or Path.cwd()),
+            session=session.to_dict(),
+            pipeline=self._pipeline_record(session.id),
+            extra=merged_extra,
+        )
+        return evaluate(gate_ids, ctx)
+
+    def _advance(
+        self,
+        session: Session,
+        target: str,
+        reason: str | None = None,
+        force: bool = False,
+        cwd: Path | None = None,
+        extra: dict | None = None,
+        judged: list[Evaluated] | None = None,
+    ) -> list[Evaluated]:
+        """Walk ``session`` to ``target`` through the machine's gates.
+
+        ``judged`` is the edge's verdicts, already asked through
+        :meth:`pending_gates` by a caller whose irreversible step came between
+        the asking and this advance (`teardown`); they stand in for a second
+        evaluation of the same list.
+        """
+        structural_override = False
+        if session.state != target:
+            try:
+                self.machine.require_edge(session.state, target)
+            except TransitionError:
+                if not force:
+                    raise
+                structural_override = True
+
+        # The machine's own gates, on EVERY route. They used to be read by
+        # exactly two hardcoded call sites (`session review`, `session
+        # merge`), so the generic `session transition` walked the lifecycle
+        # with zero gates and `session.named_after_isolating` was evaluated by
+        # no code path at all (AUD-05). ``PipelineDomain.advance`` has always
+        # done it this way; this is the same shape.
+        verdicts = (
+            judged if judged is not None
+            else self.pending_gates(session, target, cwd=cwd, extra=extra)
+        )
+        blocking = [v for v in verdicts if v.blocks]
+        if blocking and not force:
+            raise GateFailure(
+                f"{len(blocking)} gate(s) block {session.state!r} -> {target!r}",
+                verdicts=verdicts,
+            )
+
+        if force and (blocking or structural_override):
+            # Recorded, never silent: an override that leaves no trace is
+            # indistinguishable from the gate never having run.
+            session.overrides.append(
+                {
+                    "from": session.state,
+                    "to": target,
+                    "reason": reason or "forced",
+                    "structural": structural_override,
+                    "gates": [v.rule_id for v in blocking],
+                }
+            )
+        if target in self.machine.states_with_role(ABANDON_ROLE):
+            self._hold_landed_abandon(session, force, reason)
+        if target in _RELEASES_DOCS_LOCK:
+            self.release_docs_lock(session)
+        if session.migrate is not None and target in self.machine.states_with_role(
+            ABANDON_ROLE
+        ):
+            # An abandoned move is no move in progress: nothing is rolled back
+            # (ruling 8), and the marker stops naming it.
+            storemigrate.clear_marker(self.manifest.state_root, session.id)
+        self._note(session, reason, to=target)
+        session.state = target
+        self._save(session)
+        self._register(session)
+        return verdicts
+
+    def _note(
+        self,
+        session: Session,
+        reason: str | None,
+        extra: dict | None = None,
+        to: str | None = None,
+    ) -> float:
+        """One history row and one heartbeat. Returns the moment it stamped.
+
+        ADR-002 D3. The anchor is the heartbeat, which this domain already
+        stamped on every transition — so ``elapsed`` costs no new stored field
+        and no new clock time, and the entry carries a duration and a pair of
+        counters rather than a time.
+
+        ``to`` defaults to the state the session is already in, which is what a
+        **standstill** row is: something happened that the machine has no edge
+        for, and the record should say so where the durations are read from.
+        :meth:`resume` is the case. Routing that through
+        ``_advance(session, session.state)`` instead would evaluate the current
+        state's entry gates on something that is not an entry — from
+        ``isolated`` it would ask ``session.named_after_isolating`` about a
+        session that isolated days ago.
+
+        Two reasons a resume row is not decoration. It is where the usage
+        counter **changes identity**, and where the caller supplied the new
+        host id the row carries ``usage`` and ``usage_host`` read from it, so
+        the seam sits on a record that says it is a seam.
+
+        That is the bound case and not the only one. A ``session resume`` run
+        from a shell that exports no host identifier cannot see the new host —
+        the host adapter rebinds afterwards, from a hook — so this row's
+        readings come from the OLD counter, and the change of identity lands on
+        the NEXT transition instead. Nothing is mis-measured either way: this
+        row subtracts two readings of one counter, and the next one is declined
+        by ``core.stats._incommensurable``'s host check exactly as a rebind
+        should be. What is lost is the LABEL — the seam is detected on a row
+        that does not say why it is a seam. IDEA_007 is where that reading
+        would acquire an owner.
+
+        And it **absorbs the dormant interval**:
+        ``elapsed`` is wall time since the last stamp, so without a row here
+        the days between two host sessions land on the next real transition and
+        read as "this state took three days".
+
+        The moment is returned rather than re-read by the caller, because two
+        readings of a clock are two different times and a caller that also has
+        to record it must record the same one.
+        """
+        now = self.clock()
+        usage, usage_host = self._reading(session.host_session_id)
+        entry = {
+            "from": session.state,
+            "to": session.state if to is None else to,
+            "reason": reason,
+            "elapsed": max(0.0, now - session.heartbeat) if session.heartbeat else None,
+            "usage": usage,
+            "usage_host": usage_host,
+        }
+        entry.update(extra or {})
+        session.history.append(entry)
+        session.heartbeat = now
+        return now
+
+    def _save(self, session: Session) -> None:
+        self.store.ensure_root()
+        self.store.write(self._path(session.id), session.to_dict())
+
+    def _register(self, session: Session) -> None:
+        with self.store.locked(REGISTRY, default={"sessions": {}}) as registry:
+            registry.setdefault("sessions", {})[session.id] = {
+                "name": session.name,
+                "state": session.state,
+                "worktree": session.worktree,
+                "branch": session.branch,
+            }
+
+    def _deregister(self, session_id: str) -> None:
+        with self.store.locked(REGISTRY, default={"sessions": {}}) as registry:
+            registry.setdefault("sessions", {}).pop(session_id, None)
+
+
+def ambiguity_message(candidates: list[Session]) -> str:
+    """How to name a session when the working directory cannot.
+
+    The remedies are ordered by what actually works from inside an agent. A
+    session that has not isolated yet stands in the origin by definition, so
+    "run from inside the worktree" is advice it cannot take — it is listed
+    last, and the command that creates that worktree is spelled out instead.
+    """
+    lines = [
+        (
+            f"{len(candidates)} live sessions were registered here and none "
+            f"of their worktrees contains this directory:"
+        )
+    ]
+    for s in candidates:
+        where = s.worktree or "(not isolated yet)"
+        lines.append(f"  {s.id}  {s.name}  [{s.state}]  {where}")
+    lines.append("Name the one you mean:")
+    lines.append("  invariant <command> --id <id>")
+    lines.append(
+        "  (it names a session for an `invariant` command, and does not reach"
+    )
+    lines.append(
+        "   a HOOK, which runs as its own process. A hook identifies a session"
+    )
+    lines.append(
+        "   by the host session bound to it, or by the path an edit is aimed at.)"
+    )
+    lines.append("A session with no worktree gets one with:")
+    lines.append("  invariant session isolate --execute --id <id>")
+    return "\n".join(lines)
+
+
+def qualified_name(slug: str, session_id: str) -> str:
+    """A name that is an address.
+
+    The id is appended to the task slug, so a session can be named by the thing
+    a human would type. Uniqueness then costs nothing to enforce, because it is
+    **structural**: ids are unique, therefore ``slug-id`` is unique, and there
+    is no collision check here because there is no collision to check for. The
+    rejected alternative was to keep bare slugs and refuse a duplicate, which
+    refuses the case this feature exists for — two sessions on one long task,
+    started weeks apart.
+
+    Idempotent, and that is load-bearing rather than tidy: the name people copy
+    back out of a greeting already carries the id, so
+    ``session resume add-widget-abcd1234`` must not produce
+    ``add-widget-abcd1234-abcd1234``.
+
+    Not folded into :func:`_slug`. That one is a pure normaliser with no access
+    to an identifier, and it runs before the id is settled — including on the
+    ``uuid4`` fallback path, where the id does not exist yet.
+    """
+    return slug if slug.endswith(f"-{session_id}") else f"{slug}-{session_id}"
+
+
+#: The name rungs of :meth:`SessionDomain.resolve_name`'s ladder, narrowest
+#: first, as the numbers :func:`name_rank` answers with. They are *ordering*
+#: and nothing else — never stored, never printed — so a rung inserted between
+#: two of these is a renumbering and not a migration.
+RANK_FULL_NAME = 0
+RANK_BARE_SLUG = 1
+RANK_NAME_PREFIX = 2
+
+
+def name_rank(session_name: str, session_id: str, query: str) -> int | None:
+    """WHICH rung of the name ladder answers ``query``, or ``None`` for none.
+
+    The ordered form of :func:`name_matches`, and the one a caller holding
+    several matches needs. A predicate can only say *yes*, so a query that is
+    one record's bare slug and another's prefix comes back true twice with
+    nothing to choose between them — and choosing is the whole point of a
+    ladder whose rungs get narrower. The rank hands the precedence back.
+
+    It lives here rather than in the caller because it *is*
+    :meth:`SessionDomain.resolve_name`'s ordering, and that method reads it —
+    two spellings of one precedence is the duplication that drifts, and this
+    one would drift silently, since both spellings would keep answering
+    plausibly.
+
+    ``session_id`` is what makes the middle rung possible: a name carries its
+    id, so the bare slug is recovered by re-qualifying the query rather than by
+    guessing where the name ends.
+    """
+    if not query or not session_name:
+        return None
+    if session_name == query:
+        return RANK_FULL_NAME
+    if session_id and session_name == qualified_name(query, session_id):
+        return RANK_BARE_SLUG
+    if session_name.startswith(query):
+        return RANK_NAME_PREFIX
+    return None
+
+
+def name_matches(session_name: str, session_id: str, query: str) -> bool:
+    """Does a session answer to ``query`` by NAME?
+
+    :meth:`SessionDomain.resolve_name`'s ladder minus the parts that need the
+    live set: the full name, the bare slug, and a name prefix. Exported at
+    module level because a caller that has no session documents to scan still
+    has to ask — ``domains/stats`` joins on a name it read off a telemetry
+    record, and its records outlive the sessions that produced them.
+
+    It **flattens the ladder's precedence** — which is the honest shape for a
+    predicate, and the reason :func:`name_rank` exists beside it. A caller that
+    only has to decide whether one session answers to one query (``session
+    resume --id X <name>``, where the answer is already pinned) wants this one;
+    a caller choosing *between* matches wants the rank. Both are the same
+    answer, so they cannot disagree.
+    """
+    return name_rank(session_name, session_id, query) is not None
+
+
+def name_ambiguity_message(candidates: list[Session]) -> str:
+    """How to name a session when a partial name cannot.
+
+    A sibling of :func:`ambiguity_message` rather than a reuse of it: that one
+    is about worktrees and origins — where the caller is standing and which
+    sessions were registered above it — and none of that transfers to a query
+    that simply matched more than one name.
+
+    Every candidate is printed with its full name, because the full name is the
+    answer: a name carries its id, so it is unambiguous by construction and the
+    remedy is to copy one of these lines.
+    """
+    lines = [f"that names {len(candidates)} sessions:"]
+    for s in candidates:
+        lines.append(
+            f"  {s.name}  [{s.state}]  {plan_reader.progress(s.plan).describe()}"
+        )
+    lines.append(
+        "Name one in full. A session name carries its id, so the full name "
+        "cannot be ambiguous:"
+    )
+    if candidates:
+        lines.append(f"  invariant session resume {candidates[0].name}")
+    return "\n".join(lines)
+
+
+def host_slug(host_session_id: str | None) -> str:
+    """The short form of a host session identifier.
+
+    The LAST eight alphanumerics, which is the form this project's own tooling
+    has used for its worktree names since before the library existed. Matching
+    it means sessions created by that tooling resolve here with no migration.
+    Taking the first eight instead would silently match nothing.
+    """
+    if not host_session_id:
+        return ""
+    alphanumeric = "".join(c for c in str(host_session_id) if c.isalnum())
+    return alphanumeric[-8:] if alphanumeric else ""
+
+
+#: How long a derived handoff name may be, in words and in characters. Two
+#: bounds because they fail differently: a word cap keeps a long item from
+#: becoming a sentence, a character cap keeps a few long words from becoming
+#: an unreadable terminal title. The name is cut at a word, never mid-word,
+#: unless the first word alone is over the bound.
+HANDOFF_NAME_WORDS = 6
+HANDOFF_NAME_CHARS = 48
+
+#: A handoff note is a keyword line, not a document. The bound is far above
+#: any real one and far below what a shell argument or a prompt can carry.
+HANDOFF_NOTE_MAX = 2000
+
+#: The ``next:`` label, wherever it sits in the note. The look-behind keeps it
+#: from matching the tail of a longer word.
+_NEXT_ITEM = re.compile(r"(?<![A-Za-z0-9_])next\s*:\s*(?P<item>.+)", re.IGNORECASE)
+
+#: Where the next item ENDS: a list separator, an arrow, or the start of the
+#: next ``label:``. What follows an arrow is a routing hint ("-> bugprep"), not
+#: part of what the work is called.
+_NEXT_ITEM_END = re.compile(
+    r"\s*(?:·|•|\||;|->|→|=>|\s[A-Za-z][A-Za-z_-]*:\s)"
+)
+
+#: A work-item type prefix. ``BUG_X`` and ``IDEA_X`` name X; the type is noise
+#: in a session name, and keeping it costs a word of a six-word budget.
+_ITEM_TYPE_PREFIX = re.compile(r"\b(?:bug|idea)_", re.IGNORECASE)
+
+
+def handoff_token(session_id: str, at: float) -> str:
+    """The claim token naming one recorded note: ``<session-id>:<at>``.
+
+    ``at`` is written with ``repr``, which round-trips a float exactly, and the
+    record stores it through JSON, which does too — so the reader matches by
+    equality rather than by a tolerance that could name a neighbour.
+    """
+    return f"{session_id}:{float(at)!r}"
+
+
+def handoff_name(note: str, name: str | None = None) -> str | None:
+    """A short kebab-case name for the session a handoff starts, or ``None``.
+
+    ``name``, when given, wins and is only normalised — the operator chose it,
+    so it is not shortened, and one with no alphanumeric character in it is
+    refused the way a session name is.
+
+    Derived from the note's ``next:`` item, because that is what the next
+    session is FOR: ``next: P1.11 BUG_PERLIB_MINTED_KEY_CLOBBERED_AFTER_BINDING
+    critical -> bugprep`` names ``p1-11-perlib-minted-key-clobbered``.
+
+    Deterministic — a pure function of the note — so a dry run and the real
+    run name the same session, and a reader can predict the name from the
+    note. ``None`` when there is no ``next:`` item or it holds no word; the
+    caller refuses rather than inventing a name, because a session named after
+    nothing is one nobody can find again.
+    """
+    if name is not None:
+        return _slug(name)
+    match = _NEXT_ITEM.search(note or "")
+    if match is None:
+        return None
+    item = match.group("item")
+    end = _NEXT_ITEM_END.search(item)
+    if end is not None:
+        item = item[: end.start()]
+    words = re.findall(r"[a-z0-9]+", _ITEM_TYPE_PREFIX.sub("", item).lower())
+    if not words:
+        return None
+    kept = words[:HANDOFF_NAME_WORDS]
+    while len(kept) > 1 and len("-".join(kept)) > HANDOFF_NAME_CHARS:
+        kept.pop()
+    return "-".join(kept)[:HANDOFF_NAME_CHARS]
+
+
+def _branch_names(root: Path) -> list[str]:
+    proc = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _resolved(cwd: Path | str | None) -> Path:
+    """The caller's location, defaulting to where this process is standing.
+
+    Defaulted rather than required so that every existing caller keeps
+    working, and resolved here so that a symlinked path and the real one are
+    the same directory — which is what a host handing over ``/tmp`` on macOS
+    actually passes.
+    """
+    try:
+        return Path(cwd or Path.cwd()).resolve()
+    except OSError:
+        # The working directory has already been removed. Nothing can be
+        # inside a path that cannot be named, and refusing to tear down
+        # because the location is unreadable would block the cleanup that
+        # follows exactly this situation.
+        return Path("/")
+
+
+def _contains(root: Path, candidate: Path) -> bool:
+    try:
+        root = root.resolve()
+    except OSError:
+        return False
+    return candidate == root or root in candidate.parents
+
+
+def _slug(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(name).lower()).strip("-")
+    if not slug:
+        raise UsageError("a session name must contain at least one alphanumeric character")
+    return slug

@@ -1,0 +1,21 @@
+version: 1
+sections:
+  - id: app
+    title: Application
+rules:
+  - id: app.answer-is-stable
+    section: app
+    title: The answer is the same on every call
+    statement: answer() returns one value on every call, whatever else has run.
+    severity: blocker
+    phases: [review]
+    applies_to: ["*.py"]
+    check:
+      kind: judgement
+      evidence: either
+      scope: diff
+      not_applicable_when:
+        - id: no-executable-change
+          mechanical: {no_executable_change: true}
+        - id: constant-only
+          claim: The change only returns a constant.

@@ -1,0 +1,48 @@
+# The project's guidelines ruleset (ADR-012 D3), written by `invariant init`
+# with the two judgement rules the docs mandate carries (ADR-018 D8, D9).
+# The checklist and rules.rst are generated from it: edit this file, then run
+# `invariant guidelines render`.
+version: 1
+sections:
+  - id: docs
+    title: Design records
+rules:
+  - id: docs.items-carry-no-design
+    section: docs
+    title: Work items carry no design
+    statement: >
+      An item holds the problem, the evidence and the status; a ruling or
+      design in it is a decision need linked by id.
+    severity: warn
+    phases: [review]
+    applies_to:
+{{items}}
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+    rationale: >
+      To fix a finding, write the ruling or the design as a decision need
+      (invariant docs decision new) and leave only its id in the item.
+      items.decisions_linked checks mechanically that every id an item names
+      is a need the build holds; the prose around the ids is this rule's.
+  - id: docs.decisions-are-declared
+    section: docs
+    title: Every decision a session made is declared
+    statement: >
+      A decision a session makes is declared with `invariant session
+      decisions add`, as the id of its need or as a draft that becomes one,
+      before the session lands. A decision written only in an agent report,
+      a plan or a commit message is not recorded.
+    severity: warn
+    phases: [review]
+    applies_to: ["**"]
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+    rationale: >
+      To fix a finding, declare each undeclared decision (invariant session
+      decisions add) and write it as a need. docs.decisions_recorded holds
+      the declared ones at the landing; a decision nobody declared is
+      visible only to this review.

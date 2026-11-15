@@ -1,0 +1,104 @@
+description: >
+  The clean change, in a project whose guidelines ruleset does not validate:
+  one rule gives a severity the schema does not know. Every other gate passes,
+  and guidelines.ruleset_valid, injected at the landing because a ruleset is
+  configured, blocks the advance to committed. guidelines.generated_current,
+  injected beside it, cannot judge outputs against a ruleset that does not
+  load, and warns. So do guidelines.mechanical_clean, which cannot look
+  for findings either, and guidelines.verdicts_complete, which cannot judge
+  a verdict either; the standard profile holds both at warn.
+
+manifest:
+  version: 1
+  project: {name: conformance, ecosystems: [python]}
+  commands:
+    test: sh check.sh
+    test_one: sh check.sh {selector}
+    coverage: sh check.sh cov
+    coverage_one: sh check.sh cov {selector}
+  guidelines: {ruleset: docs/guidelines/ruleset.yaml}
+
+steps:
+  - {kind: cli, argv: [session, start, conformance]}
+  - {kind: cli, argv: [session, isolate, --execute]}
+  - kind: hook
+    in: worktree
+    event: session-start
+    payload: {session_id: host-conformance, source: startup, cwd: "{worktree}"}
+  - {kind: cli, in: worktree, argv: [pipeline, start, --task, answer]}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Read
+      tool_input: {file_path: "{worktree}/docs/architecture/overview.md"}
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: feature-architect}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      def answer():
+          return 42
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
+  - kind: hook
+    in: worktree
+    event: post-tool-use
+    payload:
+      session_id: host-conformance
+      cwd: "{worktree}"
+      tool_name: Task
+      tool_input: {subagent_type: compliance-reviewer}
+  - {kind: cli, in: worktree, argv: [pipeline, test]}
+  - {kind: cli, in: worktree, argv: [pipeline, coverage]}
+  - {kind: commit, in: worktree, message: answer is 42}
+  - {kind: cli, id: land, in: worktree, argv: [pipeline, advance, committed]}
+
+expect:
+  gates:
+    red: {docs.read_architecture: pass}
+    green: {test.new_test_fails: pass}
+    reviewing: {test.all_pass: pass}
+    committed:
+      test.all_pass: pass
+      coverage.meets_floor: pass
+      privacy.clean: pass
+      docs.updated: pass
+      docs.diagrams_current: pass
+      docs.builds_strict: skip
+      docs.needs_traceable: skip
+      docs.decisions_recorded: skip
+      items.decisions_linked: skip
+      docs.mandate_kept: pass
+      agents.design_agent_ran: pass
+      agents.review_agent_ran: pass
+      agents.rendered_current: warn
+      guidelines.ruleset_valid: block
+      guidelines.generated_current: warn
+      guidelines.mechanical_clean: warn
+      guidelines.verdicts_complete: warn
+  refusals:
+    land: [guidelines.ruleset_valid]

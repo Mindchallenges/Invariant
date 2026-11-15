@@ -1,0 +1,180 @@
+/* Archviz — generated from tokens.json */
+:root, [data-theme="light"] {
+  --canvas: #FFFFFF;
+  --surface: #FFFFFF;
+  --ink: #0F172A;
+  --ink-muted: #5B6474;
+  --line: #7A8699;
+  --grid: #E5E9F0;
+  --primary: #2563EB;
+  --primary-fill: #E9EFFD;
+  --primary-group: #F5F8FE;
+  --primary-ink: #2563EB;
+  --secondary: #0F9F8F;
+  --secondary-fill: #E7F5F4;
+  --secondary-group: #F4FBFA;
+  --secondary-ink: #0C7F72;
+  --tertiary: #7C4DDB;
+  --tertiary-fill: #F2EDFB;
+  --tertiary-group: #F9F7FD;
+  --tertiary-ink: #7C4DDB;
+  --accent: #E8710A;
+  --accent-fill: #FDF1E6;
+  --accent-group: #FEF9F4;
+  --accent-ink: #BA5A08;
+  --neutral: #5B6B82;
+  --neutral-fill: #EFF0F2;
+  --neutral-group: #F8F8F9;
+  --neutral-ink: #5B6B82;
+  --critical: #D93025;
+  --critical-fill: #FBEAE9;
+  --critical-group: #FDF6F5;
+  --critical-ink: #D93025;
+  --on-strong: #FFFFFF;
+  --focus-ring: #BA5A08;
+  --layer-context: var(--primary);
+  --layer-application: var(--primary);
+  --layer-component: var(--secondary);
+  --layer-design: var(--tertiary);
+  --layer-behaviour: var(--primary);
+  --layer-platform: var(--neutral);
+  --layer-infrastructure: var(--secondary);
+  --layer-hardware: var(--tertiary);
+  --layer-trace: var(--neutral);
+  --rel-flow: var(--primary);
+  --rel-connect: var(--tertiary);
+  --rel-trace: var(--neutral);
+  --rel-decide: var(--accent);
+  --rel-highlight: var(--accent);
+}
+[data-theme="dark"] {
+  --canvas: #0D1117;
+  --surface: #161B22;
+  --ink: #E6EDF3;
+  --ink-muted: #9AA6B2;
+  --line: #8B97A6;
+  --grid: #262D36;
+  --primary: #6692F1;
+  --primary-fill: #192B4E;
+  --primary-group: #0F192C;
+  --primary-ink: #6692F1;
+  --secondary: #57BCB1;
+  --secondary-fill: #14383A;
+  --secondary-group: #0D1F23;
+  --secondary-ink: #57BCB1;
+  --tertiary: #A382E6;
+  --tertiary-fill: #2C264B;
+  --tertiary-group: #18172B;
+  --tertiary-ink: #A382E6;
+  --accent: #EF9C54;
+  --accent-fill: #442E1D;
+  --accent-group: #231B16;
+  --accent-ink: #EF9C54;
+  --neutral: #8C97A8;
+  --neutral-fill: #252D37;
+  --neutral-group: #151A22;
+  --neutral-ink: #8C97A8;
+  --critical: #E46E66;
+  --critical-fill: #412023;
+  --critical-group: #211418;
+  --critical-ink: #E46E66;
+  --on-strong: #0D1117;
+  --focus-ring: #EF9C54;
+  --layer-context: var(--primary);
+  --layer-application: var(--primary);
+  --layer-component: var(--secondary);
+  --layer-design: var(--tertiary);
+  --layer-behaviour: var(--primary);
+  --layer-platform: var(--neutral);
+  --layer-infrastructure: var(--secondary);
+  --layer-hardware: var(--tertiary);
+  --layer-trace: var(--neutral);
+  --rel-flow: var(--primary);
+  --rel-connect: var(--tertiary);
+  --rel-trace: var(--neutral);
+  --rel-decide: var(--accent);
+  --rel-highlight: var(--accent);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --canvas: #0D1117;
+    --surface: #161B22;
+    --ink: #E6EDF3;
+    --ink-muted: #9AA6B2;
+    --line: #8B97A6;
+    --grid: #262D36;
+    --primary: #6692F1;
+    --primary-fill: #192B4E;
+    --primary-group: #0F192C;
+    --primary-ink: #6692F1;
+    --secondary: #57BCB1;
+    --secondary-fill: #14383A;
+    --secondary-group: #0D1F23;
+    --secondary-ink: #57BCB1;
+    --tertiary: #A382E6;
+    --tertiary-fill: #2C264B;
+    --tertiary-group: #18172B;
+    --tertiary-ink: #A382E6;
+    --accent: #EF9C54;
+    --accent-fill: #442E1D;
+    --accent-group: #231B16;
+    --accent-ink: #EF9C54;
+    --neutral: #8C97A8;
+    --neutral-fill: #252D37;
+    --neutral-group: #151A22;
+    --neutral-ink: #8C97A8;
+    --critical: #E46E66;
+    --critical-fill: #412023;
+    --critical-group: #211418;
+    --critical-ink: #E46E66;
+    --on-strong: #0D1117;
+    --focus-ring: #EF9C54;
+    --layer-context: var(--primary);
+    --layer-application: var(--primary);
+    --layer-component: var(--secondary);
+    --layer-design: var(--tertiary);
+    --layer-behaviour: var(--primary);
+    --layer-platform: var(--neutral);
+    --layer-infrastructure: var(--secondary);
+    --layer-hardware: var(--tertiary);
+    --layer-trace: var(--neutral);
+    --rel-flow: var(--primary);
+    --rel-connect: var(--tertiary);
+    --rel-trace: var(--neutral);
+    --rel-decide: var(--accent);
+    --rel-highlight: var(--accent);
+  }
+}
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --node-sep: 36px;
+  --rank-sep: 64px;
+  --seq-col: 170px;
+  --seq-row: 44px;
+  --radius-control: 4px;
+  --radius-node: 6px;
+  --radius-group: 8px;
+  --radius-zone: 18px;
+  --stroke-hairline: 1px;
+  --stroke-node: 1.5px;
+  --stroke-strong: 2.5px;
+  --node-min-width: 110px;
+  --node-min-height: 42px;
+  --iface-size: 16px;
+  --bus-height: 16px;
+  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", Consolas, ui-monospace, monospace;
+}
+.diagram-title { font-family: var(--font-sans); font-size: 15px; line-height: 20px; font-weight: 600; }
+.group-label { font-family: var(--font-sans); font-size: 12px; line-height: 16px; font-weight: 600; }
+.node-label { font-family: var(--font-sans); font-size: 12px; line-height: 15px; font-weight: 500; }
+.node-meta { font-family: var(--font-mono); font-size: 10px; line-height: 13px; font-weight: 400; }
+.edge-label { font-family: var(--font-sans); font-size: 10px; line-height: 13px; font-weight: 400; }
+.class-body { font-family: var(--font-mono); font-size: 10.5px; line-height: 14px; font-weight: 400; }
+.legend { font-family: var(--font-sans); font-size: 11.5px; line-height: 16px; font-weight: 400; }
+.caption { font-family: var(--font-sans); font-size: 13px; line-height: 18px; font-weight: 400; }
+.id { font-family: var(--font-mono); font-size: 11px; line-height: 14px; font-weight: 500; }

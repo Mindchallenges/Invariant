@@ -1,0 +1,24 @@
+<!-- @dsCard group="Elements" height=190 subtitle="Lollipop = provided, socket (tee) = required, square = hardware port" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Interface — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var s = "";
+s += A.node({type: "comp", label: "Ring buffer", x: 20, y: 40, w: 140});
+s += A.node({type: "comp", label: "Journal source", x: 400, y: 40, w: 140});
+s += A.relation({link: "provides", points: [[160, 61], [262, 61]]});
+s += A.relation({link: "requires", points: [[400, 61], [282, 61]]});
+s += A.node({type: "iface", label: "ILogSink", tech: "in-process", x: 264, y: 53});
+s += '<text class="av-cap" x="211" y="50" text-anchor="middle">provides</text><text class="av-cap" x="341" y="50" text-anchor="middle">requires</text>';
+s += A.node({type: "hw", label: "Zone controller", x: 600, y: 40, w: 150});
+s += A.node({type: "iface", kind: "port", label: "CAN0", tech: "CAN-FD", x: 667, y: 115});
+s += A.relation({link: "provides", points: [[675, 82], [675, 115]]});
+document.getElementById("root").innerHTML = A.svg(780, 170, s, "Interfaces");
+
+</script>
+</body>
+</html>

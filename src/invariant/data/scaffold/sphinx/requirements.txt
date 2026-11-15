@@ -1,0 +1,38 @@
+# The docs environment's pins (ADR-018 D4): every package with ==, so a new
+# release never moves the strict build's warnings under a change that did not
+# touch the docs. invariant's suite builds its starter strictly in exactly this
+# set. sphinx-needs 9.2 is the release whose keys conf.py uses; Sphinx 9.1 runs
+# on Python 3.12 or later. Change a pin here, then run 'invariant docs venv'.
+alabaster==1.0.0
+babel==2.18.0
+certifi==2026.10.23
+charset-normalizer==3.5.2
+docutils==0.22.4
+idna==3.20
+imagesize==2.0.1
+jinja2==3.1.6
+jsonschema-rs==0.58.6
+markupsafe==3.0.4
+minijinja==2.24.0
+packaging==26.3
+pygments==2.21.0
+pyyaml==6.0.3
+requests==2.34.2
+requests-file==3.0.1
+roman-numerals==4.1.0
+snowballstemmer==3.1.1
+sphinx==9.1.1
+sphinx-data-viewer==0.1.5
+sphinx-needs==9.2.0
+sphinxcontrib-applehelp==2.0.0
+sphinxcontrib-devhelp==2.0.0
+sphinxcontrib-htmlhelp==2.1.0
+sphinxcontrib-jquery==4.1
+sphinxcontrib-jsmath==2.0.0
+sphinxcontrib-mermaid==2.1.1
+sphinxcontrib-qthelp==2.0.0
+sphinxcontrib-serializinghtml==2.0.0
+typing-extensions==4.16.0
+ub-needs-exchange==1.1.0
+ub-project==1.2.0
+urllib3==2.8.0

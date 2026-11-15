@@ -1,0 +1,7616 @@
+import subprocess
+import time
+from pathlib import Path
+from typing import ClassVar
+
+import pytest
+
+from invariant.core.manifest import Level
+from invariant.core.rules import (
+    DOCTOR_ROW_RULES,
+    NORMALISED_PAYLOAD_KEYS,
+    RuleContext,
+    Verdict,
+    _coverage_roots,
+    _relative_to_any,
+    _same_file,
+    all_rules,
+    evaluate,
+    evaluate_event,
+    rules_for_event,
+)
+
+
+def write_manifest(root: Path, body: dict) -> Path:
+    import yaml
+
+    from invariant.core.manifest import MANIFEST_RELPATH
+
+    path = root / MANIFEST_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(body), encoding="utf-8")
+    return path
+
+
+def run(args, cwd):
+    subprocess.run(args, cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
+def manifest_with_unloadable_session_machine(tmp_path):
+    """A manifest whose session machine cannot load, via the sanctioned route.
+
+    `methodology.extra_machines` is how a project shadows a shipped machine
+    (`core/machines.find_machine_file` checks it before falling back to the
+    shipped file), so a directory holding a malformed `session.yaml` reaches
+    the same `_terminal_states(...) is None` branch the pipeline-unloadable
+    tests already exercise for `methodology.pipeline` — without touching a
+    single byte of shipped package data.
+    """
+    from invariant.core.manifest import Manifest
+
+    broken = tmp_path / "broken_machines"
+    broken.mkdir()
+    (broken / "session.yaml").write_text("not: [valid, yaml:", encoding="utf-8")
+    write_manifest(
+        tmp_path,
+        {
+            "version": 1,
+            "project": {"name": "demo"},
+            "methodology": {"extra_machines": [str(broken)]},
+        },
+    )
+    return Manifest.locate(tmp_path)
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A real repository with a main checkout and one linked worktree."""
+    main = tmp_path / "main"
+    main.mkdir()
+    run(["git", "init", "-q", "-b", "master"], main)
+    run(["git", "config", "user.email", "test@example.invalid"], main)
+    run(["git", "config", "user.name", "Test"], main)
+    write_manifest(main, {"version": 1, "project": {"name": "demo"}})
+    (main / "docs" / "architecture").mkdir(parents=True)
+    (main / "docs" / "architecture" / "overview.md").write_text(
+        "# Overview\n\n```mermaid\ngraph TD\n  A-->B\n```\n", encoding="utf-8"
+    )
+    run(["git", "add", "-A"], main)
+    run(["git", "commit", "-qm", "init"], main)
+
+    wt = tmp_path / "wt"
+    run(["git", "worktree", "add", "-q", str(wt), "-b", "session/x"], main)
+    return main, wt
+
+
+@pytest.fixture
+def ctx_factory(repo):
+    main, wt = repo
+    from invariant.core.manifest import Manifest
+
+    def build(cwd=None, session=None, pipeline=None, payload=None, extra=None):
+        cwd = cwd or main
+        return RuleContext(
+            manifest=Manifest.locate(main),
+            cwd=Path(cwd),
+            session=session,
+            pipeline=pipeline,
+            payload=payload or {},
+            extra=extra or {},
+        )
+
+    build.main = main
+    build.wt = wt
+    return build
+
+
+def edit_payload(path, content="hello"):
+    return {"tool_name": "Write", "tool_input": {"file_path": str(path), "content": content}}
+
+
+def bash_payload(command):
+    return {"tool_name": "Bash", "tool_input": {"command": command}}
+
+
+def only(results):
+    assert len(results) == 1
+    return results[0]
+
+
+# -- registry ----------------------------------------------------------
+
+
+class TestRegistry:
+    def test_every_rule_has_a_summary(self):
+        for spec in all_rules():
+            assert spec.summary.strip()
+
+    def test_every_profile_rule_id_is_registered(self):
+        """A profile naming a rule that does not exist would pass forever."""
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        registered = {spec.id for spec in all_rules()}
+        for profile in (DATA_DIR / "profiles").glob("*.yaml"):
+            raw = yaml.safe_load(profile.read_text(encoding="utf-8"))
+            for rule_id in raw.get("rules", {}):
+                assert rule_id in registered, f"{profile.name} names unknown {rule_id}"
+
+    def test_every_registered_rule_is_graded_by_every_profile(self):
+        """The other direction, which is the one that fails silently.
+
+        A profile naming an unknown rule is caught above. A rule no profile
+        names is not: `rule_level` answers `warn` for anything absent, so a
+        new rule ships advisory in every profile — including `strict`, whose
+        whole promise is that everything provable is enforced — and nothing
+        says so. The omission is invisible precisely where it matters most.
+        """
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        registered = {spec.id for spec in all_rules()}
+        for profile in (DATA_DIR / "profiles").glob("*.yaml"):
+            raw = yaml.safe_load(profile.read_text(encoding="utf-8"))
+            graded = set(raw.get("rules", {}))
+            assert registered <= graded, (
+                f"{profile.name} grades no level for "
+                f"{sorted(registered - graded)}; absent means 'warn' silently"
+            )
+
+    def test_every_registered_rule_is_reachable(self):
+        """A graded rule that nothing ever evaluates reports a level it has no
+        way to apply.
+
+        Four routes reach a rule: an event binding, a gate naming it in some
+        machine, an injection (by role, or beside a scheduled gate by id), or
+        a doctor row whose level decides the row (``DOCTOR_ROW_RULES``,
+        ADR-016 D3). A rule with none is dead code wearing an enforcement
+        level — `invariant rules list` shows it as `block`, the profiles argue
+        about it, and it never once runs. That reads as a control being
+        present, which is the failure mode this library exists to remove.
+        """
+        from invariant.core.machines import (
+            AGENT_CURRENCY_GATES,
+            AGENT_ROLE_GATES,
+            BASELINE_GATES,
+            DOCS_FIRST_GATES,
+            DOCS_ONBOARDING_GATES,
+            FRESHNESS_GATE,
+            GUIDELINES_GATES,
+            STORE_LOCK_GATES,
+            load_machine,
+            shipped_ids,
+        )
+
+        reachable = {
+            gate
+            for injected in (
+                DOCS_FIRST_GATES,
+                DOCS_ONBOARDING_GATES,
+                *AGENT_ROLE_GATES.values(),
+                GUIDELINES_GATES,
+                BASELINE_GATES,
+                AGENT_CURRENCY_GATES,
+                STORE_LOCK_GATES,
+            )
+            for spec in injected.values()
+            for gates in spec.values()
+            for gate in gates
+        }
+        reachable.add(FRESHNESS_GATE)
+        reachable |= DOCTOR_ROW_RULES
+        for machine_id in shipped_ids():
+            for state in load_machine(machine_id).states.values():
+                reachable.update(state.entry_gates)
+                reachable.update(state.exit_gates)
+
+        orphans = [
+            spec.id for spec in all_rules() if not spec.events and spec.id not in reachable
+        ]
+        assert not orphans, f"registered, graded, and never evaluated: {sorted(orphans)}"
+
+    def test_unknown_rule_id_fails_loudly(self, ctx_factory):
+        result = only(evaluate(["no.such.rule"], ctx_factory()))
+        assert not result.verdict.ok
+        assert "no rule registered" in result.verdict.message
+
+    def test_a_raising_rule_reports_itself_as_the_bug(self, ctx_factory, monkeypatch):
+        from invariant.core import rules as rules_mod
+
+        spec = rules_mod.get_rule("privacy.clean")
+
+        def boom(_ctx):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setitem(
+            rules_mod._REGISTRY, "privacy.clean", type(spec)(spec.id, spec.summary, spec.events, boom)
+        )
+        result = only(evaluate(["privacy.clean"], ctx_factory()))
+        assert not result.verdict.ok
+        assert "bug in the rule" in result.verdict.detail
+
+    def test_off_short_circuits_without_running_the_rule(self, ctx_factory, tmp_path):
+        write_manifest(
+            ctx_factory.main, {"enforcement": {"rules": {"privacy.clean": "off"}}}
+        )
+        ctx = ctx_factory(payload=edit_payload(ctx_factory.main / "docs/architecture/x.md",
+                                               "mail a@b.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert result.level is Level.OFF and result.verdict.skipped
+
+    def test_events_bind_rules(self):
+        ids = {spec.id for spec in rules_for_event("pre-tool-use")}
+        assert "session.no_edit_in_main_checkout" in ids
+        assert "coverage.meets_floor" not in ids
+
+
+class TestEvaluatedSemantics:
+    def test_skipped_is_not_a_pass(self):
+        assert Verdict.na().ok and Verdict.na().skipped
+
+    def test_a_skipped_verdict_never_blocks(self, ctx_factory):
+        ctx = ctx_factory(payload=bash_payload("ls"))
+        for result in evaluate_event("pre-tool-use", ctx):
+            if result.verdict.skipped:
+                assert not result.blocks and not result.warns
+
+
+# -- session rules -----------------------------------------------------
+
+
+class TestIsolationRules:
+    def test_edit_in_main_checkout_is_refused(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=edit_payload(ctx_factory.main / "src.py"))
+        result = only(evaluate(["session.no_edit_in_main_checkout"], ctx))
+        assert not result.verdict.ok
+        assert result.level is Level.BLOCK and result.blocks
+
+    def test_edit_in_a_linked_worktree_is_allowed(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.wt, payload=edit_payload(ctx_factory.wt / "src.py"))
+        result = only(evaluate(["session.no_edit_in_main_checkout"], ctx))
+        assert result.verdict.ok
+
+    def test_exempt_paths_are_allowed_in_the_main_checkout(self, ctx_factory):
+        # Config and knowledge files are data every session edits; routing them
+        # through a branch produces conflicts with no review value.
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.main / ".claude" / "invariant.yaml"),
+        )
+        result = only(evaluate(["session.no_edit_in_main_checkout"], ctx))
+        assert result.verdict.skipped
+
+    def test_non_edit_tools_are_not_checked(self, ctx_factory):
+        ctx = ctx_factory(payload=bash_payload("ls"))
+        assert only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.skipped
+
+    def test_no_session_blocks_the_edit(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.wt, payload=edit_payload(ctx_factory.wt / "a.py"))
+        result = only(evaluate(["session.isolated_before_edit"], ctx))
+        assert not result.verdict.ok and "not attributable" in result.verdict.message
+
+    def test_registered_but_not_isolated_blocks(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            session={"state": "registered"},
+            payload=edit_payload(ctx_factory.wt / "a.py"),
+        )
+        result = only(evaluate(["session.isolated_before_edit"], ctx))
+        assert "not isolated" in result.verdict.message
+
+    def test_isolated_session_passes(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            session={"state": "working"},
+            payload=edit_payload(ctx_factory.wt / "a.py"),
+        )
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.ok
+
+
+class TestPushBarrier:
+    """The barrier only exists where publishing is a session step."""
+
+    @pytest.fixture(autouse=True)
+    def publishing_on(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+
+    def test_second_push_is_refused(self, ctx_factory):
+        ctx = ctx_factory(
+            session={"state": "merged", "push_count": 1},
+            payload=bash_payload("git push origin master"),
+        )
+        result = only(evaluate(["session.push_barrier"], ctx))
+        assert "already pushed" in result.verdict.message
+
+    def test_push_before_merge_is_refused(self, ctx_factory):
+        ctx = ctx_factory(
+            session={"state": "working", "push_count": 0},
+            payload=bash_payload("git push"),
+        )
+        assert "barrier opens after the merge" in only(
+            evaluate(["session.push_barrier"], ctx)
+        ).verdict.message
+
+    def test_first_push_after_merge_passes(self, ctx_factory):
+        ctx = ctx_factory(
+            session={"state": "merged", "push_count": 0},
+            payload=bash_payload("git push"),
+        )
+        assert only(evaluate(["session.push_barrier"], ctx)).verdict.ok
+
+    def test_a_non_push_command_is_skipped(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "working"}, payload=bash_payload("git status"))
+        assert only(evaluate(["session.push_barrier"], ctx)).verdict.skipped
+
+
+class TestMergeTarget:
+    def test_merging_from_inside_the_worktree_is_refused(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.wt, payload=bash_payload("git merge --ff-only session/x"))
+        result = only(evaluate(["session.ff_merge_target"], ctx))
+        assert not result.verdict.ok
+        assert "into itself" in result.verdict.detail
+
+    def test_merging_from_the_main_checkout_passes(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=bash_payload("git merge --ff-only session/x"))
+        assert only(evaluate(["session.ff_merge_target"], ctx)).verdict.ok
+
+
+class TestAGitFailureIsNotAnAnswer:
+    """AUD-07: two helpers reported "could not ask git" as a clean pass.
+
+    `staged_files` answered `[]` — read by its caller as "0 staged file(s),
+    all declared" — and `in_linked_worktree` answered `False` — read as
+    "running from the main checkout" — on an unreadable repository. The
+    codebase's own convention (`branch_files`, `unpushed_files`,
+    `deleted_files`) is that an unanswerable question returns `None` and no
+    caller may relax on it.
+    """
+
+    def test_staged_files_abstains_outside_a_repository(self, tmp_path):
+        from invariant.core import git
+
+        assert git.staged_files(tmp_path) is None
+
+    def test_in_linked_worktree_abstains_outside_a_repository(self, tmp_path):
+        from invariant.core import git
+
+        assert git.in_linked_worktree(tmp_path) is None
+
+    def test_both_still_answer_inside_a_repository(self, ctx_factory):
+        from invariant.core import git
+
+        assert git.staged_files(ctx_factory.main) == []
+        assert git.in_linked_worktree(ctx_factory.main) is False
+        assert git.in_linked_worktree(ctx_factory.wt) is True
+
+
+class TestReadingAStagedBlob:
+    """What ``privacy.clean`` screens at the commit boundary is read through
+    these two, so each of their abstentions is a fail-closed for that gate."""
+
+    def test_the_staged_bytes_come_back_undecoded_and_unstripped(self, ctx_factory):
+        """Unstripped matters: stripping a leading blank line would move every
+        line number a scan of the result reports."""
+        from invariant.core import git
+
+        main = ctx_factory.main
+        (main / "docs" / "architecture" / "x.md").write_text(
+            "\n\nmail a.person@example.com\n", encoding="utf-8"
+        )
+        run(["git", "add", "docs/architecture/x.md"], main)
+        assert git.staged_blob(main, "docs/architecture/x.md") == (
+            b"\n\nmail a.person@example.com\n"
+        )
+
+    def test_a_path_that_is_not_staged_has_no_blob(self, ctx_factory):
+        from invariant.core import git
+
+        assert git.staged_blob(ctx_factory.main, "docs/architecture/absent.md") is None
+
+    def test_a_directory_git_cannot_be_run_in_abstains(self, tmp_path):
+        from invariant.core import git
+
+        assert git.staged_blob(tmp_path / "nowhere", "docs/architecture/x.md") is None
+
+    def test_a_deletion_can_be_left_out_of_the_staged_list(self, ctx_factory):
+        """A deleted path has no staged content, so a caller that goes on to
+        read each path must be able to exclude it."""
+        from invariant.core import git
+
+        main = ctx_factory.main
+        run(["git", "rm", "-q", "docs/architecture/overview.md"], main)
+        listed = [str(p) for p in git.staged_files(main)]
+        kept = [str(p) for p in git.staged_files(main, exclude_deleted=True)]
+        assert "docs/architecture/overview.md" in listed
+        assert kept == []
+
+    def test_output_that_is_not_text_abstains_rather_than_raising(self, ctx_factory):
+        """``text=True`` decodes inside ``subprocess.run``, so a blob that is
+        not UTF-8 used to raise straight out of ``file_at`` — which documents
+        itself as answering ``None`` for exactly that case."""
+        from invariant.core import git
+
+        main = ctx_factory.main
+        (main / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00")
+        run(["git", "add", "logo.png"], main)
+        run(["git", "commit", "-qm", "binary"], main)
+        assert git.file_at(main, "HEAD", "logo.png") is None
+
+    def test_an_unreadable_staged_set_fails_the_file_gate(self, ctx_factory, tmp_path):
+        norepo = tmp_path / "norepo"
+        norepo.mkdir()
+        ctx = ctx_factory(
+            cwd=norepo,
+            session={"state": "working", "files": ["mine.py"]},
+            payload=bash_payload("git commit -m x"),
+        )
+        result = only(evaluate(["session.own_file_set_only"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "staged" in result.verdict.message
+
+    def test_an_unanswerable_worktree_question_fails_the_merge_gate(
+        self, ctx_factory, tmp_path
+    ):
+        """The gate guarding the self-merge whose failure mode is 'both
+        commands exit zero' must not pass on 'git itself could not answer'."""
+        norepo = tmp_path / "norepo2"
+        norepo.mkdir()
+        ctx = ctx_factory(cwd=norepo, extra={"merging": True})
+        result = only(evaluate(["session.ff_merge_target"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_the_bash_merge_path_fails_the_same_way(self, ctx_factory, tmp_path):
+        norepo = tmp_path / "norepo3"
+        norepo.mkdir()
+        ctx = ctx_factory(
+            cwd=norepo, payload=bash_payload("git merge --ff-only session/x")
+        )
+        result = only(evaluate(["session.ff_merge_target"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+
+class TestFileSet:
+    def test_stray_staged_file_is_reported(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "mine.py").write_text("x", encoding="utf-8")
+        (wt / "theirs.py").write_text("y", encoding="utf-8")
+        run(["git", "add", "mine.py", "theirs.py"], wt)
+        ctx = ctx_factory(
+            cwd=wt,
+            session={"state": "working", "files": ["mine.py"]},
+            payload=bash_payload("git commit -m x"),
+        )
+        result = only(evaluate(["session.own_file_set_only"], ctx))
+        assert "theirs.py" in result.verdict.detail
+
+    def test_no_declared_set_means_no_opinion(self, ctx_factory):
+        ctx = ctx_factory(
+            session={"state": "working", "files": []},
+            payload=bash_payload("git commit -m x"),
+        )
+        assert only(evaluate(["session.own_file_set_only"], ctx)).verdict.skipped
+
+
+# -- docs rules --------------------------------------------------------
+
+
+class TestDocsRules:
+    def test_unread_docs_fail_the_gate(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"docs_read": []}})
+        result = only(evaluate(["docs.read_architecture"], ctx))
+        assert "no architecture doc has been read" in result.verdict.message
+
+    def test_reading_a_doc_satisfies_the_gate(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "overview.md"
+        ctx = ctx_factory(pipeline={"evidence": {"docs_read": [str(doc)]}})
+        assert only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
+    def test_reading_an_unrelated_file_does_not(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"docs_read": [str(ctx_factory.main / "README.md")]}})
+        assert not only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
+    def test_BUG_046_a_worktree_doc_read_satisfies_the_gate_from_the_main_checkout(
+        self, ctx_factory
+    ):
+        """The half of BUG_046 that closes the gate against every legal move.
+
+        The recording step only ever stores the WORKTREE spelling while
+        sessions are live — a main-checkout path resolves by guess and is
+        dropped by the `proven` guard, which is BUG_028's rule and stays. So
+        when the CLI runs from the main checkout, a docs root taken from the
+        tree the CLI is standing in accepts none of the paths the recorder is
+        able to write, and no read the agent can perform satisfies the gate.
+        """
+        doc = ctx_factory.wt / "docs" / "architecture" / "overview.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, pipeline={"evidence": {"docs_read": [str(doc)]}}
+        )
+        assert only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
+    def test_BUG_046_a_main_checkout_doc_read_satisfies_the_gate_from_a_worktree(
+        self, ctx_factory
+    ):
+        """The mirror image, which is how this presented as two contradictory
+        bugs: the same read is accepted or refused purely on where the CLI was
+        invoked from. One document, two spellings, one verdict owed."""
+        doc = ctx_factory.main / "docs" / "architecture" / "overview.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt, pipeline={"evidence": {"docs_read": [str(doc)]}}
+        )
+        assert only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
+    def test_BUG_046_a_doc_in_a_different_repository_still_does_not_count(
+        self, ctx_factory, tmp_path
+    ):
+        """The control on the widening above, and the reason it is narrow.
+
+        Accepting any tree OF THIS REPOSITORY is the fix; accepting any path
+        that happens to end in `docs/architecture/…` would be a different rule
+        with no evidence behind it. A neighbouring checkout is not this
+        project's docs however the path is spelled.
+        """
+        foreign = tmp_path / "elsewhere" / "docs" / "architecture" / "overview.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("# Not ours\n", encoding="utf-8")
+        ctx = ctx_factory(pipeline={"evidence": {"docs_read": [str(foreign)]}})
+        assert not only(evaluate(["docs.read_architecture"], ctx)).verdict.ok
+
+    def test_source_change_without_a_doc_change_fails(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("code", encoding="utf-8")
+        run(["git", "add", "app.py"], wt)
+        ctx = ctx_factory(cwd=wt)
+        result = only(evaluate(["docs.updated"], ctx))
+        assert "source changed but no architecture doc did" in result.verdict.message
+        assert any("--force" in fix for fix in result.verdict.fixes)
+
+    def test_source_change_with_a_doc_change_passes(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("code", encoding="utf-8")
+        (wt / "docs" / "architecture" / "overview.md").write_text(
+            "# Overview\n\n```mermaid\ngraph TD\n  A-->C\n```\n", encoding="utf-8"
+        )
+        run(["git", "add", "-A"], wt)
+        assert only(evaluate(["docs.updated"], ctx_factory(cwd=wt))).verdict.ok
+
+    def test_docs_only_change_passes(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "overview.md").write_text("# New\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        assert only(evaluate(["docs.updated"], ctx_factory(cwd=wt))).verdict.ok
+
+    def test_missing_docs_directory_is_a_failure_not_a_skip(self, ctx_factory, tmp_path):
+        # Docs-first is core policy: an absent docs tree is told to exist.
+        import shutil
+
+        shutil.rmtree(ctx_factory.main / "docs")
+        result = only(evaluate(["docs.read_architecture"], ctx_factory()))
+        assert not result.verdict.ok and "no architecture docs" in result.verdict.message
+
+    def test_changed_doc_without_a_diagram_is_reported(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "overview.md").write_text("# Prose only\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        result = only(evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt)))
+        assert "no diagram" in result.verdict.message
+
+    def test_changed_doc_with_a_diagram_passes(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "overview.md").write_text(
+            "# X\n\n```mermaid\ngraph TD\n  A-->D\n```\n", encoding="utf-8"
+        )
+        run(["git", "add", "-A"], wt)
+        assert only(evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt))).verdict.ok
+
+
+class TestDocsGatesOnACommittedTree:
+    """Repro for BUG_012 — see docs/backlog/BUG_012.md.
+
+    Every test above dirties the working tree or the index, which is the state
+    work is in *while it happens*. `docs.updated` is an exit gate on the review
+    state (`docs/architecture/state_model.md` line 43), so it runs at the end of
+    a phase, when the work is committed by construction and `git diff` reports
+    nothing. Both rules read `git.changed_files` alone and bail on the empty
+    set, so the gate the engine cannot be opted out of returns N/A — which is
+    indistinguishable from a pass in the gate listing.
+
+    `coverage.meets_floor` already survives this state by unioning three
+    sources; `TestCoverageRule.test_committed_work_is_still_in_scope` is the
+    same fixture shape asserted against the rule that gets it right.
+    """
+
+    def commit_source_only(self, wt):
+        """A source change that lives ONLY in the branch's commits."""
+        (wt / "app.py").write_text("def go():\n    return 1\n", encoding="utf-8")
+        run(["git", "add", "app.py"], wt)
+        run(["git", "commit", "-qm", "add a module and no doc"], wt)
+
+    def test_the_fixture_leaves_a_genuinely_committed_tree(self, ctx_factory):
+        """Guard for the two repros below, and deliberately not xfail.
+
+        A strict xfail counts a failure in setup as the expected failure, so a
+        repro that quietly dirtied the tree would report red for the wrong
+        reason and prove nothing. This asserts the precondition separately: the
+        working tree and index are empty, and the change is visible only
+        through the branch's commits.
+        """
+        from invariant.core import git
+
+        wt = ctx_factory.wt
+        self.commit_source_only(wt)
+        assert git.changed_files(wt) == []
+        assert git.branch_files(wt, "master") == [Path("app.py")]
+
+    def test_docs_updated_reads_a_source_only_commit(self, ctx_factory):
+        """The blocking gate must judge committed work, not decline to look."""
+        wt = ctx_factory.wt
+        self.commit_source_only(wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert not result.verdict.skipped, result.verdict.message
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_diagrams_current_reads_a_committed_doc_change(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "overview.md").write_text(
+            "# Prose only\n", encoding="utf-8"
+        )
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "drop the diagram"], wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt, session=session))
+        )
+        assert not result.verdict.skipped, result.verdict.message
+        assert "no diagram" in result.verdict.message
+
+    def test_docs_updated_reads_the_declared_set_when_no_base_is_configured(
+        self, ctx_factory
+    ):
+        """The declared file set is not belt-and-braces; it is the last carrier.
+
+        `git.branch_files` returns `None` on an empty base before it attempts a
+        ref at all (`src/invariant/core/git.py:137-138`), and the two readers of
+        that field disagree about the fallback — `rules.py:586` reads `master`,
+        `rules.py:1013` reads `""`. With the base absent and the work committed,
+        the session's declared set is the only thing still holding an answer, so
+        a two-source repair leaves this red.
+        """
+        from invariant.core import git
+
+        wt = ctx_factory.wt
+        self.commit_source_only(wt)
+        session = {"worktree": str(wt), "base": "", "files": ["app.py"]}
+        assert git.branch_files(wt, "") is None
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert not result.verdict.skipped, result.verdict.message
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+
+class TestDocsUpdatedAsksWhetherSourceChanged:
+    """Repro for BUG_064 half (b) — `invariant item show BUG_064`.
+
+    `docs.updated` answered "is it source" with "is it outside `paths.docs`",
+    so every path not under the architecture docs read as source: a backlog
+    entry, a release plan, a LICENSE. `coverage.meets_floor` already asks the
+    same question with a better answer — the built-in unmeasured suffixes plus
+    `methodology.gates.non_source` — and BUG_012 unified the "what changed"
+    half of it while leaving "is it source" with two answers.
+    """
+
+    def stage(self, wt, *paths):
+        for rel in paths:
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (wt / rel).write_text("text\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+
+    def test_prose_outside_the_architecture_docs_is_not_source(self, ctx_factory):
+        """The observed case: a backlog rescore touched two `.rst` records."""
+        self.stage(ctx_factory.wt, "docs/backlog.rst", "docs/release_plan.rst")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+
+    def test_a_license_file_is_not_source(self, ctx_factory):
+        """The 4af6e15 case: repository metadata with no suffix at all."""
+        self.stage(ctx_factory.wt, "LICENSE")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+
+    def test_a_declared_non_source_path_is_not_source(self, ctx_factory):
+        """One project assertion, honoured by both gates that ask the question."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"non_source": ["design/**"]}},
+            },
+        )
+        self.stage(ctx_factory.wt, "design/src/kit.jsx")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+
+    @pytest.mark.parametrize(
+        "path",
+        ["src/pkg/data/machines/tdd.yaml", "openapi.json", "pyproject.toml", "web/app.html"],
+    )
+    def test_configuration_alone_is_still_source(self, ctx_factory, path):
+        """The control on sharing a classifier with the coverage gate.
+
+        "No reporter has a row for it" is the coverage question; this gate asks
+        whether a diagram could now be wrong. A machine YAML, an API contract or
+        an entry-point table changes structure with no code beside it.
+        """
+        self.stage(ctx_factory.wt, path)
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_a_declared_non_source_path_is_named_in_the_verdict(self, ctx_factory):
+        """A project's assertion is never spent silently, here as in coverage."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"non_source": ["design/**"]}},
+            },
+        )
+        self.stage(ctx_factory.wt, "design/src/kit.jsx")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert "design/src/kit.jsx" in (verdict.detail or "")
+        assert "design/**" in (verdict.detail or "")
+
+    def test_a_worktree_path_is_classified_from_the_main_checkout(self, ctx_factory):
+        """`session merge` asks from the main checkout; a declared path spelled
+        against the worktree must still meet the project's globs."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"non_source": ["design/**"]}},
+            },
+        )
+        # Committed, or the manifest itself is a changed configuration file in
+        # the checkout the gate is asked from — which is source to this gate.
+        run(["git", "add", "-A"], ctx_factory.main)
+        run(["git", "commit", "-qm", "declare the bundle"], ctx_factory.main)
+        self.stage(ctx_factory.wt, "design/src/kit.jsx")
+        run(["git", "commit", "-qm", "bundle"], ctx_factory.wt)
+        declared = str(ctx_factory.wt / "design" / "src" / "kit.jsx")
+        session = {"worktree": str(ctx_factory.wt), "base": "", "files": [declared]}
+        verdict = only(
+            evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.main, session=session))
+        ).verdict
+        assert verdict.ok, verdict.message
+
+    def declare(self, ctx_factory, ecosystems):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo", "ecosystems": ecosystems}},
+        )
+
+    def test_a_held_out_test_file_is_named_in_the_verdict(self, ctx_factory):
+        """BUG_102: test code is held out on the adapter's claim, never silently."""
+        self.declare(ctx_factory, ["python"])
+        self.stage(ctx_factory.wt, "tests/test_uploader.py")
+        verdict = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt))).verdict
+        assert verdict.ok, verdict.message
+        assert "tests/test_uploader.py (a test file" in (verdict.detail or "")
+
+    def test_a_test_file_with_no_declared_ecosystem_is_still_source(self, ctx_factory):
+        """No adapter, no claim: the hold-out rests on positive evidence only."""
+        self.declare(ctx_factory, [])
+        self.stage(ctx_factory.wt, "tests/test_uploader.py")
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_a_harness_shipped_in_the_app_target_is_still_source(self, ctx_factory):
+        """The adapter's convention, not the word "test", decides."""
+        self.declare(ctx_factory, ["swift_xcode"])
+        self.stage(ctx_factory.wt, "Heap/Support/TestHarness.swift")
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_code_beside_prose_still_needs_a_doc(self, ctx_factory):
+        """The control: the classifier narrows "source", it does not drop it."""
+        self.stage(ctx_factory.wt, "app.py", "docs/backlog.rst", "LICENSE")
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=ctx_factory.wt)))
+        assert "source changed but no architecture doc did" in result.verdict.message
+
+    def test_the_coverage_gate_reads_a_license_the_same_way(self, ctx_factory):
+        """One classifier, so the licence names are not source to the floor
+        either: no reporter in any ecosystem has a row for a LICENSE file."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            session={"id": "s1", "files": ["LICENSE"], "worktree": str(ctx_factory.wt)},
+            pipeline={"evidence": {"coverage": {str(ctx_factory.wt / "app.py"): 100.0}}},
+        )
+        verdict = only(evaluate(["coverage.meets_floor"], ctx)).verdict
+        assert verdict.ok, verdict.message
+
+    @pytest.mark.parametrize(
+        "path, expected",
+        [
+            ("LICENSE", True),
+            ("sub/licence", True),
+            ("LICENSE-MIT", True),
+            ("CODEOWNERS", True),
+            ("NOTICE", True),
+            ("license.py", False),
+            ("src/notices.py", False),
+            ("Makefile", False),
+        ],
+    )
+    def test_the_metadata_names_match_whole_names_only(self, path, expected):
+        """The control on the widening: a name, never a stem of real code."""
+        from invariant.core.rules import _looks_like_docs
+
+        assert _looks_like_docs(path) is expected
+
+
+class TestTheChangedSetIsAnsweredOrRefused:
+    """The other half of the BUG_012 repair: what an EMPTY set is allowed to mean.
+
+    Widening the input set fixes the committed-tree case, and on its own it
+    would leave a second inert path behind — the union is also empty when no
+    source could answer, and reporting that as "nothing changed" is the same
+    defect one step along. `coverage.meets_floor` already refuses there; these
+    assert the two docs gates now refuse in the same shape, and that the
+    refusal stays narrow enough not to swallow the genuine empty answer.
+    """
+
+    def clean_committed_repo(self, wt):
+        run(["git", "commit", "-q", "--allow-empty", "-m", "no file changes"], wt)
+
+    def test_docs_updated_refuses_an_unanswerable_set_rather_than_skipping(
+        self, ctx_factory
+    ):
+        """An unknown base makes `branch_files` answer `None`.
+
+        With the working tree clean and nothing declared, no source can say
+        what changed. `docs.updated` is `block`, and a skip there reads as a
+        pass — so the one honest verdict is a failure that says why.
+        """
+        wt = ctx_factory.wt
+        session = {"worktree": str(wt), "base": "no-such-base", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "changed set could not be established" in result.verdict.message
+        assert "no-such-base" in result.verdict.detail
+
+    def test_diagrams_current_refuses_an_unanswerable_set_too(self, ctx_factory):
+        wt = ctx_factory.wt
+        session = {"worktree": str(wt), "base": "no-such-base", "files": []}
+        result = only(
+            evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt, session=session))
+        )
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "changed set could not be established" in result.verdict.message
+
+    def test_a_missing_base_says_so_rather_than_naming_an_empty_one(self, ctx_factory):
+        wt = ctx_factory.wt
+        session = {"worktree": str(wt), "base": "", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert "no base recorded" in result.verdict.detail
+
+    def test_a_genuinely_empty_change_still_skips(self, ctx_factory):
+        """The refusal must not swallow the real "nothing changed".
+
+        Here the branch's commits ARE readable and report no paths, so the
+        empty set is an answer rather than an absence of one. Failing here
+        would block every gate evaluation that runs before any work.
+        """
+        wt = ctx_factory.wt
+        self.clean_committed_repo(wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(evaluate(["docs.updated"], ctx_factory(cwd=wt, session=session)))
+        assert result.verdict.skipped and result.verdict.message == "nothing changed"
+
+    def test_a_source_only_commit_leaves_diagrams_current_with_nothing_to_say(
+        self, ctx_factory
+    ):
+        """`no doc changed` survives, because it is a real answer.
+
+        The changed set is non-empty and holds no doc. That is the case the
+        rule was written for, and it must stay a skip now that an empty set
+        can also mean "could not tell".
+        """
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("x = 1\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "source only"], wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(["docs.diagrams_current"], ctx_factory(cwd=wt, session=session))
+        )
+        assert result.verdict.skipped and "no doc changed" in result.verdict.message
+
+    def test_a_committed_doc_change_alongside_source_passes(self, ctx_factory):
+        """The positive committed case, which the repro does not cover.
+
+        A gate that only ever fails on committed work would be as useless as
+        one that only ever skips.
+        """
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("x = 1\n", encoding="utf-8")
+        (wt / "docs" / "architecture" / "overview.md").write_text(
+            "# Overview\n\n```mermaid\ngraph TD\n  A-->E\n```\n", encoding="utf-8"
+        )
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "source and doc together"], wt)
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        ctx = ctx_factory(cwd=wt, session=session)
+        updated = only(evaluate(["docs.updated"], ctx))
+        assert updated.verdict.ok and not updated.verdict.skipped
+        diagrams = only(evaluate(["docs.diagrams_current"], ctx))
+        assert diagrams.verdict.ok and not diagrams.verdict.skipped
+
+    def test_the_declared_set_alone_answers_when_git_cannot(self, ctx_factory):
+        """The unset-base case, asserted on the helper rather than through a rule.
+
+        No session record with an absent base has ever been observed; the path
+        is reachable by construction, which is why it is constructed here.
+        """
+        from invariant.core.rules import _changed_set
+
+        wt = ctx_factory.wt
+        ctx = ctx_factory(
+            cwd=wt, session={"worktree": str(wt), "base": "", "files": ["app.py"]}
+        )
+        changed = _changed_set(ctx)
+        assert changed.answerable and changed.paths == (Path("app.py"),)
+
+    def test_the_three_sources_are_unioned_without_duplicates(self, ctx_factory):
+        """One path named by two sources is one path, not two.
+
+        Left duplicated, every count in every verdict built on this set reads
+        high, which is a small lie of exactly the kind these gates exist to
+        catch.
+        """
+        from invariant.core.rules import _changed_set
+
+        wt = ctx_factory.wt
+        (wt / "app.py").write_text("x = 1\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "committed"], wt)
+        (wt / "later.py").write_text("y = 2\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        ctx = ctx_factory(
+            cwd=wt,
+            session={"worktree": str(wt), "base": "master", "files": ["app.py"]},
+        )
+        changed = _changed_set(ctx)
+        assert changed.paths == (Path("app.py"), Path("later.py"))
+        assert changed.base == "master" and changed.answerable
+
+
+# -- test + coverage rules ---------------------------------------------
+
+
+class TestTestRules:
+    # Both of these were written against `test.suite_runs`, which is retired:
+    # it was graded by three profiles and evaluated by nothing. They are kept
+    # pointed at `test.all_pass`, which is where the two questions are actually
+    # asked — retiring a rule must not quietly retire its coverage.
+    def test_no_run_recorded_fails(self, ctx_factory):
+        assert not only(evaluate(["test.all_pass"], ctx_factory(pipeline={}))).verdict.ok
+
+    def test_zero_executed_is_caught_despite_a_pass(self, ctx_factory):
+        pipeline = {"evidence": {"test_runs": [{"passed": True, "executed": 0}]}}
+        result = only(evaluate(["test.all_pass"], ctx_factory(pipeline=pipeline)))
+        assert "executed zero tests" in result.verdict.message
+
+    def test_green_run_passes(self, ctx_factory):
+        pipeline = {"evidence": {"test_runs": [{"passed": True, "executed": 12}]}}
+        assert only(evaluate(["test.all_pass"], ctx_factory(pipeline=pipeline))).verdict.ok
+
+    def test_a_pass_with_a_hazard_is_not_accepted(self, ctx_factory):
+        pipeline = {
+            "evidence": {"test_runs": [{"passed": True, "executed": 5, "hazards": ["h"]}]}
+        }
+        result = only(evaluate(["test.all_pass"], ctx_factory(pipeline=pipeline)))
+        assert "untrustworthy" in result.verdict.message
+
+    def test_missing_red_phase_fails(self, ctx_factory):
+        pipeline = {"evidence": {"test_runs": [{"phase": "green", "passed": True}]}}
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert "no failing run was recorded" in result.verdict.message
+
+    def test_a_red_phase_that_passed_is_rejected(self, ctx_factory):
+        pipeline = {"evidence": {"test_runs": [{"phase": "red", "passed": True}]}}
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert "recorded in the red phase passed" in result.verdict.message
+
+    def test_a_genuine_red_passes(self, ctx_factory):
+        # The counts are what make it genuine. This case used to be spelled
+        # `{"phase": "red", "passed": False}` and nothing else, which is
+        # precisely the shape a compile error produces (BUG_029).
+        pipeline = {
+            "evidence": {
+                "test_runs": [{"phase": "red", "passed": False, "executed": 4, "failed": 1}]
+            }
+        }
+        assert only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))).verdict.ok
+
+
+class TestCoverageRule:
+    def test_below_floor_is_reported(self, ctx_factory):
+        pipeline = {"evidence": {"coverage": {"a.py": 40.0, "b.py": 95.0}}}
+        session = {"files": ["a.py", "b.py"], "base": "master"}
+        result = only(
+            evaluate(["coverage.meets_floor"], ctx_factory(session=session, pipeline=pipeline))
+        )
+        assert "1 file(s) below" in result.verdict.message
+        assert "a.py" in result.verdict.detail
+
+    def test_all_above_floor_passes(self, ctx_factory):
+        pipeline = {"evidence": {"coverage": {"a.py": 95.0}}}
+        session = {"files": ["a.py"], "base": "master"}
+        assert only(
+            evaluate(["coverage.meets_floor"], ctx_factory(session=session, pipeline=pipeline))
+        ).verdict.ok
+
+    def test_no_recorded_coverage_fails(self, ctx_factory):
+        assert not only(evaluate(["coverage.meets_floor"], ctx_factory(pipeline={}))).verdict.ok
+
+    # -- scope -------------------------------------------------------
+    #
+    # The touched set is what makes this a "touched" gate rather than a
+    # whole-project one. Every test below is about the set being computed
+    # from the wrong facts, which does not look like a scope bug from the
+    # outside: it looks like a coverage failure in a file nobody edited.
+
+    def test_committed_work_is_still_in_scope(self, ctx_factory):
+        """`git diff` reports nothing for committed work.
+
+        The exit gate runs after the commit, so reading only the working tree
+        and the index empties the touched set at exactly the state where the
+        gate is asked its question.
+        """
+        wt = ctx_factory.wt
+        (wt / "a.py").write_text("x = 1\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "work"], wt)
+
+        pipeline = {"evidence": {"coverage": {"a.py": 40.0, "b.py": 10.0}}}
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert "1 file(s) below" in result.verdict.message
+        assert "a.py" in result.verdict.detail
+        # b.py was never touched by this session. Holding it to the floor is
+        # the whole defect: it blocks on a file the author did not write.
+        assert "b.py" not in result.verdict.detail
+
+    def test_an_empty_touched_set_does_not_widen_to_the_whole_project(self, ctx_factory):
+        """Nothing touched is not the same question as everything touched.
+
+        Falling through to the full measured set turns a touched-scope floor
+        into a project-wide one, and every legacy file below the floor then
+        blocks a change that never went near it.
+        """
+        wt = ctx_factory.wt
+        pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert result.verdict.ok and result.verdict.skipped
+        assert "legacy.py" not in (result.verdict.detail or "")
+
+    def test_a_docs_only_change_has_nothing_for_the_floor_to_answer(self, ctx_factory):
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "overview.md").write_text("# hi\n", encoding="utf-8")
+        run(["git", "add", "-A"], wt)
+        run(["git", "commit", "-qm", "docs"], wt)
+
+        pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
+        session = {"worktree": str(wt), "base": "master", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert result.verdict.ok and result.verdict.skipped
+
+    def test_an_undeterminable_scope_blocks_rather_than_relaxing(self, ctx_factory):
+        """An unanswered question is not a negative answer.
+
+        With no base to diff against, the touched set cannot be established.
+        Reporting that as "nothing was touched" would skip the floor on real
+        source work — the vacuous green this gate exists to prevent.
+        """
+        wt = ctx_factory.wt
+        pipeline = {"evidence": {"coverage": {"legacy.py": 12.0}}}
+        session = {"worktree": str(wt), "base": "no-such-base", "files": []}
+        result = only(
+            evaluate(
+                ["coverage.meets_floor"],
+                ctx_factory(cwd=wt, session=session, pipeline=pipeline),
+            )
+        )
+        assert not result.verdict.ok
+        assert "touched set could not be established" in result.verdict.message
+        # And it must not answer for the project it could not scope.
+        assert "legacy.py" not in (result.verdict.detail or "")
+
+
+# -- privacy rule ------------------------------------------------------
+
+
+class TestPrivacyRule:
+    def test_a_leak_in_a_doc_write_is_blocked(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=edit_payload(doc, "contact a.person@example.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and result.level is Level.BLOCK
+
+    def test_findings_are_redacted_in_the_report(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=edit_payload(doc, "contact a.person@example.com"))
+        detail = only(evaluate(["privacy.clean"], ctx)).verdict.detail
+        assert "a.person@example.com" not in detail
+
+    def test_a_clean_doc_passes(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=edit_payload(doc, "nothing sensitive here"))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_leak_in_a_commit_message_is_caught(self, ctx_factory):
+        ctx = ctx_factory(payload=bash_payload("git commit -m 'fix by a.person@example.com'"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_source_files_are_out_of_scope_by_default(self, ctx_factory):
+        ctx = ctx_factory(payload=edit_payload(ctx_factory.main / "app.py", "EMAIL='a@b.com'"))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+class TestPrivacyPathScopedAllowReachesEveryRoute:
+    """A path-scoped allow entry is compared with where the text lands, on
+    every route that has a place: an edit's target, a staged path. A commit
+    message has none, so no scoped entry can reach it."""
+
+    VENDOR = "docs/architecture/vendor"
+
+    @pytest.fixture(autouse=True)
+    def _scoped(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "privacy": {"allow": [{"paths": [f"{self.VENDOR}/"], "reason": "vendored"}]},
+        })
+
+    def test_an_edit_under_the_prefix_passes(self, ctx_factory):
+        doc = ctx_factory.main / self.VENDOR / "lib.md"
+        ctx = ctx_factory(payload=edit_payload(doc, "contact a.person@example.com"))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_an_edit_beside_the_prefix_is_still_blocked(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=edit_payload(doc, "contact a.person@example.com"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_staged_path_under_the_prefix_passes(self, ctx_factory):
+        main = ctx_factory.main
+        shell_write(main, f"{self.VENDOR}/lib.md", "contact a.person@example.com")
+        stage(main, f"{self.VENDOR}/lib.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'vendor a lib'"))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_commit_message_is_not_reached(self, ctx_factory):
+        main = ctx_factory.main
+        shell_write(main, f"{self.VENDOR}/lib.md", "nothing here")
+        stage(main, f"{self.VENDOR}/lib.md")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload("git commit -m 'by a.person@example.com'")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+
+def multiedit_payload(path, *new_strings):
+    return {
+        "tool_name": "MultiEdit",
+        "tool_input": {
+            "file_path": str(path),
+            "edits": [{"old_string": "x", "new_string": s} for s in new_strings],
+        },
+    }
+
+
+class TestPrivacyPayloadShapes:
+    """AUD-06: MultiEdit and NotebookEdit are EDIT_TOOLS, and their payloads
+    were never scanned — the same data that blocks a Write passed through a
+    MultiEdit untouched."""
+
+    def test_a_multiedit_leak_is_caught(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=multiedit_payload(doc, "mail a.person@example.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_every_edit_in_a_multiedit_is_scanned(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(
+            payload=multiedit_payload(doc, "clean", "mail a.person@example.com")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_clean_multiedit_passes_rather_than_skips(self, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(payload=multiedit_payload(doc, "nothing sensitive"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_notebookedit_leak_is_caught(self, ctx_factory):
+        nb = ctx_factory.main / "docs" / "architecture" / "walkthrough.ipynb"
+        ctx = ctx_factory(
+            payload={
+                "tool_name": "NotebookEdit",
+                "tool_input": {
+                    "notebook_path": str(nb),
+                    "new_source": "mail a.person@example.com",
+                },
+            }
+        )
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+
+def heredoc_write_payload(path, content):
+    """A shell-mediated write: the route BUG_027 reports as unscreened.
+
+    A ``cat``/``python3`` heredoc is what at least one consuming host's
+    harness emits for every file edit; ``sed -i`` is the other observed form.
+    """
+    return bash_payload(f"cat > {path} <<'EOF'\n{content}\nEOF\n")
+
+
+def shell_write(main, relpath, text):
+    """Write a file the way BUG_027's route does: through a real shell.
+
+    Nothing in the resulting index records which tool wrote it, which is the
+    property the gate is being held to — it screens what LANDED, so every
+    route that can land text is covered by the same code, including the ones
+    nobody has enumerated.
+    """
+    target = main / relpath
+    target.parent.mkdir(parents=True, exist_ok=True)
+    run(["sh", "-c", f"cat > {target} <<'EOF'\n{text}\nEOF"], main)
+    return target
+
+
+def stage(main, *relpaths):
+    run(["git", "add", "--", *[str(p) for p in relpaths]], main)
+
+
+class TestPrivacyScreensWhatLandedAtTheCommitBoundary:
+    """BUG_027 — see docs/backlog/BUG_027.md.
+
+    The entry's axis is content LANDING, not tool identity: widening
+    ``EDIT_TOOLS`` cannot close it, "because the next route will not be a tool
+    name either". So the gate screens at the boundary where every route
+    converges — the commit — over what is actually staged there.
+
+    ``privacy.clean`` already reads a ``Bash`` payload for its other half: a
+    shell call that commits a MESSAGE is scanned, and until this landed, the
+    same call's staged CONTENT was not.
+    """
+
+    def test_BUG_027_a_leak_written_by_a_shell_heredoc_is_blocked_at_the_commit(
+        self, ctx_factory
+    ):
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'add a doc'"))
+
+        result = only(evaluate(["privacy.clean"], ctx))
+        # The symptom, at the boundary where it is worst: the gate answers
+        # about a commit that provably carries personal data into a scoped
+        # path, having read only the commit MESSAGE. Its verdict must name
+        # the staged file, and it must not vouch for the commit.
+        assert not result.verdict.skipped, (
+            "privacy.clean skipped a commit carrying personal data into "
+            f"docs/architecture/new.md: {result.verdict.message!r}"
+        )
+        assert "docs/architecture/new.md" in (
+            result.verdict.message + result.verdict.detail
+        ), (
+            "privacy.clean never looked at the staged content of a commit "
+            "carrying personal data into docs/architecture/new.md; it "
+            f"answered from the commit message alone: {result.verdict.message!r}"
+        )
+        assert not result.verdict.ok and result.level is Level.BLOCK, (
+            "privacy.clean vouched for a commit that puts personal data into "
+            f"history: {result.verdict.message!r}"
+        )
+
+    def test_the_route_that_wrote_the_file_is_not_a_variable(self, ctx_factory):
+        """`sed -i`, a `cp`, a generator emitting a doc: the entry names three
+        routes a command-string scan would miss. None of them is visible in
+        what lands, which is why nothing here asks."""
+        import sys
+
+        main = ctx_factory.main
+        run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib; pathlib.Path('docs/architecture/gen.md')"
+                    ".write_text('mail a.person@example.com\\n')"
+                ),
+            ],
+            main,
+        )
+        stage(main, "docs/architecture/gen.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'generated'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_clean_staged_document_is_reported_by_path(self, ctx_factory):
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/clean.md", "nothing personal here")
+        stage(main, "docs/architecture/clean.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+        assert "docs/architecture/clean.md" in verdict.message
+
+    def test_a_staged_path_outside_privacy_scope_is_not_claimed_as_scanned(
+        self, ctx_factory
+    ):
+        """Scope still decides WHICH paths are read. The commit message is
+        scanned here whatever happens, so the fact under test is that the
+        out-of-scope file is neither read nor named."""
+        main = ctx_factory.main
+        shell_write(main, "src/thing.py", "mail = 'a.person@example.com'")
+        stage(main, "src/thing.py")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'code'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+        assert "src/thing.py" not in verdict.message + verdict.detail
+
+    def test_a_commit_with_nothing_in_scope_says_that_and_not_more(self, ctx_factory):
+        """The skip sentence for the commit route. Scoped to ``docs`` alone so
+        the commit-message half does not answer for it."""
+        main = ctx_factory.main
+        write_manifest(
+            main,
+            {"version": 1, "project": {"name": "demo"}, "privacy": {"scope": ["docs"]}},
+        )
+        shell_write(main, "src/thing.py", "mail = 'a.person@example.com'")
+        stage(main, "src/thing.py")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'code'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped
+        assert "no staged path" in verdict.message and "privacy scope" in verdict.message
+
+    def test_an_exemption_marker_in_staged_content_still_exempts(self, ctx_factory):
+        """The marker's reach is a BLOCK (BUG_045), so the scan has to see the
+        staged file whole. Reading only a diff's added lines would lose a
+        marker sitting on an unchanged line above them."""
+        main = ctx_factory.main
+        shell_write(
+            main,
+            "docs/architecture/exempt.md",
+            "<!-- invariant: allow-privacy -->\n\ncontact a.person@example.com",
+        )
+        stage(main, "docs/architecture/exempt.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'exempt'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_staged_deletion_is_not_an_unreadable_blob(self, ctx_factory):
+        """A deleted path has no staged content to read, and reading its
+        absence as "could not be scanned" would fail every commit that removes
+        a document."""
+        main = ctx_factory.main
+        run(["git", "rm", "-q", "docs/architecture/overview.md"], main)
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'drop it'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+
+    def test_a_binary_staged_blob_is_not_a_fail_closed(self, ctx_factory):
+        """Nothing in bytes that do not decode can leak in text form — the
+        answer scan_file already gives — and a gate no commit can clear is one
+        people route around."""
+        main = ctx_factory.main
+        (main / "docs" / "architecture" / "diagram.png").write_bytes(
+            b"\x89PNG\r\n\x1a\n\xff\xfe binary \x00"
+        )
+        stage(main, "docs/architecture/diagram.png")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a diagram'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+
+    def test_an_unreadable_index_fails_closed(self, ctx_factory, monkeypatch):
+        """AUD-07's convention, and the one this rule's own ``-F`` branch
+        already follows: the scan's subject exists and could not be looked at,
+        and an unanswered question is not a pass."""
+        from invariant.core import rules as rules_mod
+
+        monkeypatch.setattr(rules_mod.git, "staged_files", lambda *a, **k: None)
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload("git commit -m 'anything'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_an_unreadable_staged_blob_fails_closed(self, ctx_factory, monkeypatch):
+        from invariant.core import rules as rules_mod
+
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "harmless")
+        stage(main, "docs/architecture/new.md")
+        monkeypatch.setattr(rules_mod.git, "staged_blob", lambda *a, **k: None)
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_commit_run_from_a_subdirectory_still_resolves_scope(self, ctx_factory):
+        """Staged paths are spelled against the repository toplevel, not
+        against the directory the commit was typed in."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(
+            cwd=main / "docs", payload=bash_payload("git commit -m 'a doc'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_commit_in_a_linked_worktree_is_screened(self, ctx_factory):
+        """The scope test runs in project-relative space, and a worktree is
+        where this library's own work happens."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=wt, payload=bash_payload("git commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_chained_commit_is_still_a_commit(self, ctx_factory):
+        """`git add -A && git commit -m ...` is the spelling agents emit."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload("git add -A && git commit -m 'a doc'"),
+        )
+        stage(main, "docs/architecture/new.md")
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_bash_call_that_is_not_a_commit_says_it_was_not_screened(
+        self, ctx_factory
+    ):
+        """The half of BUG_027 that let it survive a long session: the old
+        message — "nothing in privacy scope was written here" — was
+        affirmatively FALSE on this route and read exactly like a pass."""
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=heredoc_write_payload(doc, "contact a.person@example.com"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped
+        assert "not screened" in verdict.message
+        assert "committed" in verdict.message
+
+    def test_a_word_containing_commit_is_not_a_commit(self, ctx_factory):
+        """The predicate reads WORDS. A substring test would treat this as a
+        commit and go read an index nothing is being written to."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload("git config commit.gpgsign false")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+    def test_a_command_that_cannot_be_read_as_words_is_not_called_screened(
+        self, ctx_factory
+    ):
+        """An unbalanced quote leaves nothing reliable to read. The answer is
+        the honest skip, never a silent pass and never a guess at a commit."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'unbalanced"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+    def test_a_call_that_writes_nothing_says_so(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.main, payload={"tool_name": "Read"})
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+    def test_an_edit_outside_scope_still_says_nothing_in_scope_was_written(
+        self, ctx_factory
+    ):
+        """The one route where the old sentence was true keeps it."""
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.main / "src" / "x.py", "hello"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "nothing in privacy scope was written" in verdict.message
+
+
+class TestSkipsThatUsedToStateNoReasonAtAll:
+    """BUG_027's second half, applied to the three rules that share its
+    predicate. ``session.isolated_before_edit``,
+    ``session.no_edit_in_main_checkout`` and ``pipeline.started_before_edit``
+    all open with ``if not ctx.is_edit: return Verdict.na()`` — a BARE N/A,
+    with no reason at all, on every shell call.
+
+    Their ENFORCEMENT is deliberately unchanged: teaching them to recognise a
+    shell-mediated write is a real behaviour change that could wedge a live
+    session, and it is its own scoped decision. What is fixed here is that
+    their silence no longer reads as a pass (BUG_020).
+    """
+
+    SHARE_THE_PREDICATE = (
+        "session.isolated_before_edit",
+        "session.no_edit_in_main_checkout",
+        "pipeline.started_before_edit",
+    )
+
+    @pytest.mark.parametrize("rule_id", SHARE_THE_PREDICATE)
+    def test_a_shell_call_is_skipped_with_a_stated_reason(self, rule_id, ctx_factory):
+        doc = ctx_factory.main / "docs" / "architecture" / "new.md"
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=heredoc_write_payload(doc, "hello")
+        )
+        verdict = only(evaluate([rule_id], ctx)).verdict
+        assert verdict.skipped
+        assert verdict.message and verdict.message != "not applicable here"
+        assert "Edit" in verdict.message
+
+
+class TestCommitMessageForms:
+    """AUD-09: only exact ``-m`` forms were scanned — ``git commit -am`` and
+    ``-F <file>`` carried a message past the gate unread."""
+
+    def test_dash_am_is_scanned(self, ctx_factory):
+        ctx = ctx_factory(
+            payload=bash_payload("git commit -am 'mail a.person@example.com'")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_longer_cluster_ending_in_m_is_scanned(self, ctx_factory):
+        ctx = ctx_factory(
+            payload=bash_payload("git commit -sam 'mail a.person@example.com'")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_dash_capital_f_scans_the_file(self, ctx_factory):
+        msg = ctx_factory.main / "commit-message.txt"
+        msg.write_text("mail a.person@example.com\n", encoding="utf-8")
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload(f"git commit -F {msg}")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_relative_dash_f_path_resolves_against_cwd(self, ctx_factory):
+        (ctx_factory.main / "msg.txt").write_text(
+            "mail a.person@example.com\n", encoding="utf-8"
+        )
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload("git commit -F msg.txt")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_an_unreadable_message_file_fails_closed(self, ctx_factory):
+        """The codebase convention: an unanswerable question is not a pass."""
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=bash_payload("git commit -F does-not-exist.txt"),
+        )
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+        assert "could not" in result.verdict.message
+
+    def test_a_stdin_message_fails_closed(self, ctx_factory):
+        """``-F -`` reads stdin, which a hook can never see."""
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=bash_payload("git commit -F -"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_clean_message_file_passes(self, ctx_factory):
+        msg = ctx_factory.main / "clean.txt"
+        msg.write_text("nothing sensitive\n", encoding="utf-8")
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload(f"git commit -F {msg}")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+
+class TestDashFWrittenByTheSameCommand:
+    """BUG_067 — the ``-F`` file is written by the command that commits.
+
+    The hook runs before the command, so the file cannot exist at scan time.
+    Still a refusal (AUD-09); only the reason and the remedy change, and only
+    when a redirect, a ``tee`` or a heredoc-fed ``cat >`` in the same command
+    lands on the ``-F`` path. Anything unrecognised keeps the generic wording.
+    """
+
+    SAME = "which this same command writes"
+    GENERIC = "could not be read at scan time"
+
+    def refusal(self, ctx_factory, command, cwd=None):
+        ctx = ctx_factory(cwd=cwd or ctx_factory.main, payload=bash_payload(command))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, command
+        return verdict
+
+    def assert_same_command(self, verdict):
+        assert self.SAME in verdict.detail, verdict.detail
+        assert "runs before the command" in verdict.detail
+        assert verdict.fixes == (
+            "write the file in a separate call first, then commit with -F",
+            "or write the message inline with -m '<message>'",
+        )
+
+    def assert_generic(self, verdict):
+        assert self.GENERIC in verdict.detail, verdict.detail
+        assert verdict.fixes == ("write the message inline with -m '<message>'",)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "printf x > msg.txt",
+            "printf x >> msg.txt",
+            "printf x >| msg.txt",
+            "printf x >msg.txt",
+            "printf x >>msg.txt",
+            "printf x >|msg.txt",
+            "printf x | tee msg.txt",
+            "printf x | tee -a other.txt msg.txt",
+            "printf x | /usr/bin/tee --append msg.txt",
+        ],
+    )
+    def test_each_write_spelling_names_the_same_command(self, ctx_factory, write):
+        verdict = self.refusal(ctx_factory, f"{write} && git commit -F msg.txt")
+        self.assert_same_command(verdict)
+
+    def test_a_heredoc_fed_cat_names_the_same_command(self, ctx_factory):
+        command = "cat > msg.txt <<'EOF'\nhello\nEOF\ngit commit -F msg.txt"
+        self.assert_same_command(self.refusal(ctx_factory, command))
+
+    def test_the_long_file_option_names_the_same_command(self, ctx_factory):
+        verdict = self.refusal(ctx_factory, "printf x > m.txt && git commit --file=m.txt")
+        self.assert_same_command(verdict)
+
+    def test_an_absolute_write_matches_a_relative_dash_f(self, ctx_factory):
+        msg = ctx_factory.main / "msg.txt"
+        verdict = self.refusal(ctx_factory, f"printf x > {msg} && git commit -F msg.txt")
+        self.assert_same_command(verdict)
+
+    def test_a_write_to_another_file_keeps_the_generic_wording(self, ctx_factory):
+        verdict = self.refusal(
+            ctx_factory, "printf x > other.txt && git commit -F msg.txt"
+        )
+        self.assert_generic(verdict)
+
+    def test_tee_stops_at_its_own_redirect_and_at_a_separator(self, ctx_factory):
+        for command in (
+            "printf x | tee a.txt > /dev/null && git commit -F msg.txt",
+            "printf x | tee a.txt && git commit -F msg.txt",
+        ):
+            self.assert_generic(self.refusal(ctx_factory, command))
+
+    def test_a_dangling_redirect_keeps_the_generic_wording(self, ctx_factory):
+        self.assert_generic(self.refusal(ctx_factory, "git commit -F msg.txt >"))
+
+    def test_dash_c_moves_the_dash_f_read_but_not_the_shell_write(self, ctx_factory):
+        """git reads ``-F msg.txt`` from the ``-C`` tree; the shell writes
+        ``> msg.txt`` in its own cwd. Different files: no same-command claim."""
+        wt = ctx_factory.wt
+        apart = self.refusal(
+            ctx_factory, f"printf x > msg.txt && git -C {wt} commit -F msg.txt"
+        )
+        self.assert_generic(apart)
+        together = self.refusal(
+            ctx_factory, f"printf x > {wt}/msg.txt && git -C {wt} commit -F msg.txt"
+        )
+        self.assert_same_command(together)
+
+    def test_stdin_keeps_its_wording_even_beside_a_write(self, ctx_factory):
+        verdict = self.refusal(ctx_factory, "printf x > - ; git commit -F -")
+        assert "reads the message from stdin" in verdict.detail
+        assert verdict.fixes == ("write the message inline with -m '<message>'",)
+
+
+class TestPrivacyScreensTheIndexTheCommitNames:
+    """BUG_048 — see docs/backlog/BUG_048.md.
+
+    ``_is_git_commit`` reads ``git -C <other> commit`` as a commit, correctly,
+    and nothing downstream of that decision consulted the ``-C``. So the gate
+    screened ``ctx.cwd``'s index and vouched for a commit made somewhere else:
+    a PASS asserting a scan of blobs that have no relation to what lands.
+
+    The pair below is what pins the MIS-TARGET rather than the absence of a
+    scan — one commit whose leak is in the named tree, one whose leak is in
+    the tree the rule used to read instead.
+    """
+
+    def test_BUG_048_a_leak_staged_in_the_named_tree_is_screened(self, ctx_factory):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/other.md")
+        # ``main``'s index is clean, so every path the old code could reach is
+        # empty: a pass here is a pass over nothing.
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload(f"git -C {wt} commit -m 'a doc'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "privacy.clean vouched for a commit whose staged content it never "
+            f"read: {verdict.message!r}"
+        )
+        assert "docs/architecture/other.md" in verdict.message + verdict.detail
+
+    def test_the_index_of_the_tree_not_named_is_not_read(self, ctx_factory):
+        """The control. The leak is staged where the rule USED to look, and
+        the commit is made somewhere else — so naming it would be reporting a
+        scan of a tree this commit does not touch."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(main, "docs/architecture/here.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/here.md")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload(f"git -C {wt} commit -m 'a doc'")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert "docs/architecture/here.md" not in verdict.message + verdict.detail
+
+    def test_repeated_dash_c_is_cumulative(self, ctx_factory):
+        """``-C`` is repeatable and its paths compose, each relative to the
+        last. A parser that takes the first and stops resolves the wrong tree
+        — and, being one directory up, usually a real one."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/other.md")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(f"git -C {wt.parent} -C {wt.name} commit -m 'a doc'"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and "docs/architecture/other.md" in (
+            verdict.message + verdict.detail
+        )
+
+    def test_a_dash_c_before_a_global_config_option_is_still_found(self, ctx_factory):
+        """``-c <name>=<value>`` takes a separate value. A scan that treated
+        that value as the subcommand would stop looking and miss the ``-C``
+        after it."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/other.md")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(f"git -c commit.gpgsign=false -C {wt} commit -m 'x'"),
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_the_chained_spelling_resolves_the_commits_own_invocation(
+        self, ctx_factory
+    ):
+        """``git add -A && git -C <other> commit`` is the spelling agents
+        actually emit (BUG_027). A reader that stopped at the first subcommand
+        would resolve the ``add``'s directory and hand it to the commit."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        shell_write(wt, "docs/architecture/other.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(f"git add -A && git -C {wt} add -A && git -C {wt} commit -m 'x'"),
+        )
+        # The rule reads the index, so stage it the way the command would.
+        stage(wt, "docs/architecture/other.md")
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and "docs/architecture/other.md" in (
+            verdict.message + verdict.detail
+        )
+
+    def test_a_redirection_on_a_neighbouring_invocation_does_not_fail_the_commit(
+        self, ctx_factory
+    ):
+        """``--git-dir`` is refused where it redirects the COMMIT. On a
+        neighbouring ``rev-parse`` it names a repository the commit is not
+        made in, and failing there would refuse a commit over a question
+        nobody asked."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/clean.md", "nothing personal here")
+        stage(main, "docs/architecture/clean.md")
+        ctx = ctx_factory(
+            cwd=main,
+            payload=bash_payload(
+                "git --git-dir=/elsewhere/.git rev-parse HEAD && git commit -m 'a doc'"
+            ),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and "docs/architecture/clean.md" in verdict.message
+
+    def test_a_dash_c_naming_no_directory_fails_closed(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=bash_payload("git -C /nope/not/here commit -m 'a doc'"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "-C" in verdict.detail
+
+    def test_an_empty_dash_c_leaves_the_directory_where_it_is(self, ctx_factory):
+        """``git -C ""`` is git's own no-op spelling. Reading it as an
+        unresolvable redirection would fail a commit that redirects nothing."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git -C '' commit -m 'a doc'"))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and "docs/architecture/new.md" in (
+            verdict.message + verdict.detail
+        )
+
+    def test_git_dir_and_work_tree_fail_closed_naming_themselves(self, ctx_factory):
+        """The same class of redirection, not followed. A verdict naming the
+        option it will not follow beats a clean scan of the wrong tree."""
+        for option in ("--git-dir=/elsewhere/.git", "--work-tree /elsewhere"):
+            ctx = ctx_factory(
+                cwd=ctx_factory.main,
+                payload=bash_payload(f"git {option} commit -m 'a doc'"),
+            )
+            verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped, option
+            assert option.split("=")[0].split()[0] in verdict.detail, option
+
+    def test_a_dash_f_message_resolves_against_the_named_tree(self, ctx_factory):
+        """``-C`` changes git's directory before anything else, so a relative
+        ``-F`` name is spelled against the NAMED tree. Reading it against
+        ``ctx.cwd`` scans an unrelated file and passes."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        (wt / "msg.txt").write_text("mail a.person@example.com\n", encoding="utf-8")
+        (main / "msg.txt").write_text("nothing sensitive\n", encoding="utf-8")
+        ctx = ctx_factory(
+            cwd=main, payload=bash_payload(f"git -C {wt} commit -F msg.txt")
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_commit_in_a_repository_outside_the_project_says_so(
+        self, ctx_factory, tmp_path
+    ):
+        """Privacy scope is spelled against THIS project, so it describes no
+        path of an unrelated checkout. The answer is neither a refusal of work
+        this project does not govern — the position ``_is_outside_project``
+        already takes — nor a silent pass: the message is still scanned, and
+        the verdict SAYS the content was not. A pass that names the message
+        route and stays quiet about the content route is the exact reading
+        BUG_048 filed against.
+        """
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        run(["git", "init", "-q", "-b", "master"], other)
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=bash_payload(f"git -C {other} commit -m 'a doc'"),
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+        assert "commit message" in verdict.message
+        assert "was not screened" in verdict.detail and "outside" in verdict.detail
+
+    def test_an_outside_commit_carrying_no_message_abstains_visibly(
+        self, ctx_factory, tmp_path
+    ):
+        """With nothing scanned at all the abstention IS the verdict, and it
+        is a skip rather than a pass (BUG_020)."""
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        run(["git", "init", "-q", "-b", "master"], other)
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload(f"git -C {other} commit")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "outside the project" in verdict.message
+
+    def test_a_plain_commit_still_reads_the_working_directory(self, ctx_factory):
+        """The no-redirection path is unchanged: BUG_027's fix keeps working."""
+        main = ctx_factory.main
+        shell_write(main, "docs/architecture/new.md", "contact a.person@example.com")
+        stage(main, "docs/architecture/new.md")
+        ctx = ctx_factory(cwd=main, payload=bash_payload("git commit -m 'a doc'"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+
+def commit(cwd, message="wip"):
+    run(["git", "commit", "-qm", message], cwd)
+
+
+class TestPrivacyScreensTheReviewBoundary:
+    """BUG_047 — see docs/backlog/BUG_047.md.
+
+    ``privacy.clean`` is named as an exit gate in six machines and screened
+    nothing in any of them: a transition evaluates it with an empty payload,
+    so ``tool_name`` is ``""``, ``is_edit`` is ``False``, and no command is
+    present to be a commit. Every route it had needed a payload a transition
+    does not have.
+
+    The subject at that boundary is what this session would put into its base
+    branch — the branch's own commits, plus what is still in the index and the
+    working tree. That is ``_changed_set``, the union three other end-of-phase
+    gates already read (BUG_012), and reading it through the same helper is
+    what stops a fifth rule asking the question a fifth way.
+    """
+
+    def test_BUG_047_a_leak_committed_on_the_branch_blocks_the_review(
+        self, ctx_factory
+    ):
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/leak.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/leak.md")
+        commit(wt, "a doc")
+        # No payload: this is the shape a transition hands the rule.
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.skipped, (
+            "privacy.clean abstained at the review boundary it is named to "
+            f"guard: {verdict.message!r}"
+        )
+        assert not verdict.ok and "docs/architecture/leak.md" in (
+            verdict.message + verdict.detail
+        ), (
+            "privacy.clean passed a review whose branch carries personal data "
+            f"into docs/architecture/leak.md: {verdict.message!r}"
+        )
+
+    def test_a_leak_not_yet_committed_blocks_the_review_too(self, ctx_factory):
+        """The index and the working tree are in the subject as well: a review
+        that passes because the leak is not committed YET passes a leak."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/pending.md", "contact a.person@example.com")
+        stage(wt, "docs/architecture/pending.md")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_modification_to_a_tracked_file_is_in_the_subject(self, ctx_factory):
+        """The working-tree leg, with nothing staged and nothing committed."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/overview.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_a_clean_branch_names_what_it_read(self, ctx_factory):
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/clean.md", "nothing personal here")
+        stage(wt, "docs/architecture/clean.md")
+        commit(wt, "a doc")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+        assert "docs/architecture/clean.md" in verdict.message
+
+    def test_a_branch_touching_nothing_in_scope_says_that(self, ctx_factory):
+        wt = ctx_factory.wt
+        shell_write(wt, "src/thing.py", "x = 1")
+        stage(wt, "src/thing.py")
+        commit(wt, "code")
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "privacy": {"scope": ["docs"]}},
+        )
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "privacy scope" in verdict.message
+
+    def test_an_unestablished_changed_set_fails_closed(self, ctx_factory):
+        """No base recorded, nothing declared: the branch's commits cannot be
+        read. An unanswered question is not a pass — the same refusal
+        ``docs.updated`` and ``coverage.meets_floor`` already give here."""
+        ctx = ctx_factory(cwd=ctx_factory.wt, session={"branch": "session/x"})
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "could not be established" in verdict.message
+
+    def test_a_deleted_path_is_not_read_as_unscannable(self, ctx_factory):
+        """A path the branch REMOVES is in the changed set and has no content
+        to read. Failing closed on it would refuse every review that deleted a
+        document."""
+        wt = ctx_factory.wt
+        run(["git", "rm", "-q", "docs/architecture/overview.md"], wt)
+        commit(wt, "drop the overview")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok or verdict.skipped
+
+    def test_bytes_that_do_not_decode_are_counted_as_looked_at(self, ctx_factory):
+        """The same answer the commit route gives a binary blob: nothing that
+        can leak in TEXT form. Counted as scanned, so committing a diagram is
+        not a gate no review can clear."""
+        wt = ctx_factory.wt
+        (wt / "docs" / "architecture" / "diagram.md").write_bytes(b"\xff\xfe\x00chart")
+        stage(wt, "docs/architecture/diagram.md")
+        commit(wt, "a diagram")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+        assert "docs/architecture/diagram.md" in verdict.message
+
+    def test_a_scoped_path_that_cannot_be_read_fails_closed(self, ctx_factory):
+        """The one gate whose subject cannot be recovered afterwards. An
+        unreadable file in scope is an unanswered question, not a pass."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/sealed.md", "nothing personal here")
+        stage(wt, "docs/architecture/sealed.md")
+        commit(wt, "a doc")
+        target = wt / "docs" / "architecture" / "sealed.md"
+        target.chmod(0o000)
+        try:
+            ctx = ctx_factory(
+                cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+            )
+            verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        finally:
+            target.chmod(0o644)
+        assert not verdict.ok and not verdict.skipped
+        assert "could not be scanned" in verdict.message
+
+    def test_a_declared_directory_is_not_an_unreadable_file(self, ctx_factory):
+        """A declared file set may name a directory. It holds no text of its
+        own, so it is skipped rather than failed closed."""
+        wt = ctx_factory.wt
+        ctx = ctx_factory(
+            cwd=wt,
+            session={
+                "branch": "session/x",
+                "base": "master",
+                "files": ["docs/architecture"],
+            },
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok
+
+    def test_an_untracked_file_is_not_in_the_subject(self, ctx_factory):
+        """Stated as a limit rather than left to be discovered. Nothing
+        untracked goes into the base branch; the moment it is added the index
+        carries it here, and the commit boundary screens it either way."""
+        wt = ctx_factory.wt
+        shell_write(wt, "docs/architecture/scratch.md", "contact a.person@example.com")
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+        # ...and the moment it is staged, it is.
+        stage(wt, "docs/architecture/scratch.md")
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_tool_call_is_still_judged_as_a_tool_call(self, ctx_factory):
+        """The transition route is additive. A payload present means a hook,
+        and the hook routes are untouched."""
+        ctx = ctx_factory(cwd=ctx_factory.main, payload={"tool_name": "Read"})
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "not screened" in verdict.message
+
+
+class TestPrivacyScreensWhatTheMergeWouldPublish:
+    """The review boundary reads content from the working tree, and at
+    ``session merge`` that is the wrong tree.
+
+    ``session merge`` must run from the MAIN checkout — merging inside the
+    branch's own worktree merges it into itself and exits zero. So by the time
+    this gate runs, ``_repo_root`` is the main checkout, whose working tree
+    still holds the PRE-merge text. The fixed text exists only in the session
+    branch's commit, which the merge has not published yet.
+
+    For most sessions the two agree and nothing is wrong. It bites exactly the
+    session that REMOVES a violation from a tracked file: the gate re-reads the
+    copy being replaced, finds the very text the branch fixes, and refuses. The
+    remediation the gate exists to encourage is the one thing it cannot pass.
+    """
+
+    def _leak_on_master_fixed_on_the_branch(self, ctx_factory):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        rel = "docs/architecture/overview.md"
+        # The violation is PRE-EXISTING: it is on master before the session.
+        shell_write(main, rel, "contact a.person@example.com")
+        stage(main, rel)
+        commit(main, "a doc that leaks")
+        # The branch takes it, then fixes it.
+        run(["git", "merge", "-q", "master"], wt)
+        shell_write(wt, rel, "contact the maintainer")
+        stage(wt, rel)
+        commit(wt, "stop leaking")
+        return rel
+
+    def test_a_branch_that_FIXES_a_leak_can_be_merged(self, ctx_factory):
+        rel = self._leak_on_master_fixed_on_the_branch(ctx_factory)
+        # The shape `session merge` hands the rule: no payload, run from the
+        # main checkout, with the session naming the files it touched.
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            session={"branch": "session/x", "base": "master", "files": [rel]},
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok, (
+            "privacy.clean refused a merge whose branch REMOVES the personal "
+            "data it is refusing over — it read the main checkout's "
+            f"pre-merge copy instead of what the merge publishes: "
+            f"{verdict.message!r} {verdict.detail!r}"
+        )
+
+    def test_a_branch_that_ADDS_a_leak_is_still_refused(self, ctx_factory):
+        """The must-fail direction. A reader that stops consulting the working
+        tree must not become a reader that stops refusing."""
+        main, wt = ctx_factory.main, ctx_factory.wt
+        rel = "docs/architecture/added.md"
+        shell_write(wt, rel, "contact a.person@example.com")
+        stage(wt, rel)
+        commit(wt, "a doc that leaks")
+        ctx = ctx_factory(
+            cwd=main,
+            session={"branch": "session/x", "base": "master", "files": [rel]},
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "privacy.clean passed a merge that publishes personal data: "
+            f"{verdict.message!r}"
+        )
+
+    def test_the_branch_is_the_subject_even_when_no_files_are_declared(
+        self, ctx_factory
+    ):
+        """The other half of the same defect, and the one that fails OPEN.
+
+        ``_changed_set`` asks ``git.branch_files(cwd, base)``, which runs
+        ``base...HEAD``. From the main checkout HEAD *is* the base, so it
+        returns an empty list — not ``None``, so ``answerable`` stays true and
+        the emptiness is silent. The declared file set is then the only
+        surviving source of paths, and a project that declares none is
+        screened over nothing at every merge it ever makes.
+        """
+        main, wt = ctx_factory.main, ctx_factory.wt
+        rel = "docs/architecture/added.md"
+        shell_write(wt, rel, "contact a.person@example.com")
+        stage(wt, rel)
+        commit(wt, "a doc that leaks")
+        ctx = ctx_factory(
+            cwd=main,
+            # No `files`: the session declared nothing, which is the default
+            # for a project that has not acquired the habit.
+            session={"branch": "session/x", "base": "master", "files": []},
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "privacy.clean screened nothing at a merge that publishes "
+            f"personal data, because it asked master what master changed: "
+            f"{verdict.message!r}"
+        )
+
+    def test_inside_the_worktree_the_working_tree_is_still_screened(
+        self, ctx_factory
+    ):
+        """The review boundary proper is unchanged: there the working tree IS
+        what the merge will publish, and uncommitted work must still be read.
+        """
+        wt = ctx_factory.wt
+        rel = "docs/architecture/overview.md"
+        shell_write(wt, rel, "contact a.person@example.com")
+        stage(wt, rel)
+        ctx = ctx_factory(
+            cwd=wt, session={"branch": "session/x", "base": "master", "files": []}
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, (
+            "an uncommitted leak in the session worktree stopped being "
+            f"screened: {verdict.message!r}"
+        )
+
+
+class TestPrivacyScopeCoversTheSecondCopies:
+    """AUD-15: the scope prefixes came from paths.docs and paths.memory only.
+
+    The memory index is a concentrate of exactly the text the memory scope
+    protects, and the committed telemetry report is the one rendering of the
+    raw stats store that leaves the machine — both were unscanned.
+    """
+
+    def test_the_memory_index_is_in_scope(self, ctx_factory):
+        target = ctx_factory.main / "MEMORY.md"
+        ctx = ctx_factory(payload=edit_payload(target, "mail a.person@example.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_the_reports_store_is_in_scope_by_default(self, ctx_factory):
+        target = ctx_factory.main / "docs" / "reports" / "telemetry.md"
+        ctx = ctx_factory(payload=edit_payload(target, "mail a.person@example.com"))
+        result = only(evaluate(["privacy.clean"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_a_literal_prefix_widens_the_scope(self, ctx_factory):
+        """A scope entry that is not a keyword is a project-relative prefix.
+
+        This is how a project whose ``paths.docs`` names one subtree declares
+        that a wider one — ``docs/`` including its audits — is still a place
+        where a leak becomes permanent.
+        """
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["docs/"]}})
+        target = ctx_factory.main / "docs" / "audits" / "audit.md"
+        ctx = ctx_factory(payload=edit_payload(target, "mail a.person@example.com"))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_literal_prefix_does_not_reach_outside_itself(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["docs/"]}})
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "app.py", "mail a@b.com")
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+class TestNamedAfterIsolating:
+    """AUD-14: the one non-memory rule with no known-positive failing fixture.
+
+    Structural until AUD-05: no code path evaluated it. Its own ``registered →
+    not applicable`` branch was the second layer of deadness — an entry gate
+    runs while the record still reads the PREVIOUS state, so abstaining on
+    ``registered`` made the gate unable to fire on the only edge it guards.
+    """
+
+    def test_a_branch_derived_name_fails_at_the_isolation_gate(self, ctx_factory):
+        # State is `registered` because that is what the record says while the
+        # entry gate to `isolated` is being evaluated.
+        ctx = ctx_factory(session={"state": "registered", "name": "session/deadbeef"})
+        result = only(evaluate(["session.named_after_isolating"], ctx))
+        assert not result.verdict.ok and not result.verdict.skipped
+
+    def test_an_unnamed_record_fails(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "isolated", "name": ""})
+        assert not only(evaluate(["session.named_after_isolating"], ctx)).verdict.ok
+
+    def test_a_task_derived_name_passes(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "registered", "name": "fix-the-widget"})
+        assert only(evaluate(["session.named_after_isolating"], ctx)).verdict.ok
+
+    def test_no_session_still_abstains(self, ctx_factory):
+        assert only(
+            evaluate(["session.named_after_isolating"], ctx_factory())
+        ).verdict.skipped
+
+
+# -- work-item rules ---------------------------------------------------
+
+
+class TestItemRules:
+    def test_fixing_an_unreproduced_bug_is_refused(self, ctx_factory):
+        item = {"type": "bug", "status": "filed", "history": []}
+        ctx = ctx_factory(extra={"item": item, "target_status": "fixed"})
+        result = only(evaluate(["item.bug_reproduced_before_fix"], ctx))
+        assert "never been reproduced" in result.verdict.message
+
+    def test_a_reproduced_bug_may_be_fixed(self, ctx_factory):
+        item = {"type": "bug", "status": "reproduced", "history": [{"to": "reproduced"}]}
+        ctx = ctx_factory(extra={"item": item, "target_status": "fixed"})
+        assert only(evaluate(["item.bug_reproduced_before_fix"], ctx)).verdict.ok
+
+    def test_ideas_are_not_subject_to_the_repro_rule(self, ctx_factory):
+        ctx = ctx_factory(extra={"item": {"type": "idea"}, "target_status": "done"})
+        assert only(evaluate(["item.bug_reproduced_before_fix"], ctx)).verdict.skipped
+
+    def test_closing_with_outstanding_residue_is_reported(self, ctx_factory):
+        item = {"type": "bug", "status": "verified", "residue": ["a device soak is owed"]}
+        ctx = ctx_factory(extra={"item": item, "target_status": "closed"})
+        result = only(evaluate(["item.residue_matches_status"], ctx))
+        assert "still owed" in result.verdict.message
+
+    def test_closing_clean_passes(self, ctx_factory):
+        item = {"type": "bug", "status": "verified", "residue": []}
+        ctx = ctx_factory(extra={"item": item, "target_status": "closed"})
+        assert only(evaluate(["item.residue_matches_status"], ctx)).verdict.ok
+
+
+class TestMemoryRulesCanActuallyFail:
+    """Four rules that had never once produced a failing verdict.
+
+    Instrumenting the whole suite found them only ever skipping: bound to no
+    event and named by no machine gate, they were unreachable, and every
+    project that reads `invariant rules list` was being told memory hygiene
+    was enforced at whatever level its profile named. The README's claim is
+    that a gate is a function with a fixture proving it fails on a
+    known-positive input; these four are that claim's counterexamples, so each
+    gets both — a binding that reaches it, and an input it fails on.
+    """
+
+    def managed(self, ctx_factory, **payload):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "paths": {"memory": "memory"},
+                "memory": {"managed": True},
+            },
+        )
+        return ctx_factory(payload=payload or {})
+
+    def memo(self, root, name, body="Body text.", description="a fact"):
+        path = root / "memory"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / f"{name}.md").write_text(
+            f"---\nname: {name}\ndescription: {description}\n"
+            f"metadata:\n  type: project\n---\n\n{body}\n",
+            encoding="utf-8",
+        )
+
+    def index(self, root, text):
+        (root / "memory" / "MEMORY.md").write_text(text, encoding="utf-8")
+
+    def test_an_unparseable_memory_fails_the_schema_rule(self, ctx_factory):
+        (ctx_factory.main / "memory").mkdir()
+        (ctx_factory.main / "memory" / "bad.md").write_text("just prose\n", encoding="utf-8")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.schema_valid"], ctx)).verdict.ok
+
+    def test_a_memory_missing_from_the_index_fails_the_index_rule(self, ctx_factory):
+        self.memo(ctx_factory.main, "alpha")
+        self.index(ctx_factory.main, "# Memory\n")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.index_current"], ctx)).verdict.ok
+
+    def test_a_link_to_nothing_fails_the_dead_link_rule(self, ctx_factory):
+        self.memo(ctx_factory.main, "alpha", body="see [[ghost]]")
+        self.index(ctx_factory.main, "- [Alpha](alpha.md)\n")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.no_dead_links"], ctx)).verdict.ok
+
+    def test_two_memories_of_one_fact_fail_the_duplicate_rule(self, ctx_factory):
+        text = "The deploy script must be run from the repository root every time."
+        self.memo(ctx_factory.main, "alpha", body=text, description="deploy from root")
+        self.memo(ctx_factory.main, "beta", body=text, description="deploy from root")
+        self.index(ctx_factory.main, "- [A](alpha.md)\n- [B](beta.md)\n")
+        ctx = self.managed(ctx_factory)
+        assert not only(evaluate(["memory.no_duplicates"], ctx)).verdict.ok
+
+    def test_an_unmanaged_project_still_hears_nothing(self, ctx_factory):
+        """The short-circuit stays. Wiring the rules to an event must not turn
+        memory hygiene into noise for the projects that do not use it."""
+        for rule_id in (
+            "memory.schema_valid",
+            "memory.index_current",
+            "memory.no_dead_links",
+            "memory.no_duplicates",
+        ):
+            assert only(evaluate([rule_id], ctx_factory())).verdict.skipped
+
+    def test_they_run_at_the_end_of_a_turn(self):
+        bound = {spec.id for spec in rules_for_event("stop")}
+        assert {
+            "memory.schema_valid",
+            "memory.index_current",
+            "memory.no_dead_links",
+            "memory.no_duplicates",
+        } <= bound
+
+    def test_they_do_not_ask_twice_in_one_turn(self, ctx_factory):
+        (ctx_factory.main / "memory").mkdir()
+        (ctx_factory.main / "memory" / "bad.md").write_text("prose\n", encoding="utf-8")
+        ctx = self.managed(ctx_factory, stop_hook_active=True)
+        assert only(evaluate(["memory.schema_valid"], ctx)).verdict.skipped
+
+
+class TestItemHistoryDrift:
+    """The item store is exempt from isolation, so a hand edit never asks the
+    machine.
+
+    That exemption is deliberate and correct — a backlog entry is data, every
+    session touches it, and routing it through a branch produces conflicts with
+    no review value. But it means the FSM's load-bearing invariant is
+    structural only for callers who go through the CLI. Seven bugs in this
+    repository's own backlog show `status: fixed` with `history: []`: the
+    `filed -> reproduced -> fixed` edge the machine will not let you skip was
+    skipped, by writing the file. Nothing noticed for months.
+
+    So the machine cannot be the only reader. This rule re-derives the status
+    from the recorded history at turn end and reports the ones that disagree —
+    drift detection over a store the gate cannot sit in front of.
+    """
+
+    def backlog(self, root):
+        from invariant.core.items import MarkdownBackend
+
+        path = root / "docs" / "backlog"
+        path.mkdir(parents=True, exist_ok=True)
+        return MarkdownBackend(path)
+
+    def save(self, root, **kwargs):
+        from invariant.core.items import Item
+
+        kwargs.setdefault("type", "bug")
+        kwargs.setdefault("title", "a defect")
+        self.backlog(root).save(Item(**kwargs))
+
+    def check(self, ctx_factory, **payload):
+        ctx = ctx_factory(payload=payload or {})
+        return only(evaluate(["item.history_matches_status"], ctx))
+
+    def test_a_status_no_history_explains_is_reported(self, ctx_factory):
+        # The BUG_002..BUG_008 shape exactly: fixed, with nothing recorded.
+        self.save(ctx_factory.main, id="BUG_900", status="fixed", history=[])
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "BUG_900" in result.verdict.detail
+
+    def test_a_history_that_walks_the_machine_passes(self, ctx_factory):
+        self.save(
+            ctx_factory.main,
+            id="BUG_901",
+            status="fixed",
+            history=[
+                {"from": "filed", "to": "reproduced"},
+                {"from": "reproduced", "to": "fixed"},
+            ],
+        )
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_a_fresh_item_sitting_in_its_initial_state_passes(self, ctx_factory):
+        self.save(ctx_factory.main, id="BUG_902", status="filed", history=[])
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_history_that_ends_somewhere_else_than_the_status_is_reported(
+        self, ctx_factory
+    ):
+        self.save(
+            ctx_factory.main,
+            id="BUG_903",
+            status="closed",
+            history=[{"from": "filed", "to": "reproduced"}],
+        )
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "reproduced" in result.verdict.detail
+
+    def test_an_illegal_edge_in_the_history_is_reported(self, ctx_factory):
+        self.save(
+            ctx_factory.main,
+            id="BUG_904",
+            status="fixed",
+            history=[{"from": "filed", "to": "fixed"}],
+        )
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "filed -> fixed" in result.verdict.detail
+
+    def test_a_recorded_override_is_not_drift(self, ctx_factory):
+        """`--force` already demanded a written reason and recorded itself.
+
+        An override is the machine being asked and answered, not bypassed. A
+        drift check that flagged it would be reporting the audit trail working.
+        """
+        self.save(
+            ctx_factory.main,
+            id="BUG_905",
+            status="fixed",
+            history=[{"from": "filed", "to": "fixed", "forced": True, "reason": "x"}],
+        )
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_a_gap_in_the_chain_is_reported(self, ctx_factory):
+        """The fourth drift kind: each entry is legal, the sequence is not.
+
+        `filed -> reproduced` then `verified -> closed` is two edges the
+        machine has, spliced together across a step that was never recorded.
+        Checking edges one at a time would pass it; the walk is what catches
+        it, so the walk needs its own fixture.
+        """
+        self.save(
+            ctx_factory.main,
+            id="BUG_907",
+            status="closed",
+            history=[
+                {"from": "filed", "to": "reproduced"},
+                {"from": "verified", "to": "closed"},
+            ],
+        )
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "resumes at 'verified' after 'reproduced'" in result.verdict.detail
+
+    def test_a_history_entry_naming_no_target_is_stepped_over(self, ctx_factory):
+        """Hand-edited files are the whole reason this rule exists, so a
+        malformed entry must not decide the verdict for the item around it."""
+        self.save(
+            ctx_factory.main,
+            id="BUG_908",
+            status="reproduced",
+            history=[{"reason": "typed by hand"}, {"from": "filed", "to": "reproduced"}],
+        )
+        assert self.check(ctx_factory).verdict.ok
+
+    def test_every_item_is_walked_not_only_the_first(self, ctx_factory):
+        """One machine is loaded per type, not per item — and the second item
+        of that type still gets checked rather than riding the cache."""
+        self.save(ctx_factory.main, id="BUG_909", status="filed", history=[])
+        self.save(ctx_factory.main, id="BUG_910", status="fixed", history=[])
+        result = self.check(ctx_factory)
+        assert not result.verdict.ok
+        assert "BUG_910" in result.verdict.detail
+        assert "BUG_909" not in result.verdict.detail
+
+    def test_an_empty_backlog_is_not_a_finding(self, ctx_factory):
+        assert self.check(ctx_factory).verdict.skipped
+
+    def test_an_item_of_an_unknown_type_is_left_alone(self, ctx_factory):
+        """A project may store other kinds in the same backlog. This rule can
+        only speak for the types it has a machine for."""
+        self.save(ctx_factory.main, id="RFC_001", type="rfc", status="whatever")
+        assert self.check(ctx_factory).verdict.skipped
+
+    def test_it_does_not_ask_twice_in_one_turn(self, ctx_factory):
+        self.save(ctx_factory.main, id="BUG_906", status="fixed", history=[])
+        assert self.check(ctx_factory, stop_hook_active=True).verdict.skipped
+
+    def test_it_runs_at_the_end_of_a_turn(self):
+        assert "item.history_matches_status" in {
+            spec.id for spec in rules_for_event("stop")
+        }
+
+
+def test_render_includes_level_and_fixes(ctx_factory):
+    ctx = ctx_factory(cwd=ctx_factory.main, payload=edit_payload(ctx_factory.main / "a.py"))
+    rendered = only(evaluate(["session.no_edit_in_main_checkout"], ctx)).render()
+    assert "BLOCK" in rendered and "try:" in rendered
+
+
+class TestExemptionAcrossWorktrees:
+    """The exemption must survive the multi-worktree case it exists for.
+
+    Patterns are written project-relative. If the target sits in a different
+    worktree than the manifest was found in, resolving against a single base
+    yields an absolute path, which matches no project-relative pattern — so the
+    exemption silently stops applying exactly when several worktrees exist.
+    """
+
+    def test_exempt_in_the_manifest_root(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.main / ".claude" / "memory" / "a.md"),
+        )
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_exempt_when_the_target_is_in_another_worktree(self, ctx_factory):
+        # cwd is the worktree; the target is the same config path in the main
+        # checkout. This is the case that regressed.
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / ".claude" / "memory" / "a.md"),
+        )
+        for rule_id in ("session.isolated_before_edit",
+                        "session.no_edit_in_main_checkout",
+                        "pipeline.started_before_edit"):
+            assert only(evaluate([rule_id], ctx)).verdict.skipped, rule_id
+
+    def test_exempt_when_cwd_is_main_and_target_is_in_a_worktree(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.wt / ".claude" / "memory" / "a.md"),
+        )
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_a_source_file_is_still_not_exempt(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / "src" / "app.py"),
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+    def test_no_patterns_means_nothing_is_exempt(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"session": {"exempt_paths": []}})
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            payload=edit_payload(ctx_factory.main / ".claude" / "memory" / "a.md"),
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+
+class TestAWorktreeUnderAnExemptDirectoryStillEnforces:
+    """A worktree's LOCATION must not exempt the sources inside it.
+
+    ``session.worktree_dir`` lets a project put worktrees inside the repository,
+    which some hosts require before they will treat the directory as trusted.
+    The default exemption covers ``.claude/*``, and fnmatch's ``*`` spans path
+    separators, so every file in a worktree placed there spells as an exempt
+    path when resolved against the main checkout. The isolation rule consults
+    the exemption first, so the result is not an error but a skip: enforcement
+    off, silently, in the multi-worktree case it exists for.
+    """
+
+    @pytest.fixture
+    def nested(self, repo):
+        main, _ = repo
+        inner = main / ".claude" / "worktrees" / "wt-1"
+        inner.parent.mkdir(parents=True, exist_ok=True)
+        run(["git", "worktree", "add", "-q", str(inner), "-b", "session/nested"], main)
+        return main, inner
+
+    @pytest.fixture
+    def nested_ctx(self, nested):
+        main, inner = nested
+        from invariant.core.manifest import Manifest
+
+        def build(payload=None, cwd=None):
+            return RuleContext(
+                manifest=Manifest.locate(main),
+                cwd=Path(cwd or main),
+                session=None,
+                pipeline=None,
+                payload=payload or {},
+                extra={},
+            )
+
+        build.main = main
+        build.inner = inner
+        return build
+
+    def test_a_source_file_in_the_nested_worktree_is_not_exempt(self, nested_ctx):
+        """The regression this guards: skipped here means unenforced."""
+        ctx = nested_ctx(payload=edit_payload(nested_ctx.inner / "src" / "app.py"))
+        verdict = only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict
+        assert not verdict.skipped, "the worktree's own location exempted its sources"
+        assert verdict.ok, "an edit inside a linked worktree is what the rule allows"
+
+    def test_the_main_checkouts_own_config_is_still_exempt(self, nested_ctx):
+        ctx = nested_ctx(payload=edit_payload(nested_ctx.main / ".claude" / "settings.json"))
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_config_inside_the_nested_worktree_is_exempt_on_its_own_merit(self, nested_ctx):
+        """Judged by its path WITHIN the worktree, not by where the worktree is.
+
+        Distinct from the source-file case: this one is exempt for the reason
+        the exemption exists, and would stay exempt at any worktree location.
+        """
+        target = nested_ctx.inner / ".claude" / "memory" / "a.md"
+        ctx = nested_ctx(payload=edit_payload(target))
+        assert only(evaluate(["session.isolated_before_edit"], ctx)).verdict.skipped
+
+    def test_the_main_checkout_is_still_refused_from_inside_the_nested_worktree(
+        self, nested_ctx
+    ):
+        """Nesting must not make the main checkout look like part of a worktree."""
+        ctx = nested_ctx(
+            cwd=nested_ctx.inner,
+            payload=edit_payload(nested_ctx.main / "src" / "app.py"),
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+
+class TestPrivacyScopeAcrossWorktrees:
+    """Scope must not depend on which worktree the caller is standing in."""
+
+    def _memory_write(self, path):
+        return edit_payload(path, "the crash fired at 14:05")
+
+    def test_memory_in_the_manifest_root(self, ctx_factory):
+        target = ctx_factory.main / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=self._memory_write(target))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_memory_in_the_main_checkout_seen_from_a_worktree(self, ctx_factory):
+        # The regression: scope computed from the worktree excluded a file in
+        # the main checkout, so the gate reported nothing to check.
+        target = ctx_factory.main / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.wt, payload=self._memory_write(target))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_memory_in_a_worktree_seen_from_main(self, ctx_factory):
+        target = ctx_factory.wt / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=self._memory_write(target))
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_a_source_file_stays_out_of_scope(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / "app.py", "EMAIL='a@b.com'"),
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+    def test_scope_all_covers_source_too(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["all"]}})
+        ctx = ctx_factory(
+            cwd=ctx_factory.wt,
+            payload=edit_payload(ctx_factory.main / "app.py", "mail a@b.com"),
+        )
+        assert not only(evaluate(["privacy.clean"], ctx)).verdict.ok
+
+    def test_empty_scope_checks_nothing(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": []}})
+        target = ctx_factory.main / ".claude" / "memory" / "note.md"
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=self._memory_write(target))
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+class TestOutOfProjectPaths:
+    """One project's hooks must not govern edits to a different repository."""
+
+    def test_an_edit_in_another_repository_is_not_governed(self, ctx_factory, tmp_path):
+        other = tmp_path / "unrelated-repo"
+        (other / "src").mkdir(parents=True)
+        target = other / "src" / "thing.py"
+        target.write_text("x", encoding="utf-8")
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=edit_payload(target))
+        for rule_id in ("session.isolated_before_edit", "pipeline.started_before_edit"):
+            verdict = only(evaluate([rule_id], ctx)).verdict
+            assert verdict.skipped, f"{rule_id}: {verdict.message}"
+
+    def test_an_edit_in_this_project_is_still_governed(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=edit_payload(ctx_factory.main / "app.py")
+        )
+        assert not only(evaluate(["session.isolated_before_edit"], ctx)).verdict.ok
+
+    def test_an_edit_in_a_sibling_worktree_is_still_governed(self, ctx_factory):
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=edit_payload(ctx_factory.wt / "app.py")
+        )
+        assert not only(evaluate(["session.isolated_before_edit"], ctx)).verdict.ok
+
+
+class TestAgentRoleGates:
+    """Did an agent actually fire — read from evidence, not from intent."""
+
+    def test_na_when_the_role_has_no_agent_configured(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"design": []}},
+        })
+        ctx = ctx_factory(pipeline={"evidence": {}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        # Skipped, NOT passed. A project with no design agent has nothing
+        # checked here, and saying "clean" would claim otherwise.
+        assert verdict.skipped
+        assert verdict.ok
+
+    def test_fails_when_no_agent_ran(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": []}})
+        assert not evaluate(["agents.design_agent_ran"], ctx)[0].verdict.ok
+
+    def test_passes_when_the_configured_agent_ran(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["feature-architect"]}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_different_agent_does_not_satisfy_the_role(self, ctx_factory):
+        """An agent ran, but not one that does this job."""
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["backlog-curator"]}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        assert not verdict.ok
+        assert "backlog-curator" in verdict.detail  # names what did run
+
+    def test_the_review_role_is_independent_of_the_design_role(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["feature-architect"]}})
+        assert evaluate(["agents.design_agent_ran"], ctx)[0].verdict.ok
+        assert not evaluate(["agents.review_agent_ran"], ctx)[0].verdict.ok
+
+    def test_a_project_may_name_its_own_agent_for_a_role(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"review": ["house-reviewer"]}},
+        })
+        ctx = ctx_factory(pipeline={"evidence": {"agents_run": ["house-reviewer"]}})
+        assert evaluate(["agents.review_agent_ran"], ctx)[0].verdict.ok
+
+    def test_fails_outside_a_pipeline_rather_than_passing(self, ctx_factory):
+        ctx = ctx_factory(pipeline=None)
+        assert not evaluate(["agents.design_agent_ran"], ctx)[0].verdict.ok
+
+    def test_the_fix_names_the_agents_that_would_satisfy_it(self, ctx_factory):
+        ctx = ctx_factory(pipeline={"evidence": {}})
+        verdict = evaluate(["agents.design_agent_ran"], ctx)[0].verdict
+        assert any("feature-architect" in fix for fix in verdict.fixes)
+
+
+def dispatch_payload(agent, tool="Agent"):
+    return {"tool_name": tool, "tool_input": {"subagent_type": agent, "prompt": "go"}}
+
+
+class TestGatedDispatchHasPipeline:
+    """IDEA_020 — a gated-role dispatch with no pipeline is said BEFORE it runs.
+
+    The PostToolUse notice says the same thing after the agent has done its
+    work, which is too late to start the pipeline the work needed. This rule
+    fires at pre-tool-use and warns; it never blocks in a shipped profile.
+    """
+
+    RULE = "agents.gated_dispatch_has_pipeline"
+    SESSION: ClassVar[dict] = {"id": "s1", "state": "isolated"}
+
+    def verdict(self, ctx):
+        return only(evaluate([self.RULE], ctx))
+
+    def test_it_is_bound_to_pre_tool_use(self):
+        assert self.RULE in {spec.id for spec in rules_for_event("pre-tool-use")}
+
+    def test_a_design_agent_with_no_pipeline_warns(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("feature-architect"))
+        result = self.verdict(ctx)
+        assert result.warns
+        message = result.verdict.message + result.verdict.detail
+        assert "feature-architect" in message
+        assert "design" in message
+        assert "will not count as evidence" in result.verdict.message.lower()
+        assert any("invariant pipeline start --methodology" in f for f in result.verdict.fixes)
+
+    def test_the_fix_names_the_configured_methodology(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("feature-architect"))
+        fixes = self.verdict(ctx).verdict.fixes
+        assert any("--methodology tdd" in f for f in fixes)
+
+    def test_a_review_agent_dispatched_by_task_warns(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.SESSION, payload=dispatch_payload("compliance-reviewer", tool="Task")
+        )
+        result = self.verdict(ctx)
+        assert result.warns
+        assert "review" in result.verdict.message
+
+    def test_a_non_gated_agent_is_silent(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("backlog-curator"))
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+        assert "backlog-curator" in result.verdict.message
+
+    def test_a_running_pipeline_is_clean(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.SESSION,
+            pipeline={"state": "designing", "evidence": {}},
+            payload=dispatch_payload("feature-architect"),
+        )
+        result = self.verdict(ctx)
+        assert result.verdict.ok and not result.verdict.skipped
+
+    def test_no_bound_session_is_silent(self, ctx_factory):
+        ctx = ctx_factory(session=None, payload=dispatch_payload("feature-architect"))
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+
+    def test_a_call_that_is_not_a_dispatch_is_not_screened(self, ctx_factory):
+        ctx = ctx_factory(session=self.SESSION, payload=bash_payload("ls"))
+        assert self.verdict(ctx).verdict.skipped
+
+    def test_a_dispatch_naming_no_agent_is_not_screened(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.SESSION, payload={"tool_name": "Agent", "tool_input": {}}
+        )
+        assert self.verdict(ctx).verdict.skipped
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"tool_name": "Agent"},
+            {"tool_name": "Agent", "tool_input": None},
+            {"tool_name": "Agent", "tool_input": "junk"},
+            {"tool_name": "Agent", "tool_input": {"subagent_type": 7}},
+            {"tool_name": "Agent", "tool_input": {"subagent_type": ["feature-architect"]}},
+            {"tool_name": "Agent", "tool_input": {"subagent_type": {"a": 1}}},
+            {"tool_input": {"subagent_type": "feature-architect"}},
+        ],
+    )
+    def test_a_malformed_payload_never_crashes_or_warns(self, ctx_factory, payload):
+        ctx = ctx_factory(session=self.SESSION, payload=payload)
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+
+    def test_a_role_whose_gate_is_off_owes_nothing(self, ctx_factory):
+        """The warning is about evidence a gate will ask for. A gate the project
+        switched off asks for none, so there is nothing to warn about."""
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "enforcement": {"rules": {"agents.design_agent_ran": "off"}},
+        })
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("feature-architect"))
+        assert self.verdict(ctx).verdict.skipped
+
+    def test_the_role_mapping_is_the_one_the_gates_read(self, ctx_factory):
+        """A project's own reviewer warns; the library one it replaced does not."""
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"review": ["house-reviewer"]}},
+        })
+        ours = ctx_factory(session=self.SESSION, payload=dispatch_payload("house-reviewer"))
+        assert self.verdict(ours).warns
+        theirs = ctx_factory(
+            session=self.SESSION, payload=dispatch_payload("compliance-reviewer")
+        )
+        assert self.verdict(theirs).verdict.skipped
+
+    def test_an_agent_in_both_roles_names_both(self, ctx_factory):
+        write_manifest(ctx_factory.main, {
+            "version": 1,
+            "project": {"name": "demo"},
+            "agents": {"roles": {"design": ["one"], "review": ["one"]}},
+        })
+        ctx = ctx_factory(session=self.SESSION, payload=dispatch_payload("one"))
+        message = self.verdict(ctx).verdict.message
+        assert "design" in message and "review" in message
+
+    def test_a_stand_down_quiets_it_like_any_other_rule(self, ctx_factory):
+        session = dict(self.SESSION, standdown={"until": "session", "reason": "drill"})
+        ctx = ctx_factory(session=session, payload=dispatch_payload("feature-architect"))
+        result = self.verdict(ctx)
+        assert result.verdict.skipped and not result.warns
+
+    def test_every_shipped_profile_grades_it_warn(self):
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        for profile in (DATA_DIR / "profiles").glob("*.yaml"):
+            rules = yaml.safe_load(profile.read_text(encoding="utf-8"))["rules"]
+            assert rules[self.RULE] == "warn", profile.name
+
+    def test_the_dispatch_reader_is_shared_with_the_host(self):
+        """One answer to "which agent is this call dispatching", for both hooks."""
+        from invariant.core.rules import AGENT_TOOLS, dispatched_agent
+        from invariant.hosts import claude_code
+
+        assert claude_code.AGENT_TOOLS is AGENT_TOOLS
+        assert dispatched_agent(dispatch_payload("x", tool="Task")) == "x"
+        assert dispatched_agent(dispatch_payload("x", tool="Read")) is None
+        assert dispatched_agent({"tool_name": "Agent", "tool_input": "junk"}) is None
+
+
+
+class TestPushBarrierAndExemptPaths:
+    """Config and memory commit straight to the shared branch by design.
+
+    Such a commit can never acquire a session, so a barrier that demands one
+    enforces nothing — it makes those commits permanently unpushable. That was
+    not hypothetical: it blocked a real push of already-committed memory.
+    """
+
+    PUSH: ClassVar[dict] = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
+
+    @pytest.fixture(autouse=True)
+    def publishing_on(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+
+    def push_ctx(self, ctx_factory, cwd, session=None):
+        return ctx_factory(cwd=cwd, session=session, payload=self.PUSH)
+
+    def with_upstream(self, main, tmp_path, files):
+        """A repo with a real upstream, ahead by one commit touching `files`."""
+        remote = tmp_path / "remote.git"
+        run(["git", "init", "-q", "--bare", str(remote)], main)
+        run(["git", "remote", "add", "origin", str(remote)], main)
+        run(["git", "push", "-q", "-u", "origin", "master"], main)
+        for rel in files:
+            path = main / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x\n", encoding="utf-8")
+        if files:
+            run(["git", "add", "-A"], main)
+            run(["git", "commit", "-qm", "ahead"], main)
+
+    def verdict(self, ctx_factory, tmp_path, files, session=None):
+        main = ctx_factory.main
+        self.with_upstream(main, tmp_path, files)
+        ctx = self.push_ctx(ctx_factory, main, session=session)
+        return evaluate(["session.push_barrier"], ctx)[0].verdict
+
+    def test_a_push_of_only_exempt_paths_is_allowed(self, ctx_factory, tmp_path):
+        verdict = self.verdict(ctx_factory, tmp_path, [".claude/memory/a-note.md"])
+        # Skipped, not passed: the barrier did not apply, rather than being met.
+        assert verdict.skipped and verdict.ok
+
+    def test_one_non_exempt_path_reinstates_the_barrier(self, ctx_factory, tmp_path):
+        verdict = self.verdict(
+            ctx_factory, tmp_path, [".claude/memory/a-note.md", "src/app.py"]
+        )
+        assert not verdict.ok
+
+    def test_no_upstream_does_not_open_the_gate(self, ctx_factory):
+        """An unanswerable question is not a negative answer."""
+        ctx = self.push_ctx(ctx_factory, ctx_factory.main)
+        assert not evaluate(["session.push_barrier"], ctx)[0].verdict.ok
+
+    def test_nothing_ahead_does_not_open_the_gate(self, ctx_factory, tmp_path):
+        assert not self.verdict(ctx_factory, tmp_path, []).ok
+
+    def test_a_registered_session_is_still_held_to_the_barrier(
+        self, ctx_factory, tmp_path
+    ):
+        """The relaxation is for sessionless pushes only."""
+        verdict = self.verdict(
+            ctx_factory,
+            tmp_path,
+            [".claude/memory/a-note.md"],
+            session={"id": "s1", "state": "working", "push_count": 0},
+        )
+        assert not verdict.ok
+
+
+
+class TestPublishingIsOptIn:
+    """Off by default: a session ends at the merge, not at a remote.
+
+    The work is on the base branch and every worktree already sees it — they
+    share one object database. Publishing costs a CI run and is a decision
+    about the project rather than about whichever session finished last.
+    """
+
+    PUSH: ClassVar[dict] = {"tool_name": "Bash", "tool_input": {"command": "git " + "push origin master"}}
+
+    def test_the_barrier_abstains_when_publishing_is_off(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "merged", "push_count": 3}, payload=self.PUSH)
+        verdict = only(evaluate(["session.push_barrier"], ctx)).verdict
+        # Skipped, not passed. There is no session push for this to be the
+        # fourth of, so the barrier has nothing to say — which is a different
+        # statement from "this push is fine".
+        assert verdict.skipped
+
+    def test_the_barrier_returns_when_publishing_is_enabled(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+        ctx = ctx_factory(session={"state": "merged", "push_count": 3}, payload=self.PUSH)
+        assert not only(evaluate(["session.push_barrier"], ctx)).verdict.ok
+
+    def test_the_pushed_state_is_refused_by_default(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "merged"})
+        verdict = only(evaluate(["session.push_enabled"], ctx)).verdict
+        assert not verdict.ok
+        assert "session.push: true" in " ".join(verdict.fixes)
+
+    def test_the_pushed_state_opens_when_enabled(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+        assert only(evaluate(["session.push_enabled"], ctx_factory())).verdict.ok
+
+    def test_teardown_is_owed_from_merged_not_only_from_pushed(self, ctx_factory):
+        """The common ending must be the one that is checked.
+
+        Publishing is the detour now, so a rule that only looked at `pushed`
+        would exempt every session that took the normal route.
+        """
+        ctx = ctx_factory(session={"state": "merged", "worktree": str(ctx_factory.wt)})
+        assert not only(evaluate(["session.teardown_complete"], ctx)).verdict.ok
+
+    def test_teardown_is_satisfied_once_the_worktree_is_gone(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "merged", "worktree": "/nonexistent/wt"})
+        verdict = only(evaluate(["session.teardown_complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+
+
+class TestCoverageScopeAndPathSpelling:
+    """The gate had three separate holes, and one fix would have hidden another.
+
+    `record_coverage` had no callers, so the evidence could never exist;
+    `coverage_scope: touched` was configured but never implemented; and the
+    reporter emits absolute paths while git emits repo-relative ones. Wiring
+    only the first would have produced a gate that passed vacuously on an empty
+    intersection — quieter than blocking, and much worse.
+    """
+
+    def ctx_with(self, ctx_factory, coverage, changed=()):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        # Declared on the session rather than left dirty in the tree: by the
+        # time this gate runs the work is normally committed, and `git diff`
+        # reports nothing for committed work.
+        return ctx_factory(
+            session={"id": "s1", "files": list(changed)},
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_absolute_reporter_paths_match_relative_changed_files(self, ctx_factory):
+        """The mismatch that would have made the gate pass on nothing."""
+        absolute = str(ctx_factory.main / "src" / "app.swift")
+        ctx = self.ctx_with(ctx_factory, {absolute: 95.0}, changed=["src/app.swift"])
+        verdict = self.verdict(ctx)
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_changed_file_below_the_floor_is_caught(self, ctx_factory):
+        absolute = str(ctx_factory.main / "src" / "app.swift")
+        ctx = self.ctx_with(ctx_factory, {absolute: 40.0}, changed=["src/app.swift"])
+        assert not self.verdict(ctx).ok
+
+    def test_an_untouched_file_below_the_floor_is_ignored(self, ctx_factory):
+        """`coverage_scope: touched` means touched, and it was never applied."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {
+                str(ctx_factory.main / "src" / "app.swift"): 95.0,
+                str(ctx_factory.main / "src" / "ancient.swift"): 10.0,
+            },
+            changed=["src/app.swift"],
+        )
+        assert self.verdict(ctx).ok
+
+    def test_no_overlap_fails_rather_than_passing_vacuously(self, ctx_factory):
+        ctx = self.ctx_with(
+            ctx_factory,
+            {"/somewhere/else/other.swift": 100.0},
+            changed=["src/app.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "none of it covers the changed files" in verdict.message
+
+    def test_a_docs_only_change_does_not_trip_the_overlap_check(self, ctx_factory):
+        """Nothing measures coverage of a markdown file."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.swift"): 95.0},
+            changed=["docs/architecture/overview.md"],
+        )
+        assert self.verdict(ctx).ok
+
+    def test_missing_evidence_names_the_command_that_produces_it(self, ctx_factory):
+        """The old advice named a command no code path ran."""
+        ctx = self.ctx_with(ctx_factory, {})
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert any("invariant pipeline coverage" in fix for fix in verdict.fixes)
+
+
+
+class TestTouchedTestFilesAreNotHeldToTheFloor:
+    """BUG_019 — a Python session touching its own tests got an unsatisfiable gate.
+
+    `[tool.coverage.run] source = [...]` means test files are never measured,
+    so no row can ever exist for them, and the gate demanded one on essentially
+    every session in this repository:
+
+        2 changed source file(s) have no coverage row — tests/test_adapters.py, ...
+
+    The fix is NOT `carries_executable_code`, which BUG_019's sketch named: a
+    test file is full of executable lines, and answering `False` there would
+    assert the dangerous direction the base docstring forbids. The honest fact
+    is a different one — a test file is what measures, not what is measured.
+    """
+
+    def ctx_with(self, ctx_factory, coverage, changed=()):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        for rel in changed:
+            path = ctx_factory.main / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x = 1\n", encoding="utf-8")
+        return ctx_factory(
+            session={"id": "s1", "files": list(changed)},
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_a_touched_test_file_with_no_row_is_set_aside(self, ctx_factory):
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.py"): 95.0},
+            changed=["src/app.py", "tests/test_app.py"],
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "no coverage row" not in verdict.message
+
+    def test_the_file_set_aside_is_named(self, ctx_factory):
+        """Never silently. Every file the gate declines to answer for is
+        reported, or the pass is one the reader cannot audit."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.py"): 95.0},
+            changed=["src/app.py", "tests/test_app.py"],
+        )
+        assert "tests/test_app.py" in self.verdict(ctx).detail
+
+    def test_a_production_file_with_no_row_still_blocks(self, ctx_factory):
+        """The relaxation must not widen by one inch. This is the case the
+        gate exists for."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {str(ctx_factory.main / "src" / "app.py"): 95.0},
+            changed=["src/app.py", "src/untested.py"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "src/untested.py" in verdict.detail
+
+    def test_a_measured_test_file_is_still_held_to_the_floor(self, ctx_factory):
+        """A project that DOES measure its tests keeps the answer it earned.
+        Setting a file aside is for an absent row, never for a low one."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            {
+                str(ctx_factory.main / "src" / "app.py"): 95.0,
+                str(ctx_factory.main / "tests" / "test_app.py"): 10.0,
+            },
+            changed=["src/app.py", "tests/test_app.py"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "tests/test_app.py" in verdict.detail
+
+    def test_a_project_with_no_python_adapter_gets_no_relaxation(self, ctx_factory):
+        """The rule keeps the policy, the adapter supplies the fact. With no
+        adapter that knows the language, "cannot tell" relaxes nothing."""
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        for rel in ("src/app.py", "tests/test_app.py"):
+            path = ctx_factory.main / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x = 1\n", encoding="utf-8")
+        ctx = ctx_factory(
+            session={"id": "s1", "files": ["src/app.py", "tests/test_app.py"]},
+            pipeline={
+                "evidence": {"coverage": {str(ctx_factory.main / "src" / "app.py"): 95.0}}
+            },
+        )
+        assert not self.verdict(ctx).ok
+
+
+class TestCoverageAcrossTwoRoots:
+    """An isolated session has two roots, and the gate saw only one.
+
+    State lives in the MAIN checkout, because worktrees share one `.git`.
+    Compilation happens in the session's WORKTREE, so every path the coverage
+    tool emits carries the worktree prefix. Hooks run from the main checkout,
+    so the rule was stripping a prefix the measured paths did not have — the
+    relative form never appeared and the intersection was empty for a reason
+    that had nothing to do with coverage.
+
+    Invisible in a single-checkout repo, which is why it survived until a
+    session actually isolated.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,  # the rule runs from the MAIN checkout
+            session={"id": "s1", "files": declared, "worktree": str(ctx_factory.wt)},
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_the_reported_failure_now_passes(self, ctx_factory):
+        """End to end, as reported.
+
+        Note this passes on EITHER mechanism — worktree-root stripping or
+        suffix matching — so it does not isolate which. `TestCoverageRoots`
+        below tests them apart; this one asserts the user-visible outcome.
+        """
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 100.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory, measured, ["Heap/Intake/FileBytesIngester.swift"]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok and not verdict.skipped, verdict.message
+
+    def test_the_main_checkout_root_still_works(self, ctx_factory):
+        """A session that never isolated has one root, and must keep working."""
+        measured = {str(ctx_factory.main / "src" / "app.swift"): 95.0}
+        ctx = ctx_factory(
+            cwd=ctx_factory.main,
+            session={"id": "s1", "files": ["src/app.swift"]},
+            pipeline={"evidence": {"coverage": measured}},
+        )
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "touched"}},
+            },
+        )
+        assert self.verdict(ctx).ok
+
+    def test_a_root_nobody_anticipated_still_matches_by_suffix(self, ctx_factory):
+        """Belt to the braces: a prefix from neither known root."""
+        measured = {"/build/somewhere/else/Heap/Intake/FileBytesIngester.swift": 100.0}
+        ctx = self.ctx_for(
+            ctx_factory, measured, ["Heap/Intake/FileBytesIngester.swift"]
+        )
+        assert self.verdict(ctx).ok
+
+    def test_a_partial_intersection_fails_rather_than_passing(self, ctx_factory):
+        """The failure mode a lenient matcher would introduce.
+
+        Suffix matching is loose enough that a bug in it yields PARTIAL
+        overlaps rather than empty ones — and a partial overlap that answered
+        only for the files it matched would report a pass for the ones it never
+        found. That is the vacuous green one layer below the one already
+        closed.
+        """
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 100.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory,
+            measured,
+            [
+                "Heap/Intake/FileBytesIngester.swift",
+                "Heap/Intake/IntakeDrainDisposition.swift",  # never measured
+            ],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "IntakeDrainDisposition.swift" in verdict.detail
+
+    def test_docs_in_the_declared_set_are_not_expected_to_have_coverage(
+        self, ctx_factory
+    ):
+        """A session declares its docs too; nothing measures a .rst file."""
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 100.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory,
+            measured,
+            [
+                "Heap/Intake/FileBytesIngester.swift",
+                "docs/architecture/intake_sources.rst",
+                "docs/backlog.rst",
+            ],
+        )
+        assert self.verdict(ctx).ok
+
+    def test_a_matched_file_below_the_floor_still_fails(self, ctx_factory):
+        measured = {
+            str(ctx_factory.wt / "Heap" / "Intake" / "FileBytesIngester.swift"): 40.0,
+        }
+        ctx = self.ctx_for(
+            ctx_factory, measured, ["Heap/Intake/FileBytesIngester.swift"]
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "below the" in verdict.message
+
+
+class TestOverstatingHazardsBlock:
+    """Bent low and bent high are not the same risk.
+
+    Low blocks work that was fine: visible, and self-correcting, because being
+    blocked is what sends someone to look. High passes work that was never
+    covered, silently, and nobody looks. Same evidence, opposite handling.
+    """
+
+    def ctx_for(self, ctx_factory, run):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"gates": {"coverage_min": 90, "coverage_scope": "all"}},
+            },
+        )
+        return ctx_factory(
+            session={"id": "s1"},
+            pipeline={
+                "evidence": {
+                    "coverage": {"src/app.swift": 100.0},
+                    "coverage_run": run,
+                }
+            },
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_an_understating_hazard_is_annotated_not_blocked(self, ctx_factory):
+        ctx = self.ctx_for(
+            ctx_factory,
+            {"hazards": ["xcode.exit65_drops_suites"], "overstating_hazards": []},
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok
+        assert "exit65_drops_suites" in verdict.message
+
+    def test_an_overstating_hazard_blocks(self, ctx_factory):
+        ctx = self.ctx_for(
+            ctx_factory,
+            {"hazards": ["some.unknown"], "overstating_hazards": ["some.unknown"]},
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "cannot be trusted upward" in verdict.message
+
+    def test_a_failing_suite_is_recorded_in_a_passing_verdict(self, ctx_factory):
+        ctx = self.ctx_for(
+            ctx_factory,
+            {"hazards": [], "overstating_hazards": [], "suite_passed": False, "failed": 104},
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok
+        assert "104" in verdict.message
+
+
+
+class TestCoverageRoots:
+    """The two mechanisms, tested apart.
+
+    The end-to-end case passes on either one, so an integration test cannot say
+    which is working — and a test whose name claims a mechanism it does not
+    exercise is the shape this whole day has been about.
+    """
+
+    def test_the_session_worktree_is_tried_first(self, ctx_factory):
+        ctx = ctx_factory(session={"id": "s1", "worktree": str(ctx_factory.wt)})
+        assert _coverage_roots(ctx)[0] == Path(ctx_factory.wt)
+
+    def test_a_session_without_a_worktree_falls_back_to_the_repo(self, ctx_factory):
+        ctx = ctx_factory(session={"id": "s1"})
+        roots = _coverage_roots(ctx)
+        assert roots and Path(ctx_factory.wt) not in roots
+
+    def test_no_session_at_all_still_yields_roots(self, ctx_factory):
+        assert _coverage_roots(ctx_factory(session=None))
+
+    def test_a_worktree_path_relativises_against_the_worktree(self, ctx_factory):
+        """The mechanism the reported bug needed, in isolation.
+
+        The rule runs from the main checkout while the measured path carries
+        the worktree prefix, so stripping the checkout removes nothing.
+        """
+        measured = ctx_factory.wt / "Heap" / "Intake" / "F.swift"
+        assert (
+            _relative_to_any(measured, [Path(ctx_factory.wt), Path(ctx_factory.main)])
+            == "Heap/Intake/F.swift"
+        )
+
+    def test_the_main_checkout_root_is_used_when_it_is_the_match(self, ctx_factory):
+        measured = ctx_factory.main / "src" / "app.swift"
+        assert (
+            _relative_to_any(measured, [Path(ctx_factory.wt), Path(ctx_factory.main)])
+            == "src/app.swift"
+        )
+
+    def test_a_path_under_no_known_root_is_left_absolute(self, ctx_factory):
+        """Left absolute rather than mangled, so suffix matching can still try."""
+        out = _relative_to_any("/elsewhere/x/F.swift", [Path(ctx_factory.main)])
+        assert out.startswith("/")
+
+    def test_a_relative_path_is_returned_unchanged(self, ctx_factory):
+        assert _relative_to_any("Heap/Intake/F.swift", [Path(ctx_factory.main)]) == (
+            "Heap/Intake/F.swift"
+        )
+
+
+class TestSameFile:
+    """Suffix matching, tested apart from the root stripping."""
+
+    def test_identical_spellings_match(self):
+        assert _same_file("a/b.swift", "a/b.swift")
+
+    def test_a_longer_measured_path_matches(self):
+        assert _same_file("Heap/Intake/F.swift", "/wt/Heap/Intake/F.swift")
+
+    def test_a_longer_declared_path_matches(self):
+        assert _same_file("/wt/Heap/Intake/F.swift", "Heap/Intake/F.swift")
+
+    def test_a_partial_component_does_not_match(self):
+        """`Ingester.swift` must not match `FileBytesIngester.swift`."""
+        assert not _same_file("Ingester.swift", "/wt/Heap/FileBytesIngester.swift")
+
+    def test_different_files_do_not_match(self):
+        assert not _same_file("Heap/A.swift", "/wt/Heap/B.swift")
+
+
+class TestVerdictRendering:
+    """The marker must say what happened, not what the rule's level is.
+
+    `[BLOCK] coverage.meets_floor: all 3 file(s) at or above 90%` is a PASS,
+    and it was read as a failure by someone who then had to check `--json` to
+    find `ok: true`. The level is a property of the rule; the verdict is what
+    the reader came for.
+    """
+
+    def evaluated(self, verdict, level=Level.BLOCK):
+        from invariant.core.rules import Evaluated
+
+        return Evaluated("some.rule", level, verdict)
+
+    def test_a_pass_leads_with_ok_even_at_block_level(self):
+        line = self.evaluated(Verdict.clean("all 3 file(s) above 90%")).render()
+        assert line.startswith("[ok]")
+        assert "BLOCK" not in line
+
+    def test_a_skip_says_skip(self):
+        """Still "skip" and never "ok" — a gate that did not apply has not
+        vouched for anything. The level now rides along on a BLOCKING skip
+        (BUG_020): "an advisory gate did not apply" and "a gate this project
+        enforces did not apply" are not the same news, and the marker was the
+        only place that distinction could reach a reader."""
+        assert (
+            self.evaluated(Verdict.na("not applicable"), Level.WARN)
+            .render()
+            .startswith("[skip]")
+        )
+        assert (
+            self.evaluated(Verdict.na("not applicable"))
+            .render()
+            .startswith("[skip:BLOCK]")
+        )
+
+    def test_a_blocking_failure_still_leads_with_block(self):
+        """On a failure the level IS the news — it decides whether work stops."""
+        assert self.evaluated(Verdict.fail("nope")).render().startswith("[BLOCK]")
+
+    def test_an_advisory_failure_leads_with_warn(self):
+        line = self.evaluated(Verdict.fail("nope"), Level.WARN).render()
+        assert line.startswith("[warn]")
+
+    def test_detail_and_fixes_still_render(self):
+        line = self.evaluated(
+            Verdict.fail("nope", detail="because", fixes=("do this",))
+        ).render()
+        assert "because" in line and "try: do this" in line
+
+
+class TestAllPassReadsTheRunThatHappened:
+    """A green here must mean THIS run was green.
+
+    It reported "suite is green and the pass is trustworthy" while a
+    whole-suite run with 625 failures had just finished — because the coverage
+    path ran the suite and recorded it somewhere the rule never looked, so the
+    rule answered about an older, narrower, greener run.
+    """
+
+    def ctx_with(self, ctx_factory, runs):
+        return ctx_factory(pipeline={"evidence": {"test_runs": runs}})
+
+    def verdict(self, ctx):
+        return only(evaluate(["test.all_pass"], ctx)).verdict
+
+    def test_a_failing_run_is_red(self, ctx_factory):
+        ctx = self.ctx_with(ctx_factory, [{"passed": False, "failed": 625, "executed": 13945}])
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "625" in verdict.message
+
+    def test_an_unknown_failure_count_does_not_read_as_zero(self, ctx_factory):
+        """`failed: None` means the run failed and the count could not be
+        parsed. "0 failing" would be green prose on a red verdict."""
+        ctx = self.ctx_with(
+            ctx_factory, [{"passed": False, "failed": None, "executed": 13945}]
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "unknown" in verdict.message
+        assert "0 failing" not in verdict.message
+
+    def test_a_clean_exit_with_zero_executed_is_not_green(self, ctx_factory):
+        ctx = self.ctx_with(ctx_factory, [{"passed": True, "failed": 0, "executed": 0}])
+        assert not self.verdict(ctx).ok
+
+    def test_a_later_red_run_overrides_an_earlier_green_one(self, ctx_factory):
+        """The reported failure, as a rule-level test."""
+        ctx = self.ctx_with(
+            ctx_factory,
+            [
+                {"phase": "green", "passed": True, "failed": 0, "executed": 34},
+                {"phase": "coverage", "passed": False, "failed": 625, "executed": 13945},
+            ],
+        )
+        assert not self.verdict(ctx).ok
+
+    def test_a_genuine_green_still_passes(self, ctx_factory):
+        ctx = self.ctx_with(ctx_factory, [{"passed": True, "failed": 0, "executed": 34}])
+        assert self.verdict(ctx).ok
+
+
+class TestMergeDirection:
+    """Merging a branch into ITSELF is the trap. The mainline into a feature
+    branch is the ordinary way to pick up other people's work — and blocking it
+    pushed conflict resolution to the final merge, where it is harder and has
+    no tests around it.
+    """
+
+    def ctx_in_worktree(self, ctx_factory, command):
+        return ctx_factory(cwd=ctx_factory.wt, payload=bash_payload(command))
+
+    def verdict(self, ctx):
+        return only(evaluate(["session.ff_merge_target"], ctx)).verdict
+
+    def test_mainline_into_a_feature_branch_is_allowed(self, ctx_factory):
+        """The reported false positive. The worktree is on session/x."""
+        verdict = self.verdict(self.ctx_in_worktree(ctx_factory, "git merge master"))
+        assert verdict.ok
+
+    def test_merging_the_branch_into_itself_is_refused(self, ctx_factory):
+        verdict = self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git merge session/x")
+        )
+        assert not verdict.ok
+        assert "into itself" in verdict.message
+
+    def test_its_own_remote_ref_counts_as_itself(self, ctx_factory):
+        assert not self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git merge origin/session/x")
+        ).ok
+
+    def test_merge_base_is_not_a_merge(self, ctx_factory):
+        """`\\bmerge\\b` also matches `merge-base`; that is a read, not a merge."""
+        assert self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git merge-base HEAD master")
+        ).skipped
+
+    def test_log_with_no_merges_is_not_a_merge(self, ctx_factory):
+        assert self.verdict(
+            self.ctx_in_worktree(ctx_factory, "git log --no-merges")
+        ).skipped
+
+    def test_a_heredoc_that_merely_writes_the_word_is_not_a_merge(self, ctx_factory):
+        assert self.verdict(
+            self.ctx_in_worktree(ctx_factory, "cat > f <<'EOF'\ngit merge x\nEOF")
+        ).skipped
+
+    def test_from_the_main_checkout_nothing_is_refused(self, ctx_factory):
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=bash_payload("git merge session/x"))
+        assert self.verdict(ctx).ok
+
+    def test_the_session_merge_command_still_requires_the_main_checkout(
+        self, ctx_factory
+    ):
+        """The other half of the rule, unchanged: landing a branch on the base."""
+        ctx = ctx_factory(cwd=ctx_factory.wt, extra={"merging": True})
+        assert not self.verdict(ctx).ok
+
+
+class TestPushBarrierMatchesRealPushes:
+    def test_a_heredoc_writing_the_words_is_not_a_push(self, ctx_factory):
+        """It refused one of these while a test file was being written."""
+        ctx = ctx_factory(
+            payload=bash_payload("cat > f <<'EOF'\nrun git push origin master\nEOF")
+        )
+        assert only(evaluate(["session.push_barrier"], ctx)).verdict.skipped
+
+    def test_a_real_push_is_still_matched(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"version": 1, "project": {"name": "demo"}, "session": {"push": True}},
+        )
+        ctx = ctx_factory(
+            session={"state": "working", "push_count": 0},
+            payload=bash_payload("git push origin master"),
+        )
+        assert not only(evaluate(["session.push_barrier"], ctx)).verdict.ok
+
+
+class TestDiagramGateAbstainsForDocsPipelines:
+    def ctx_for(self, ctx_factory, methodology):
+        doc = ctx_factory.main / "docs" / "architecture" / "record.md"
+        doc.write_text("# A device measurement record\n\nNo structure here.\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(ctx_factory.main), check=True,
+                       capture_output=True)
+        return ctx_factory(pipeline={"methodology": methodology, "evidence": {}})
+
+    def verdict(self, ctx):
+        return only(evaluate(["docs.diagrams_current"], ctx)).verdict
+
+    def test_a_docs_pipeline_is_not_asked_for_a_diagram(self, ctx_factory):
+        verdict = self.verdict(self.ctx_for(ctx_factory, "docs"))
+        assert verdict.skipped
+        assert "no structural change is being claimed" in verdict.message
+
+    def test_a_tdd_pipeline_is_still_asked(self, ctx_factory):
+        """The relaxation is scoped to a DECLARED documentation pipeline."""
+        assert not self.verdict(self.ctx_for(ctx_factory, "tdd")).ok
+
+
+class TestWorkItemPathsAreExempt:
+    """The backlog is data every session touches, like config and memory.
+
+    Routing it through a branch produces conflicts with no review value —
+    which is the stated rationale for the exemptions that already existed. It
+    is not in the default LIST because its path is configurable; the library
+    knows where it put it.
+    """
+
+    def ctx_for(self, ctx_factory, target, extra=None):
+        body = {"version": 1, "project": {"name": "demo"},
+                "items": {"path": "docs/backlog"}}
+        if extra:
+            body["items"].update(extra)
+        write_manifest(ctx_factory.main, body)
+        return ctx_factory(payload=edit_payload(ctx_factory.main / target))
+
+    def verdict(self, ctx):
+        return only(evaluate(["session.isolated_before_edit"], ctx)).verdict
+
+    def test_a_backlog_edit_in_the_shared_tree_is_exempt(self, ctx_factory):
+        assert self.verdict(self.ctx_for(ctx_factory, "docs/backlog/BUG_1.md")).skipped
+
+    def test_the_backlog_directory_itself_is_exempt(self, ctx_factory):
+        assert self.verdict(self.ctx_for(ctx_factory, "docs/backlog")).skipped
+
+    def test_source_beside_it_is_not_exempt(self, ctx_factory):
+        """The exemption is the work-item store, not everything under docs."""
+        assert not self.verdict(self.ctx_for(ctx_factory, "src/app.py")).skipped
+
+    def test_a_project_can_turn_it_off(self, ctx_factory):
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, "docs/backlog/BUG_1.md", {"exempt": False})
+        )
+        assert not verdict.skipped
+
+
+class TestAmbiguityAdviceIsHonestAboutHooks:
+    def test_it_no_longer_implies_the_env_var_reaches_a_hook(self):
+        """A hook runs as its own process, so a variable exported in front of a
+        tool call never gets there. Advice the tool cannot honour is a dead end
+        — the same shape as --id being rejected by the commands that printed it.
+        """
+        from invariant.domains.session import Session, ambiguity_message
+
+        text = ambiguity_message(
+            [Session(id="aaa", name="one"), Session(id="bbb", name="two")]
+        )
+        assert "--id" in text
+        assert "does not reach\n   a HOOK" in text
+        assert "host session bound to it" in text
+
+
+class TestClosingTheSessionIsGated:
+    """The Definition of Done had no enforcement point at all.
+
+    Every other rule fires while work is happening — before a tool call, on
+    entering a state. The closeout comes due when work *stops*, and nothing
+    fired there: the pipeline's terminal state hands off to the session
+    machine, and the session machine was never asked again. Two sessions were
+    found parked with four commits stranded on branches nobody was looking at,
+    and three merged branches that were never deleted.
+
+    `session.teardown_complete` had existed for the tidiness half the whole
+    time — registered, profiled `block` under strict, covered by tests, and
+    bound to no event and no machine state. It could not fail because nothing
+    ever ran it. That is the failure mode these tests exist to prevent, so the
+    binding itself is asserted, not just the logic.
+    """
+
+    def committed_ahead(self, ctx_factory, commits=1):
+        """A session branch holding work the base does not have."""
+        for n in range(commits):
+            (ctx_factory.wt / f"work{n}.txt").write_text("x", encoding="utf-8")
+            run(["git", "add", "-A"], ctx_factory.wt)
+            run(["git", "commit", "-qm", f"work {n}"], ctx_factory.wt)
+        return {"state": "working", "branch": "session/x", "base": "master"}
+
+    # -- the binding, not just the logic -------------------------------
+
+    def test_both_closeout_rules_actually_run_on_stop(self):
+        """A gate bound to no event is inert however good its logic is."""
+        bound = {spec.id for spec in rules_for_event("stop")}
+        assert "session.work_would_be_stranded" in bound
+        assert "session.teardown_complete" in bound
+
+    # -- the known positive --------------------------------------------
+
+    def test_finished_work_on_an_unmerged_branch_is_a_finding(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory, commits=2),
+            pipeline={"state": "committed"},
+        )
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "2 commit(s)" in verdict.message
+        assert any("session merge" in fix for fix in verdict.fixes)
+
+    def test_a_merged_branch_leaves_nothing_stranded(self, ctx_factory):
+        session = self.committed_ahead(ctx_factory)
+        run(["git", "merge", "--ff-only", "session/x"], ctx_factory.main)
+        ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    # -- the narrowing that keeps it from firing every turn -------------
+
+    def test_work_still_in_flight_is_not_a_finding(self, ctx_factory):
+        """The half that makes this liveable.
+
+        A session mid-work is ahead of its base constantly. Blocking on that
+        alone would fire on every turn until it was ignored, which is how a
+        blocking gate becomes an obstacle instead of a control.
+        """
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "green"},
+        )
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_no_pipeline_at_all_is_not_a_finding(self, ctx_factory):
+        ctx = ctx_factory(session=self.committed_ahead(ctx_factory), pipeline=None)
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_an_abandoned_pipeline_claims_nothing(self, ctx_factory):
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "abandoned"},
+        )
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_a_finished_session_is_not_asked_again(self, ctx_factory):
+        session = self.committed_ahead(ctx_factory)
+        session["state"] = "torn_down"
+        ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_asking_twice_in_one_turn_is_a_loop(self, ctx_factory):
+        """A gate that cannot be satisfied gets forced.
+
+        The host returns the turn to the agent with the reason attached; if the
+        rule fired again on the next stop the pair would never terminate, and
+        the way out of a non-terminating gate is always to disable it.
+        """
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "committed"},
+            payload={"stop_hook_active": True},
+        )
+        assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.skipped
+
+    def test_terminal_states_are_read_from_the_machine_not_copied(self, ctx_factory):
+        """A copied list is the one nobody updates when a machine gains a state."""
+        from invariant.core.machines import load_session_machine
+        from invariant.core.rules import _terminal_states
+
+        found = _terminal_states(load_session_machine, ctx_factory().manifest)
+        assert found == load_session_machine(ctx_factory().manifest).terminal
+        assert "torn_down" in found
+
+    def test_an_unloadable_machine_fails_rather_than_going_silent(self, tmp_path):
+        """AUD-08: a configuration error must FAIL the gate, not step aside.
+
+        With the pipeline machine unloadable, the terminal set came back empty,
+        "committed" was not in it, and the rule skipped as "work is still in
+        flight" — the closeout gate silently off on a mistyped manifest.
+        `bug` is a shipped machine of the wrong KIND, so it passes manifest
+        validation and still cannot be loaded as a pipeline.
+        """
+        from invariant.core.manifest import Manifest
+
+        write_manifest(
+            tmp_path,
+            {"version": 1, "project": {"name": "demo"},
+             "methodology": {"pipeline": "bug"}},
+        )
+        ctx = RuleContext(
+            manifest=Manifest.locate(tmp_path),
+            cwd=tmp_path,
+            session={"state": "working", "branch": "session/x", "base": "master"},
+            pipeline={"state": "committed"},
+        )
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_the_persisted_methodology_answers_not_the_manifest(self, ctx_factory):
+        """A pipeline is pinned to the machine it started under (AUD-02/03).
+
+        Under `none` the single state `working` IS terminal, so this work is
+        done and stranded. Reading the manifest's `tdd` instead called it
+        in-flight and went silent.
+        """
+        ctx = ctx_factory(
+            session=self.committed_ahead(ctx_factory),
+            pipeline={"state": "working", "methodology": "none"},
+        )
+        verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "commit(s)" in verdict.message
+
+    # -- parked against a plan is not abandoned -------------------------
+
+    class TestAPlanTellsParkedFromAbandoned:
+        """The half that keeps this rule liveable once a session outlives a host.
+
+        `session.work_would_be_stranded` fires on "the pipeline says done AND
+        the branch is ahead". Under the multi-host model that is the RESTING
+        STATE at the end of every increment: a plan spanning four sessions
+        parks with commits on its branch three times before it merges once. As
+        written the gate would fail on every one of those turns until it was
+        ignored, which is the exact failure its own docstring says the
+        pipeline-terminal narrowing exists to avoid — one model change later.
+
+        What still separates the two cases is whether the plan is being
+        WORKED, so that is what the rule now asks.
+        """
+
+        DAY = 86400.0
+
+        def parked(self, ctx_factory, *, moved_days_ago, open_titles=("ship it",),
+                   done_titles=()):
+            """A session whose branch is ahead and whose plan is half open."""
+            outer = TestClosingTheSessionIsGated()
+            session = outer.committed_ahead(ctx_factory, commits=2)
+            plan = [
+                {"n": i, "title": t, "done": True, "done_at": 1.0}
+                for i, t in enumerate(done_titles, start=1)
+            ]
+            plan += [
+                {"n": len(done_titles) + i, "title": t, "done": False, "done_at": None}
+                for i, t in enumerate(open_titles, start=1)
+            ]
+            session["plan"] = plan
+            session["plan_touched"] = time.time() - moved_days_ago * self.DAY
+            return session
+
+        def test_an_open_plan_that_moved_recently_is_parked_not_stranded(
+            self, ctx_factory
+        ):
+            """`clean`, not `na`. The question was asked and answered.
+
+            `na` would mean the rule had nothing to say about this session, and
+            it has: this work is parked against a promise somebody recorded.
+            """
+            ctx = ctx_factory(
+                session=self.parked(
+                    ctx_factory,
+                    moved_days_ago=0,
+                    done_titles=("wire the domain",),
+                    open_titles=("wire the rules",),
+                ),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert verdict.ok and not verdict.skipped
+            # progress, the commit count, and what happens next.
+            assert "1 of 2" in verdict.message
+            assert "2 commit(s)" in verdict.message
+            assert "wire the rules" in verdict.detail
+
+        def test_an_open_plan_nobody_has_touched_is_stranded(self, ctx_factory):
+            ctx = ctx_factory(
+                session=self.parked(ctx_factory, moved_days_ago=30),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped
+            assert "30 day" in verdict.message
+            assert any("plan done" in fix for fix in verdict.fixes)
+            assert any("transition abandoned" in fix for fix in verdict.fixes)
+
+        def test_the_cold_threshold_comes_from_the_manifest(self, repo):
+            """`session.plan_stale_days`, not a constant in the rule."""
+            from invariant.core.manifest import Manifest
+
+            main, wt = repo
+            session = {
+                "state": "working",
+                "branch": "session/x",
+                "base": "master",
+                "plan": [{"n": 1, "title": "ship it", "done": False}],
+                "plan_touched": time.time() - 3 * self.DAY,
+            }
+            run(["git", "commit", "-q", "--allow-empty", "-m", "w"], wt)
+
+            def verdict_under(days):
+                write_manifest(
+                    main,
+                    {
+                        "version": 1,
+                        "project": {"name": "demo"},
+                        "session": {"plan_stale_days": days},
+                    },
+                )
+                ctx = RuleContext(
+                    manifest=Manifest.locate(main),
+                    cwd=main,
+                    session=dict(session),
+                    pipeline={"state": "committed"},
+                )
+                return only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+
+            assert not verdict_under(1).ok
+            assert verdict_under(90).ok
+
+        def test_marking_a_deliverable_done_clears_a_cold_finding(self, repo):
+            """Satisfiability, end to end through the domain that owns the plan.
+
+            A blocking gate clearable only by something no command does is a
+            gate whose one exit is `--force`. This is why `plan_touched` is a
+            separate field from `heartbeat`: every plan mutation stamps it, so
+            each of the fixes this rule names actually clears it, and none of
+            them has to corrupt the transition telemetry to do it.
+            """
+            from invariant.core.manifest import Manifest
+            from invariant.domains.session import SessionDomain
+
+            main, wt = repo
+            run(["git", "commit", "-q", "--allow-empty", "-m", "w"], wt)
+            long_ago = time.time() - 90 * self.DAY
+
+            stale = SessionDomain(Manifest.locate(main), clock=lambda: long_ago)
+            record = stale.start("spans-hosts")
+            for title in ("wire the domain", "wire the rules", "wire the cli"):
+                stale.plan_add(record.id, title)
+            record = stale.get(record.id)
+            record.state, record.branch, record.base = "working", "session/x", "master"
+            stale._save(record)
+
+            def verdict_now():
+                ctx = RuleContext(
+                    manifest=Manifest.locate(main),
+                    cwd=main,
+                    session=SessionDomain(Manifest.locate(main)).get(record.id).to_dict(),
+                    pipeline={"state": "committed"},
+                )
+                return only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+
+            assert not verdict_now().ok
+
+            SessionDomain(Manifest.locate(main)).plan_done(record.id, 1)
+            after = verdict_now()
+            assert after.ok and not after.skipped
+            assert "1 of 3" in after.message
+
+        def test_a_complete_plan_is_stranded_exactly_as_before(self, ctx_factory):
+            """A finished checklist says nothing about where the commits live."""
+            ctx = ctx_factory(
+                session=self.parked(
+                    ctx_factory, moved_days_ago=99, open_titles=(),
+                    done_titles=("wire the domain",),
+                ),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped
+            assert "2 commit(s) on session/x" in verdict.message
+
+        def test_no_plan_at_all_behaves_exactly_as_before(self, ctx_factory):
+            """The pin. Every session written before this field existed, and
+            every one-line chore that never declares a checklist, takes the
+            old path byte for byte — message, detail and fixes.
+            """
+            outer = TestClosingTheSessionIsGated()
+            ctx = ctx_factory(
+                session=outer.committed_ahead(ctx_factory, commits=2),
+                pipeline={"state": "committed"},
+            )
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert not verdict.ok and not verdict.skipped
+            assert verdict.message == "2 commit(s) on session/x are not on master"
+            assert verdict.fixes[0] == "invariant session review"
+
+        def test_a_record_with_no_plan_clock_at_all_reads_as_fresh(self, ctx_factory):
+            """Legacy records have `plan_touched` 0.0 and no heartbeat.
+
+            Failing on missing data would fire this blocking gate on every
+            record written before the field existed, simultaneously, at `stop`
+            — the surface with the least room to be wrong.
+            """
+            session = self.parked(ctx_factory, moved_days_ago=0)
+            session["plan_touched"] = 0.0
+            session["heartbeat"] = 0.0
+            ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+            assert only(evaluate(["session.work_would_be_stranded"], ctx)).verdict.ok
+
+        def test_a_lifecycle_transition_counts_as_the_session_being_alive(
+            self, ctx_factory
+        ):
+            """`max(plan_touched, heartbeat)`, so a session moving through its
+            states is alive even if it has not edited the checklist."""
+            session = self.parked(ctx_factory, moved_days_ago=99)
+            session["heartbeat"] = time.time()
+            ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert verdict.ok and not verdict.skipped
+
+        def test_an_unmerged_branch_with_nothing_ahead_never_reaches_the_plan(
+            self, ctx_factory
+        ):
+            """The unstranded path is untouched: the plan is read only after
+            the `ahead == 0` return, so a merged branch answers as it always
+            did whatever its checklist says."""
+            session = self.parked(ctx_factory, moved_days_ago=99)
+            run(["git", "merge", "--ff-only", "session/x"], ctx_factory.main)
+            ctx = ctx_factory(session=session, pipeline={"state": "committed"})
+            verdict = only(evaluate(["session.work_would_be_stranded"], ctx)).verdict
+            assert verdict.ok and "holds nothing" in verdict.message
+
+
+class TestTheMethodologyMustActuallyRun:
+    """`pipeline.started_before_edit` proved a pipeline exists, never that it moved.
+
+    Starting one in `designing` satisfied that rule for the rest of the
+    session. Two sessions were found `torn_down` with their pipeline still in
+    `designing` — which skipped every gate the methodology owns, because all of
+    them are EXIT gates on states nobody was required to pass through.
+
+    One gate closes all of it: the machine's `next` lists already forbid
+    skipping a state, so requiring the pipeline to be terminal before the work
+    lands transitively requires every exit gate along the way.
+    """
+
+    def test_the_initial_state_is_not_good_enough(self, ctx_factory):
+        """The exact shape found on disk."""
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "designing"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "designing" in verdict.message
+
+    def test_a_finished_pipeline_passes(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "committed"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_missing_pipeline_is_a_finding_not_a_skip(self, ctx_factory):
+        """Otherwise deleting the pipeline is the way past the gate."""
+        ctx = ctx_factory(session={"state": "working"}, pipeline=None)
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_an_abandoned_pipeline_does_not_count_as_finished(self, ctx_factory):
+        """`abandoned` is terminal, and terminal is not the property wanted.
+
+        Reading "terminal" alone would let a called-off methodology land work,
+        which is the opposite of what abandoning it meant.
+        """
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "abandoned"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and "abandoned" in verdict.message
+
+    def test_BUG_066_a_proof_that_fired_is_a_finished_bugfix_pipeline(
+        self, ctx_factory
+    ):
+        ctx = ctx_factory(
+            session={"state": "working"},
+            pipeline={"methodology": "bugfix", "state": "reproduced"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_BUG_066_the_bugfix_message_offers_the_repro_only_terminal(
+        self, ctx_factory
+    ):
+        ctx = ctx_factory(
+            session={"state": "working"},
+            pipeline={"methodology": "bugfix", "state": "reproducing"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert any("reproduced" in fix for fix in verdict.fixes)
+
+    def test_the_message_names_where_to_go_next(self, ctx_factory):
+        ctx = ctx_factory(session={"state": "working"}, pipeline={"state": "red"})
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert any("green" in fix for fix in verdict.fixes)
+
+    def test_an_unloadable_machine_fails_the_gate_not_skips_it(self, tmp_path):
+        """AUD-08: "the gate that makes every other pipeline gate mandatory"
+        yielded a non-blocking skip on a mistyped `methodology.pipeline`.
+
+        A configuration error is not a reason to step aside — a skip on a
+        block-level gate reads as a pass. `bug` is shipped but of kind `item`,
+        so it survives manifest validation and still cannot load as a pipeline.
+        """
+        from invariant.core.manifest import Manifest
+
+        write_manifest(
+            tmp_path,
+            {"version": 1, "project": {"name": "demo"},
+             "methodology": {"pipeline": "bug"}},
+        )
+        ctx = RuleContext(
+            manifest=Manifest.locate(tmp_path),
+            cwd=tmp_path,
+            session={"state": "working"},
+            pipeline={"state": "red"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+
+    def test_the_pipelines_own_methodology_is_what_completes_it(self, ctx_factory):
+        """A `none` pipeline parked in `working` is complete — by ITS machine.
+
+        Judging it by the manifest's `tdd` instead reported a finished
+        methodology as unfinished, which is the AUD-02 pin read from the other
+        side.
+        """
+        ctx = ctx_factory(
+            session={"state": "working"},
+            pipeline={"state": "working", "methodology": "none"},
+        )
+        verdict = only(evaluate(["pipeline.complete"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped
+
+    def test_it_guards_both_the_reviewable_step_and_the_irreversible_one(self):
+        """A gate only on `reviewed` guards nothing once the work moves on.
+
+        `reviewed` can be re-entered from `working`, so a session may pass it,
+        go back, and merge from a state the gate never saw.
+        """
+        from invariant.core.machines import load_session_machine
+
+        machine = load_session_machine(None)
+        assert "pipeline.complete" in machine.state("reviewed").entry_gates
+        assert "pipeline.complete" in machine.state("merged").entry_gates
+
+
+class TestFilesThatCannotHaveACoverageRow:
+    """Two reasons a row is missing, and only one of them is a problem.
+
+    The gate treated every absent row identically and blocked. That is right
+    for a file the run never measured, and unsatisfiable for a file that has
+    nothing to measure — a bare protocol, an enum of cases, a file the change
+    DELETED. No test can be written to clear it, so the gate stops being a
+    standard and becomes something to route around.
+
+    The distinction is only ever drawn in the direction of MORE evidence: an
+    adapter that cannot tell leaves the block exactly where it was.
+    """
+
+    def ctx_for(
+        self, ctx_factory, coverage, declared, ecosystems=("swift",), gates=None
+    ):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": list(ecosystems)},
+                "methodology": {
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "touched",
+                        **(gates or {}),
+                    }
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def write(self, ctx_factory, relpath, body):
+        path = ctx_factory.wt / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    MEASURED = "Heap/Intake/FileBytesIngester.swift"
+    PROTOCOL = "Heap/Intake/IntakeDrainRunner.swift"
+    LIVE = "struct A { func f() { g() } }"
+
+    def measured_row(self, ctx_factory):
+        return {str(ctx_factory.wt / self.MEASURED): 100.0}
+
+    def test_a_declaration_only_file_no_longer_blocks(self, ctx_factory):
+        """The reported case: a bare protocol can never earn a row."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            self.PROTOCOL,
+            "protocol IntakeDrainRunner {\n"
+            "    func pumpNow(batchLimit: Int) async\n"
+            "    var currentPauseReason: String? { get async }\n"
+            "}\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PROTOCOL]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+
+    def test_the_excluded_file_is_named_rather_than_silently_dropped(self, ctx_factory):
+        """A pass that quietly narrowed its own scope is the vacuous green."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.PROTOCOL, "protocol P { func a() }\n")
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PROTOCOL]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "IntakeDrainRunner.swift" in (verdict.detail or "")
+
+    def test_a_file_with_code_and_no_row_still_blocks(self, ctx_factory):
+        """The guard. This is the case the gate exists for."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Unmeasured.swift",
+            "struct Unmeasured {\n    func work() { compute() }\n}\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Unmeasured.swift" in verdict.detail
+
+    PORTS = "Heap/Library/LibrarySwapPorts.swift"
+    CONSTANTS = (
+        "import Foundation\n"
+        "\n"
+        "protocol LibrarySwitchableMediaStore: AnyObject {\n"
+        "    func prepareForLibrarySwitch() async\n"
+        "}\n"
+        "\n"
+        "extension Notification.Name {\n"
+        '    static let activeLibraryDidChange = Notification.Name("activeLibraryDidChange")\n'
+        "}\n"
+        "\n"
+        "extension Notification {\n"
+        '    static let blobRelativePathKey = "blobRelativePath"\n'
+        "}\n"
+    )
+
+    def test_a_file_of_type_level_constants_no_longer_blocks(self, ctx_factory):
+        """The second reported shape, and the one the block-level gate refused
+        a merge over: bare protocols and two extensions of `static let`
+        constants, absent from all ten targets of the report that named it."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.PORTS, self.CONSTANTS)
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PORTS]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "LibrarySwapPorts.swift" in (verdict.detail or "")
+
+    def test_one_real_initialiser_in_that_file_still_blocks(self, ctx_factory):
+        """The one-bit control, at the layer the consumer sees. One right-hand
+        side that is a call rather than a constant, and the demand comes
+        straight back — which is what says the relaxation reads the file
+        rather than its shape."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            self.PORTS,
+            self.CONSTANTS.replace(
+                'static let blobRelativePathKey = "blobRelativePath"',
+                "static let blobRelativePathKey = resolveKey()",
+            ),
+        )
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.PORTS]
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "LibrarySwapPorts.swift" in verdict.detail
+
+    def test_an_adapter_that_cannot_tell_leaves_the_block_in_place(self, ctx_factory):
+        """`None` is not a negative answer, and must not relax anything."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.PROTOCOL, "protocol P { func a() }\n")
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, self.PROTOCOL],
+            ecosystems=("generic",),  # knows no language, answers None
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+
+    def test_a_file_the_change_deleted_is_not_owed_coverage(self, ctx_factory):
+        """A renamed-away file has no lines left to cover.
+
+        The reported case renamed a 456-line runner. The old path stayed in
+        the branch diff, so the gate asked for coverage of a file that no
+        longer existed, and no run could ever answer.
+        """
+        gone = "Heap/Intake/OldRunner.swift"
+        self.write(ctx_factory, gone, "struct OldRunner { func f() { g() } }")
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "add both"], ctx_factory.wt)
+        (ctx_factory.wt / gone).unlink()
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "remove one"], ctx_factory.wt)
+
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, gone]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+
+    def test_a_deleted_file_the_main_checkout_still_holds_is_set_aside(
+        self, ctx_factory
+    ):
+        """The reported case: a pure-deletion change could not clear the gate.
+
+        The sibling above passes even without the fix, because its file exists
+        in NO root — so `_first_existing` returns None and the deletion branch
+        is reached by luck of absence. Reality is not that tidy: a session
+        worktree deletes the file and commits, while the MAIN checkout still
+        carries it until the merge lands. `_first_existing` searches every
+        root, finds that stale copy, and the deletion branch is never reached
+        — so the gate demanded a coverage row for a file the change had
+        REMOVED, which no run could ever produce. A retirement deleting two
+        source files was blocked by a gate no test could clear.
+
+        Absence therefore has to be judged in the tree the CHANGE produced,
+        not in whichever root still happens to hold a copy.
+        """
+        gone = "Heap/Intake/OldRunner.swift"
+        self.write(ctx_factory, gone, self.LIVE)
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "add both"], ctx_factory.wt)
+        (ctx_factory.wt / gone).unlink()
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "remove one"], ctx_factory.wt)
+
+        # The one line that distinguishes this from the sibling above: the
+        # main checkout has not merged the branch, so it still holds the file.
+        stale = ctx_factory.main / gone
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text(self.LIVE, encoding="utf-8")
+
+        ctx = self.ctx_for(
+            ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, gone]
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        # Named, not silently swallowed — the rule's own transparency rule.
+        assert "deleted by this change" in verdict.detail
+
+    def test_a_file_still_present_is_not_treated_as_deleted(self, ctx_factory):
+        """The deletion check must read the diff, not the absence of a row."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Present.swift",
+            "struct Present {\n    func work() { compute() }\n}\n",
+        )
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "add both"], ctx_factory.wt)
+
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Present.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "Present.swift" in verdict.detail
+
+    def test_a_touched_property_list_is_set_aside_and_named(self, ctx_factory):
+        """The reported case, at the layer the consuming project sees it.
+
+        A session whose load-bearing edit was `Info.plist` was handed "1
+        changed source file(s) have no coverage row" by a block-level gate.
+        `xccov` measures compiled Swift/ObjC/C, so no test anyone could write
+        would ever produce that row, and the gate's own suggestion — drop the
+        file from the session's declared set — asks the author to hide the
+        change in order to describe it.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Heap/Info.plist", "<plist><dict/></plist>\n")
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Info.plist"],
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        # Passing is only half of it. A file that vanished from the verdict
+        # instead of being named would be a worse outcome than the block: an
+        # exclusion nobody can see is indistinguishable from a gate that did
+        # not run.
+        assert "Info.plist" in (verdict.detail or "")
+        assert "no executable lines to measure" in (verdict.detail or "")
+
+    # Repro for BUG_085 — see the work-item entry.
+    def test_BUG_085_a_touched_podfile_and_lockfile_are_set_aside_and_named(
+        self, ctx_factory
+    ):
+        """The reported case, at the layer the consuming project sees it.
+
+        A change touching `Podfile` and `Podfile.lock` beside a measured Swift
+        file was blocked with both listed as changed source files with no
+        coverage row. They are CocoaPods' Ruby DSL and its lockfile; no test
+        anyone could write would produce a row for either. Same expectation
+        as `Info.plist` above: pass, and name what was set aside.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Podfile", "platform :ios, '16.0'\n")
+        self.write(ctx_factory, "Podfile.lock", "PODFILE CHECKSUM: 0\n")
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Podfile", "Podfile.lock"],
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "Podfile" in (verdict.detail or "")
+        assert "Podfile.lock" in (verdict.detail or "")
+        assert "no executable lines to measure" in (verdict.detail or "")
+
+    def test_a_touched_objective_c_file_still_blocks(self, ctx_factory):
+        """The one-bit control for the relaxation above.
+
+        `xccov` measures Objective-C, so an absent row for a `.m` file is the
+        thing this gate exists to catch. If the resource allowlist ever grows
+        far enough to swallow a compiled language, this is where it shows.
+
+        Read narrowly, and BUG_041 is why. What this pins is that an ObjC file
+        WITH NO ROW still blocks. It must not be read as settled intent that an
+        ObjC file never HAS one — for a while the parser guaranteed that by
+        dropping every non-Swift row on the way in, which turned this correct
+        assertion into the visible half of an unsatisfiable gate. The sibling
+        below is the other half.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Legacy.m",
+            "@implementation Legacy\n- (void)work { compute(); }\n@end\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Legacy.m"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Legacy.m" in verdict.detail
+
+    def test_BUG_041_a_measured_objective_c_file_is_judged_on_the_merits(
+        self, ctx_factory
+    ):
+        """A row `xccov` really produced must reach the gate and be judged.
+
+        The sibling above proves an unmeasured `.m` still blocks. This proves
+        the OTHER outcome is reachable at all: with a row present the file is
+        held to the floor like any other, so the verdict is one a test can
+        move. While `parse_coverage` dropped every non-Swift row, no ObjC file
+        could ever be in this state — the gate had exactly one answer for them
+        and no work could change it.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Legacy.m",
+            "@implementation Legacy\n- (void)work { compute(); }\n@end\n",
+        )
+        rows = self.measured_row(ctx_factory)
+        rows[str(ctx_factory.wt / "Heap/Intake/Legacy.m")] = 96.0
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, rows, [self.MEASURED, "Heap/Intake/Legacy.m"])
+        )
+        assert verdict.ok, verdict.message
+
+    def test_BUG_041_a_measured_objective_c_file_below_the_floor_is_caught(
+        self, ctx_factory
+    ):
+        """And the floor actually applies to it.
+
+        Not a redundant pair. With the rows dropped, an ObjC file was invisible
+        to the floor in `all` scope as well as unsatisfiable in `touched` — so
+        widening the parser both un-wedges one scope and starts enforcing the
+        other. A green here would mean the row arrived and was then ignored,
+        which is the vacuous pass the first test cannot distinguish on its own.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Legacy.m",
+            "@implementation Legacy\n- (void)work { compute(); }\n@end\n",
+        )
+        rows = self.measured_row(ctx_factory)
+        rows[str(ctx_factory.wt / "Heap/Intake/Legacy.m")] = 41.0
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, rows, [self.MEASURED, "Heap/Intake/Legacy.m"])
+        )
+        assert not verdict.ok
+        assert "Legacy.m" in (verdict.detail or "")
+        assert "no coverage row" not in verdict.message, (
+            "the file was reported as unmeasured, not as under the floor"
+        )
+
+    def test_a_scope_emptied_by_exclusion_reports_itself_as_empty(self, ctx_factory):
+        """Nothing left to hold to the floor is N/A, not a pass.
+
+        A change that only edits a protocol leaves the touched scope with no
+        measurable file in it. Reporting "all 0 file(s) at or above 90%" would
+        be a green earned by the scope having emptied itself.
+        """
+        self.write(ctx_factory, self.PROTOCOL, "protocol P { func a() }\n")
+        ctx = self.ctx_for(ctx_factory, self.measured_row(ctx_factory), [self.PROTOCOL])
+        verdict = self.verdict(ctx)
+        assert verdict.ok and verdict.skipped
+        assert "IntakeDrainRunner.swift" in verdict.detail
+
+    def test_an_unanswerable_deletion_query_excuses_nothing(
+        self, ctx_factory, tmp_path
+    ):
+        """`None` from git is "cannot tell", which relaxes nothing.
+
+        A path that is merely absent is the shape of a misspelling as much as
+        of a deletion, so the excusal needs git to SAY the change removed it.
+        """
+        from invariant.core import git
+
+        outside = tmp_path / "not-a-repo"
+        outside.mkdir()
+        assert git.deleted_files(outside, "master") is None
+
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        ctx = self.ctx_for(
+            ctx_factory,
+            self.measured_row(ctx_factory),
+            [self.MEASURED, "Heap/Intake/Misspelt.swift"],
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "Misspelt.swift" in verdict.detail
+
+class TestANonSourceAssetCommittedBesideCodeDoesNotBlock:
+    """A design bundle versioned next to the code it specifies.
+
+    Reported from a consuming project: a Swift repo versions Claude Design
+    bundles under `design/<feature>/`, and a session that commits one alongside
+    code cannot advance past `reviewing`. `coverage.meets_floor` blocked on the
+    bundle's `.html`, on four `.jsx` files, and on the bundle DIRECTORY itself,
+    which had been named in the session's declared file set.
+
+    Every one of those is a file no coverage reporter in this project could
+    ever produce a row for, so no test anybody could write would clear the
+    gate — the family this library treats as an engine defect. What it is NOT
+    is a case for relaxing what the gate demands of code: each of the three
+    causes below is answered with positive evidence, at the layer that has it.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared, gates=None, ecosystems=("swift",)):
+        return TestFilesThatCannotHaveACoverageRow.ctx_for(
+            self, ctx_factory, coverage, declared, ecosystems=ecosystems, gates=gates
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def write(self, ctx_factory, relpath, body):
+        path = ctx_factory.wt / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    MEASURED = "Heap/Intake/FileBytesIngester.swift"
+    LIVE = "struct A { func f() { g() } }"
+    BUNDLE = "design/heap-v2/origins-wall-tag-filter"
+
+    def measured_row(self, ctx_factory):
+        return {str(ctx_factory.wt / self.MEASURED): 100.0}
+
+    def setup_bundle(self, ctx_factory):
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, f"{self.BUNDLE}/Origins Wall.html", "<html></html>\n")
+        self.write(ctx_factory, f"{self.BUNDLE}/style.css", "body { color: red }\n")
+        self.write(ctx_factory, f"{self.BUNDLE}/icon.svg", "<svg/>\n")
+        self.write(ctx_factory, f"{self.BUNDLE}/src/ow-kit.jsx", "export const a = 1\n")
+
+    # -- cause 1: markup and style kinds nobody measures, anywhere ---------
+
+    def test_markup_and_style_assets_are_not_changed_source(self, ctx_factory):
+        """`.html`, `.css` and `.svg` join `.md` and `.json` in core/rules.
+
+        Answered here rather than in the Xcode adapter, which is where the
+        report suggested it. `_RESOURCE_SUFFIXES` is an allowlist of kinds an
+        *Xcode resource build step* consumes, and the adapter's own note says
+        documentation and configuration suffixes are deliberately absent from
+        it because `core/rules` already holds them out for every ecosystem —
+        "the same judgement written down in two layers is the duplication that
+        drifts". A stylesheet is not an Xcode concept and is not measured by
+        any coverage tool in any ecosystem, which is exactly the claim
+        `_UNMEASURED_SUFFIXES` makes.
+        """
+        self.setup_bundle(ctx_factory)
+        for asset in ("Origins Wall.html", "style.css", "icon.svg"):
+            verdict = self.verdict(
+                self.ctx_for(
+                    ctx_factory,
+                    self.measured_row(ctx_factory),
+                    [self.MEASURED, f"{self.BUNDLE}/{asset}"],
+                )
+            )
+            assert verdict.ok, f"{asset}: {verdict.message}"
+
+    # -- cause 2: a DIRECTORY in the declared set --------------------------
+
+    def test_a_declared_directory_is_not_a_missing_coverage_row(self, ctx_factory):
+        """A directory cannot earn a row and its absence is not evidence of one.
+
+        `session files add` accepts a path ending in `/`, and a declared
+        directory reaches the changed set as a bare path. `_first_existing`
+        asks `is_file()`, so a directory looked exactly like a misspelt file —
+        absent, undeletable, unexplainable — and blocked forever. That it
+        EXISTS and is a directory is positive evidence of the same kind the
+        other set-aside branches demand, not a relaxation of them: the files
+        inside it reach the changed set on their own through git.
+        """
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.BUNDLE]
+            )
+        )
+        assert verdict.ok, verdict.message
+        assert self.BUNDLE in (verdict.detail or ""), "the directory was set aside silently"
+
+    # -- cause 3: a kind that IS source somewhere, declared not-source here -
+
+    def test_a_jsx_file_still_blocks_a_project_that_has_not_said_otherwise(
+        self, ctx_factory
+    ):
+        """The control that keeps cause 3 from being a global relaxation.
+
+        `.jsx` is real source with real coverage rows in a Node project. Adding
+        it to `_UNMEASURED_SUFFIXES` would silently exempt production code in
+        every such project — the mistake `carries_executable_code`'s contract
+        forbids outright. So the engine keeps blocking, and the project says.
+        """
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, f"{self.BUNDLE}/src/ow-kit.jsx"],
+            )
+        )
+        assert not verdict.ok
+        assert "ow-kit.jsx" in verdict.detail
+
+    def test_a_project_can_declare_a_path_not_source_and_is_then_believed(
+        self, ctx_factory
+    ):
+        """`methodology.gates.non_source` — the key that was missing.
+
+        `coverage_exclude` cannot answer this and is not meant to: it means
+        "measured, but not held to the floor", and it is applied AFTER the
+        missing-row check on purpose, so that suppressing a path from the
+        reporter cannot buy a pass through that door. The question a design
+        bundle asks is the earlier one — "is this source at all" — which no
+        manifest key could express, which is why the consuming project could
+        not fix it locally and had to report it.
+        """
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, f"{self.BUNDLE}/src/ow-kit.jsx"],
+                gates={"non_source": ["design/**"]},
+            )
+        )
+        assert verdict.ok, verdict.message
+
+    def test_a_declared_non_source_path_is_named_in_the_verdict(self, ctx_factory):
+        """Never silently. An exclusion nobody can see is indistinguishable
+        from a gate that did not run, and this one is a project's own policy —
+        the reader is entitled to see which pattern spent it."""
+        self.setup_bundle(ctx_factory)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, f"{self.BUNDLE}/src/ow-kit.jsx"],
+                gates={"non_source": ["design/**"]},
+            )
+        )
+        assert "ow-kit.jsx" in (verdict.detail or "")
+        assert "design/**" in (verdict.detail or "")
+
+    def test_non_source_does_not_reach_a_path_it_does_not_match(self, ctx_factory):
+        """The blast radius is the pattern's, and no wider."""
+        self.setup_bundle(ctx_factory)
+        self.write(ctx_factory, "Heap/Intake/Unmeasured.swift", self.LIVE)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+                gates={"non_source": ["design/**"]},
+            )
+        )
+        assert not verdict.ok
+        assert "Unmeasured.swift" in verdict.detail
+
+
+class TestABinaryAssetHasNoExecutableLinesToMeasure:
+    """A committed binary file was a question every set-aside branch refused.
+
+    A snapshot-testing session committed a golden PNG. It is a changed file
+    that is not docs, so it enters the touched set; no coverage reporter emits
+    a row for an image; and every branch of `_explain_absent_rows` answers
+    "cannot tell" for it — deletion says no, the file is present; the
+    reporter's scope is usually unreadable for an asset directory; and both
+    adapter hooks are keyed on a language suffix, so `is_test_file` and
+    `carries_executable_code` return `None` for anything that is not source.
+    The result is a block no work can clear: there is no test to write for a
+    PNG, and the file set only ever ADDS, so the verdict's own advice to drop
+    it was both unavailable and — since `_changed_set` unions git's answer
+    with the declared one — ineffective.
+
+    The answer is not a relaxation. A binary file positively carries no
+    executable lines; that is a FACT about the bytes, true in every ecosystem,
+    and it is the same kind of positive evidence the other branches demand.
+    The dangerous direction stays shut: the fact is read from the CONTENT, so
+    a file that decodes as text is untouched however it is named, and a file
+    that cannot be read at all stays "cannot tell" and keeps blocking.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared, ecosystems=("swift",)):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": list(ecosystems)},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    MEASURED = "Heap/Intake/FileBytesIngester.swift"
+    LIVE = "struct A { func f() { g() } }"
+    GOLDEN = "HeapTests/Snapshots/StorageScreen/test_exemptBlock.1.png"
+    #: A real PNG signature. The NUL bytes that follow it open the IHDR chunk
+    #: of every PNG ever written, so a byte-level reader has its answer inside
+    #: the first two dozen bytes.
+    PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00\x00\x00\x01\x00\x08\x06"
+
+    def write(self, ctx_factory, relpath, body):
+        path = ctx_factory.wt / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(body, bytes):
+            path.write_bytes(body)
+        else:
+            path.write_text(body, encoding="utf-8")
+        return path
+
+    def measured_row(self, ctx_factory):
+        return {str(ctx_factory.wt / self.MEASURED): 100.0}
+
+    def test_a_changed_binary_asset_with_no_row_does_not_block(self, ctx_factory):
+        """The reported wedge, reduced to its mechanism."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.GOLDEN]
+            )
+        )
+        assert verdict.ok, verdict.message
+
+    def test_the_binary_file_is_named_rather_than_silently_dropped(self, ctx_factory):
+        """Set aside, never disappeared.
+
+        A gate that narrows its own scope without saying which file it dropped
+        is the vacuous green one layer down, and a reader cannot audit a
+        decision that left no trace.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.GOLDEN]
+            )
+        )
+        detail = verdict.detail or ""
+        assert "test_exemptBlock.1.png" in detail
+        assert "binary" in detail
+
+    def test_a_binary_file_without_nul_bytes_is_still_recognised(self, ctx_factory):
+        """NUL is the cheap tell, not the definition.
+
+        A JPEG header carries none in its opening bytes, and a format that
+        avoided them entirely would otherwise reopen the same wedge under a
+        different extension. What decides is whether the bytes are text, which
+        is asked directly.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        jpeg = "HeapTests/Snapshots/StorageScreen/test_exemptBlock.2.jpg"
+        self.write(ctx_factory, jpeg, b"\xff\xd8\xff\xe0\x10JFIF\xc3\x28\xff\xd9")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, jpeg])
+        )
+        assert verdict.ok, verdict.message
+
+    def test_a_text_source_file_with_no_row_still_blocks(self, ctx_factory):
+        """The guard, and the reason this is an answer rather than a hole.
+
+        The case the gate exists for — a live file the run never measured —
+        must read exactly as it did before, so a path-spelling mismatch is
+        still caught with the same sharpness.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Unmeasured.swift",
+            "struct Unmeasured {\n    func work() { compute() }\n}\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+            )
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Unmeasured.swift" in verdict.detail
+
+    def test_a_text_file_whose_last_character_straddles_the_sniff_boundary_blocks(
+        self, ctx_factory
+    ):
+        """The widening this fix must not do, pinned at its likeliest entry.
+
+        Deciding on a bounded prefix can cut a multi-byte character in half,
+        and a decoder asked to treat that truncation as an error calls a live
+        UTF-8 source file binary — passing unmeasured code silently, which is
+        the one direction `_explain_absent_rows` refuses. The file below is
+        ordinary Swift with executable lines, arranged so its final character
+        begins exactly at the last byte read.
+        """
+        head = 'struct Wide {\n    func work() { compute("x") }\n}\n// '
+        pad = "a" * (8191 - len(head.encode("utf-8")))
+        body = head + pad + "é" + "a" * 40 + "\n"
+        assert body.encode("utf-8")[8191] == 0xC3, "the sniff boundary must split a char"
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Heap/Intake/Wide.swift", body)
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Wide.swift"],
+            )
+        )
+        assert not verdict.ok, verdict.detail
+        assert "Wide.swift" in verdict.detail
+
+    def test_a_file_that_cannot_be_read_still_blocks(self, ctx_factory):
+        """A read that failed is "cannot tell", which relaxes nothing.
+
+        Only a successful read proving the content is not text may set a file
+        aside. An unreadable file is exactly the shape a wrong answer would
+        take — nothing about it says there is no code inside.
+        """
+        import os
+
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        sealed = self.write(
+            ctx_factory,
+            "Heap/Intake/Sealed.swift",
+            "struct Sealed {\n    func work() { compute() }\n}\n",
+        )
+        os.chmod(sealed, 0o000)
+        try:
+            if os.access(sealed, os.R_OK):
+                pytest.skip("this user can read a mode-000 file; the case cannot arise")
+            verdict = self.verdict(
+                self.ctx_for(
+                    ctx_factory,
+                    self.measured_row(ctx_factory),
+                    [self.MEASURED, "Heap/Intake/Sealed.swift"],
+                )
+            )
+        finally:
+            os.chmod(sealed, 0o644)
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "Sealed.swift" in verdict.detail
+
+    def test_the_existing_set_aside_reasons_are_unchanged(self, ctx_factory):
+        """The controls that must read the same in both states.
+
+        A declaration-only file and a test file are set aside on the evidence
+        they always were, and the binary branch neither replaces their reason
+        nor swallows their name.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, "Heap/Intake/Ports.swift", "protocol P { func a() }\n")
+        self.write(
+            ctx_factory,
+            "HeapTests/IntakeTests.swift",
+            "final class IntakeTests {\n    func testA() { assert(true) }\n}\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Ports.swift", "HeapTests/IntakeTests.swift"],
+            )
+        )
+        assert verdict.ok, verdict.message
+        detail = verdict.detail or ""
+        assert "Ports.swift (no executable lines to measure)" in detail
+        assert "IntakeTests.swift (a test file; not what a coverage floor measures)" in detail
+
+    def test_the_verdict_no_longer_advises_an_action_that_does_not_exist(
+        self, ctx_factory
+    ):
+        """`session files` exposes only `add`, and there is no remove verb.
+
+        That absence is deliberate: removing a source file from the declared
+        set would be a lever for dropping it out of the floor. The union in
+        `_changed_set` means it would not even work — git re-supplies a file
+        committed on the branch. Advice that is unavailable AND ineffective
+        teaches a reader that the gate does not know what it is talking about.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(
+            ctx_factory,
+            "Heap/Intake/Unmeasured.swift",
+            "struct Unmeasured {\n    func work() { compute() }\n}\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory,
+                self.measured_row(ctx_factory),
+                [self.MEASURED, "Heap/Intake/Unmeasured.swift"],
+            )
+        )
+        assert not verdict.ok
+        assert not any("session file set" in fix for fix in verdict.fixes)
+
+    def test_an_empty_file_is_not_evidence_of_anything(self, ctx_factory):
+        """Zero bytes are not a positive answer, and the branch says so.
+
+        An empty asset is the shape a truncated write leaves behind. Nothing
+        about it establishes that no code belongs there, and a rule that read
+        emptiness as "binary" would set aside a file whose content is simply
+        missing — evidence by absence, which is what every branch here
+        refuses. It keeps blocking, and the block is what sends someone to
+        look at a file that should not be empty.
+        """
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, b"")
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, self.measured_row(ctx_factory), [self.MEASURED, self.GOLDEN]
+            )
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "test_exemptBlock.1.png" in verdict.detail
+
+    def test_a_binary_only_change_is_na_before_any_coverage_run_exists(
+        self, ctx_factory
+    ):
+        """The same fact, read by the guard that runs before any recording.
+
+        `_nothing_a_run_could_measure` unlocks on exactly the evidence
+        `_explain_absent_rows` collects, so a change that committed only a
+        golden image must not be told to run coverage — the run would produce
+        no row for it however long it took, and on a project whose suite is
+        not green it banks a failing test entry to say so.
+        """
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(self.ctx_for(ctx_factory, {}, [self.GOLDEN]))
+        assert verdict.ok and verdict.skipped, verdict.message
+        assert "test_exemptBlock.1.png" in (verdict.detail or "")
+
+    def test_a_source_file_alongside_it_still_demands_a_run(self, ctx_factory):
+        """The control on that guard. One file that could have had a row keeps
+        the ordinary "you forgot to run coverage" refusal reading as itself."""
+        self.write(ctx_factory, self.MEASURED, self.LIVE)
+        self.write(ctx_factory, self.GOLDEN, self.PNG)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, {}, [self.MEASURED, self.GOLDEN])
+        )
+        assert not verdict.ok, verdict.message
+        assert "no coverage was recorded" in verdict.message
+
+
+class TestTheReportersScopeIsNotDemandedOfFilesOutsideIt:
+    """Repro for BUG_019 — see the backlog entry.
+
+    A Python session that touches its own test files was handed a
+    `coverage.meets_floor` verdict no work could satisfy: `source_files` counts
+    every `.py` as source, so `tests/test_x.py` enters the touched set, while
+    `[tool.coverage.run] source = ["src/..."]` means the reporter is DEFINED
+    never to emit a row for it. Three correct behaviours meeting badly, and the
+    result is the shape BUG_002 was filed against — a blocking gate trained
+    around rather than met.
+
+    The resolution keeps the number's meaning rather than widening what is
+    measured: the adapter supplies the reporter's configured scope and the rule
+    stops demanding rows for files outside it. Files set aside are NAMED, as
+    every other excusal in this gate is.
+    """
+
+    def ctx_for(self, ctx_factory, coverage, declared):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    SRC = "src/app/mod.py"
+    TEST = "tests/test_mod.py"
+    LIVE = "def f():\n    return g()\n"
+
+    def wire(self, ctx_factory, pyproject='[tool.coverage.run]\nsource = ["src/app"]\n'):
+        for rel in (self.SRC, self.TEST):
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+        (ctx_factory.wt / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+        return {str(ctx_factory.wt / self.SRC): 100.0}
+
+    def test_a_touched_test_file_outside_the_reporters_scope_does_not_block(
+        self, ctx_factory
+    ):
+        """The reported case, and the whole of it."""
+        measured = self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.SRC, self.TEST]))
+        assert verdict.ok, verdict.message
+
+    def test_the_file_set_aside_is_named(self, ctx_factory):
+        """A gate that narrows its own scope silently is the vacuous green."""
+        measured = self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.SRC, self.TEST]))
+        assert "test_mod.py" in (verdict.detail or "")
+
+    def test_a_source_file_inside_the_scope_with_no_row_still_blocks(
+        self, ctx_factory
+    ):
+        """The guard, and the reason this is a narrowing rather than a silencing.
+
+        A file the reporter IS scoped to measure, with no row, is exactly what
+        the gate exists to catch, and must survive the fix untouched.
+        """
+        measured = self.wire(ctx_factory)
+        other = ctx_factory.wt / "src/app/unmeasured.py"
+        other.write_text(self.LIVE, encoding="utf-8")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, measured, [self.SRC, "src/app/unmeasured.py"])
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "unmeasured.py" in verdict.detail
+
+    def test_an_unreadable_scope_leaves_the_block_in_place(self, ctx_factory):
+        """`None` from the adapter is "cannot tell", which relaxes nothing.
+
+        Without a resolvable `source`, a production file with no row keeps
+        blocking — the pre-fix behaviour, retained wherever no positive fact
+        is available. A touched TEST file no longer depends on this scope
+        fact: `is_test_file` answers the conventional half of the question
+        positively, so it is set aside even when the configured scope cannot
+        be read (the complementary mechanism recorded on BUG_019).
+        """
+        measured = self.wire(ctx_factory, pyproject='[project]\nname = "x"\n')
+        other = ctx_factory.wt / "src/app/unmeasured.py"
+        other.write_text(self.LIVE, encoding="utf-8")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, measured, [self.SRC, "src/app/unmeasured.py"])
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+        assert "unmeasured.py" in verdict.detail
+
+    def test_a_scope_emptied_by_the_narrowing_is_not_a_pass(self, ctx_factory):
+        """A change touching ONLY test files has nothing left to hold to the
+        floor. That is N/A — reporting "all 0 file(s) at or above 90%" would be
+        a green earned by the scope emptying itself."""
+        measured = self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured, [self.TEST]))
+        assert verdict.ok and verdict.skipped
+        assert "test_mod.py" in (verdict.detail or "")
+
+    def test_a_test_only_change_is_na_before_any_coverage_run_exists(
+        self, ctx_factory
+    ):
+        """Nothing to measure is an answer a RUN cannot change.
+
+        The sibling above proves the scope empties correctly once a run has
+        recorded something. It cannot see the ordering defect, because it
+        hands the gate a recording. `coverage.meets_floor` returns
+        `no coverage was recorded` from an early guard that fires roughly
+        fifty lines BEFORE the scoping logic, so a change touching only test
+        files can never reach the N/A that is already written for it.
+
+        The demand that creates is not merely redundant, it is destructive.
+        `invariant pipeline coverage` takes no selector, so the only way to
+        satisfy the guard is a whole-scheme run; and a coverage run is
+        recorded as a test run, so on a project whose suite is not green that
+        run banks a FAILING `test_runs` entry and flips `test.all_pass` from
+        green to red — to produce numbers this rule then discards, because
+        every file it measured was excluded from the floor anyway.
+
+        Only positive evidence unlocks this: `_explain_absent_rows` sets a
+        file aside for being deleted, outside the reporter's scope, a test
+        file, or free of executable lines. One real source file in the set
+        lands in `unexplained` and the recording is demanded exactly as
+        before — which the sibling test below pins.
+        """
+        self.wire(ctx_factory)
+        ctx = self.ctx_for(ctx_factory, {}, [self.TEST])
+        verdict = self.verdict(ctx)
+        assert verdict.ok and verdict.skipped, verdict.message
+        assert "test_mod.py" in (verdict.detail or "")
+
+    def test_a_source_file_with_no_run_still_demands_one(self, ctx_factory):
+        """The control. Relaxing the guard must not relax the common case.
+
+        A touched file that COULD carry a row keeps the original refusal, so
+        "I forgot to run coverage" still reads as itself rather than as a
+        scope answer.
+        """
+        self.wire(ctx_factory)
+        verdict = self.verdict(self.ctx_for(ctx_factory, {}, [self.SRC]))
+        assert not verdict.ok, verdict.message
+
+
+class TestPathsTheManifestHoldsOutOfTheFloor:
+    """`methodology.gates.coverage_exclude` — the policy half of BUG_026.
+
+    A consuming project measured five of its own test files at 63–90% against
+    a floor of 90 and could express no exclusion: the floor value and the rule
+    LEVEL are both global, narrowing the reporter converts a below-floor block
+    into a no-row block, and the declared file set only ever ADDS. So the
+    decision "test targets are not held to the production floor" had nowhere
+    to live except a habit each author remembers.
+
+    It excludes from the FLOOR, never from the MEASUREMENT: the row is still
+    required, the number is still reported, and the verdict names every path
+    it set aside together with what matched it.
+    """
+
+    def ctx_for(self, ctx_factory, declared, exclude, coverage):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "touched",
+                        "coverage_exclude": exclude,
+                    }
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    SRC = "src/app/mod.py"
+    TEST = "tests/test_mod.py"
+    LIVE = "def f():\n    return g()\n"
+
+    def wire(self, ctx_factory):
+        for rel in (self.SRC, self.TEST):
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+        return {
+            str(ctx_factory.wt / self.SRC): 100.0,
+            str(ctx_factory.wt / self.TEST): 63.0,
+        }
+
+    def test_an_excluded_path_below_the_floor_does_not_block(self, ctx_factory):
+        """The reported case."""
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.SRC, self.TEST], ["tests/**"], self.wire(ctx_factory)
+            )
+        )
+        assert verdict.ok, verdict.message
+
+    def test_the_exclusion_names_the_path_the_number_and_the_pattern(
+        self, ctx_factory
+    ):
+        """All three, because each answers a different question a reader has.
+
+        The path says WHAT was set aside, the pattern says WHICH decision did
+        it, and the number is what keeps a suite that quietly stopped
+        executing visible instead of exempt-and-invisible.
+        """
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.SRC, self.TEST], ["tests/**"], self.wire(ctx_factory)
+            )
+        )
+        detail = verdict.detail or ""
+        assert "test_mod.py" in detail
+        assert "63%" in detail
+        assert "tests/**" in detail
+
+    def test_an_unexcluded_path_below_the_floor_still_blocks(self, ctx_factory):
+        """The floor is unchanged for everything the manifest did not name."""
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.SRC, self.TEST], ["nothing/**"], self.wire(ctx_factory)
+            )
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_an_excluded_path_with_no_row_still_blocks(self, ctx_factory):
+        """The guard that stops this being a silencing.
+
+        Exclusion happens AFTER the no-row check, so suppressing a path from
+        the reporter cannot buy a pass through this door. Without that
+        ordering, `coverage_exclude` plus a narrowed report would hide a
+        path-spelling mismatch — which is the exact failure the no-row guard
+        was written for.
+
+        Uses a production path rather than `self.TEST`: with the
+        `Adapter.is_test_file` mechanism (BUG_019), a touched test file with
+        no row is set aside on that positive fact alone, which would pass
+        this test for the wrong reason and stop it isolating the
+        `coverage_exclude` ordering it exists to guard.
+        """
+        excluded = "src/app/generated.py"
+        path = ctx_factory.wt / excluded
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.LIVE, encoding="utf-8")
+        measured = {str(ctx_factory.wt / self.SRC): 100.0}
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC, excluded], [excluded], measured)
+        )
+        assert not verdict.ok
+        assert "no coverage row" in verdict.message
+
+    def test_no_exclude_configured_changes_nothing(self, ctx_factory):
+        """Empty by default: an exclusion is a decision, never an inheritance."""
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC, self.TEST], [], self.wire(ctx_factory))
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+
+class TestTheRecordedBaselineThatRatchetsTheFloor:
+    """`methodology.gates.coverage_baseline` — a floor that legacy debt cannot veto.
+
+    The floor is right for new code and wrong for old. A file that has sat at
+    70% for months blocks a two-line, fully covered, net-negative edit — so the
+    gate refuses precisely the change that improves it, and the only ways
+    forward are to close a several-hundred-line gap that was never this
+    change's, or to route around the gate. The motivating case moved a file
+    from 69.17% to 70.99% while deleting more than it added, and was blocked.
+
+    A ratchet, on the same idiom this project already uses for its layering
+    baseline: a recorded per-file number the measurement may never fall below.
+    Below the floor and at or above the record is a pre-existing shortfall and
+    does not block; below the record is a REGRESSION and does, in its own
+    words; and no record at all fails exactly as before, because the
+    relaxation must rest on positive, reviewable evidence rather than on the
+    absence of any.
+    """
+
+    SRC = "src/app/mod.py"
+    LEGACY = "src/app/legacy.py"
+    LIVE = "def f():\n    return g()\n"
+    BASELINE = "scripts/coverage_baseline.txt"
+
+    #: Distinguishes "no key" from "a key whose value is this".
+    UNSET = object()
+
+    def ctx_for(self, ctx_factory, declared, coverage, baseline=UNSET):
+        gates = {"coverage_min": 90, "coverage_scope": "touched"}
+        if baseline is not self.UNSET:
+            gates["coverage_baseline"] = baseline
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {"gates": gates},
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def wire(self, ctx_factory, measured, baseline_text=None):
+        """Source files on disk, a measurement, and optionally a baseline file."""
+        out = {}
+        for rel, pct in measured.items():
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+            out[str(path)] = pct
+        if baseline_text is not None:
+            recorded = ctx_factory.wt / self.BASELINE
+            recorded.parent.mkdir(parents=True, exist_ok=True)
+            recorded.write_text(baseline_text, encoding="utf-8")
+        return out
+
+    # -- the shortfall the record forgives ----------------------------
+
+    def test_a_file_exactly_at_its_recorded_baseline_does_not_block(
+        self, ctx_factory
+    ):
+        """The floor is missed, the record is met, and the change proceeds."""
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} 70.99\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+    def test_an_improvement_still_short_of_the_floor_does_not_block(
+        self, ctx_factory
+    ):
+        """The reported case, and the whole point of the mechanism.
+
+        A change that RAISED the number from 69.17 to 70.99 was blocked by a
+        floor of 90. The ratchet is what makes an improvement legal before the
+        gap is fully closed.
+        """
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+    def test_the_set_aside_names_the_file_and_both_numbers(self, ctx_factory):
+        """A relaxation nobody can read in the verdict is how a gate goes inert.
+
+        Three facts, each answering a different question: WHICH file was let
+        past, what it MEASURES now, and what it was RECORDED at — the last
+        being the only one that says the pass was earned against evidence
+        rather than granted.
+        """
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        detail = verdict.detail or ""
+        assert "legacy.py" in detail
+        assert "70.99%" in detail
+        assert "69.17%" in detail
+        assert "ratcheted" in detail
+
+    def test_a_ratcheted_file_is_still_named_when_another_file_blocks(
+        self, ctx_factory
+    ):
+        """The set-aside is reported whatever the verdict turns out to be.
+
+        A pass that narrowed its own scope is reviewable only if the narrowing
+        is written where the verdict is read, and that is no less true of a
+        FAILING verdict — a reader deciding what to fix needs to know which
+        below-floor file was already answered for.
+        """
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99, self.SRC: 40.0},
+            f"{self.LEGACY} 69.17\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY, self.SRC], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "mod.py" in (verdict.detail or "")
+        assert "legacy.py" in (verdict.detail or "")
+        assert "69.17%" in (verdict.detail or "")
+
+    # -- the ratchet biting -------------------------------------------
+
+    def test_a_drop_below_the_recorded_baseline_fails(self, ctx_factory):
+        """The half that makes this a ratchet rather than an amnesty."""
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 65.0}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok, verdict.message
+
+    def test_the_regression_reads_as_a_regression_not_a_floor_miss(
+        self, ctx_factory
+    ):
+        """Two different failures need two different sentences.
+
+        "Below the floor" sends the author to write several hundred lines of
+        test for a gap that predates them. "You lost 4.17 points against a
+        number this project recorded" sends them to the four lines they just
+        deleted. Same file, same floor, opposite next action.
+        """
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 65.0}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert "below the 90% floor" not in verdict.message
+        assert "baseline" in verdict.message
+        detail = verdict.detail or ""
+        assert "65%" in detail
+        assert "69.17%" in detail
+
+    # -- the fail-safe --------------------------------------------------
+
+    def test_a_below_floor_file_with_no_entry_blocks_exactly_as_before(
+        self, ctx_factory
+    ):
+        """No record means no acknowledged debt.
+
+        The relaxation is granted on positive evidence only. An absent entry
+        is the ordinary case — every file in the project has one — so reading
+        it as permission would turn the ratchet into a global amnesty.
+        """
+        measured = self.wire(
+            ctx_factory, {self.SRC: 50.0}, f"{self.LEGACY} 69.17\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+        assert "mod.py" in (verdict.detail or "")
+
+    def test_no_baseline_configured_leaves_the_gate_as_it_was(self, ctx_factory):
+        """Absent key, feature entirely off, verdict unchanged."""
+        measured = self.wire(ctx_factory, {self.LEGACY: 70.99}, None)
+        verdict = self.verdict(self.ctx_for(ctx_factory, [self.LEGACY], measured))
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+        assert "ratchet" not in (verdict.detail or "").lower()
+
+    def test_a_null_baseline_is_the_same_as_no_baseline(self, ctx_factory):
+        """An explicit null is the default written out, not an empty record."""
+        measured = self.wire(ctx_factory, {self.LEGACY: 70.99}, None)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, None)
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_a_file_above_the_floor_is_never_measured_against_the_record(
+        self, ctx_factory
+    ):
+        """The record answers for shortfalls, and nothing else.
+
+        Discriminating on purpose: the file measures 95 against a floor of 90
+        and a STALE record of 100. Consulting the record for a file that
+        already clears the floor would read that as a 5-point regression and
+        block a change that is fine — the ratchet would have quietly become a
+        second, higher floor nobody agreed to.
+        """
+        measured = self.wire(ctx_factory, {self.SRC: 95.0}, f"{self.SRC} 100\n")
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+    # -- a record the gate cannot read ----------------------------------
+
+    def test_a_malformed_line_is_an_error_not_a_skipped_entry(self, ctx_factory):
+        """A baseline that silently drops entries is the grandfathering trap.
+
+        The dropped entry is invisible in both directions: the debt it
+        recorded stops being enforced, and the file it named stops being
+        forgiven — and neither shows up anywhere. So an unparseable line
+        fails the gate rather than reducing the record behind the reader's
+        back.
+        """
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99},
+            f"{self.LEGACY} 69.17 stale\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok, verdict.message
+        assert "baseline" in verdict.message
+        assert "ratcheted" not in (verdict.detail or "")
+
+    def test_a_non_numeric_percentage_is_an_error(self, ctx_factory):
+        """Same fact, the other half of the line."""
+        measured = self.wire(
+            ctx_factory, {self.LEGACY: 70.99}, f"{self.LEGACY} sixty\n"
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "baseline" in verdict.message
+
+    def test_the_error_names_the_line_it_could_not_read(self, ctx_factory):
+        """An error that does not say WHICH line is a hunt, not a report."""
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99},
+            f"# a comment\n\n{self.LEGACY} sixty\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        detail = verdict.detail or ""
+        assert "line 3" in detail
+        assert "sixty" in detail
+
+    def test_a_duplicate_entry_is_an_error(self, ctx_factory):
+        """Two records for one file name no number the gate can enforce.
+
+        Last-wins would silently pick one of them, and which one it picked
+        would decide whether a regression passes.
+        """
+        measured = self.wire(
+            ctx_factory,
+            {self.LEGACY: 70.99},
+            f"{self.LEGACY} 69.17\n{self.LEGACY} 40\n",
+        )
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "baseline" in verdict.message
+
+    def test_a_configured_baseline_that_does_not_exist_is_an_error(
+        self, ctx_factory
+    ):
+        """An absent file is not an empty record.
+
+        It is indistinguishable from a ratchet that was never wired, and the
+        gate will not read a relaxation — or the absence of one — out of a
+        file it could not find. Loud, because the manifest key and the file it
+        names have to land in the same commit.
+        """
+        measured = self.wire(ctx_factory, {self.SRC: 100.0}, None)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SRC], measured, self.BASELINE)
+        )
+        assert not verdict.ok
+        assert "baseline" in verdict.message
+
+    # -- what the format tolerates --------------------------------------
+
+    def test_comments_blank_lines_and_ragged_whitespace_are_accepted(
+        self, ctx_factory
+    ):
+        """Liberal in the shape of a line, strict about one it cannot parse."""
+        text = (
+            "# The coverage ratchet. A number here may only fall.\n"
+            "\n"
+            "   \n"
+            f"\t{self.LEGACY}   69.17  # IDEA_LEGACY_COVERAGE_FLOOR\n"
+        )
+        measured = self.wire(ctx_factory, {self.LEGACY: 70.99}, text)
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.LEGACY], measured, self.BASELINE)
+        )
+        assert verdict.ok, verdict.message
+
+
+class TestPathsWhereTheFloorIsAdvisory:
+    """`methodology.gates.coverage_advisory_paths` — a floor held per subtree.
+
+    A consuming project ruled that one development phase lands NEW, flag-off
+    code under two subtrees on scoped suites, with the floor advisory there
+    and blocking everywhere else, and one full coverage pass owed at the phase
+    gate. Its only coverage lane is a full-suite run, so a milestone touching
+    nothing but the new code could not land without that run or a force.
+    Dropping the gate from the methodology cannot tell shared code from new
+    code; this key can.
+
+    Advisory files never fail the gate and are always NAMED in the verdict,
+    with their figure when one was measured and "not measured" when none was.
+    Everything else keeps today's floor exactly.
+    """
+
+    NEW = "web/sync/engine.py"
+    NEW_TOO = "web/sync/wire.py"
+    SHARED = "src/app/mod.py"
+    LIVE = "def f():\n    return g()\n"
+    BASELINE = "scripts/coverage_baseline.txt"
+
+    def ctx_for(self, ctx_factory, declared, coverage, advisory, baseline=None):
+        gates = {
+            "coverage_min": 90,
+            "coverage_scope": "touched",
+            "coverage_advisory_paths": advisory,
+        }
+        if baseline is not None:
+            gates["coverage_baseline"] = baseline
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {"gates": gates},
+            },
+        )
+        evidence = {"coverage": coverage} if coverage is not None else {}
+        return ctx_factory(
+            cwd=ctx_factory.main,
+            session={
+                "id": "s1",
+                "files": declared,
+                "worktree": str(ctx_factory.wt),
+                "base": "",
+            },
+            pipeline={"evidence": evidence},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def wire(self, ctx_factory, measured, baseline_text=None):
+        out = {}
+        for rel, pct in measured.items():
+            path = ctx_factory.wt / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.LIVE, encoding="utf-8")
+            if pct is not None:
+                out[str(path)] = pct
+        if baseline_text is not None:
+            recorded = ctx_factory.wt / self.BASELINE
+            recorded.parent.mkdir(parents=True, exist_ok=True)
+            recorded.write_text(baseline_text, encoding="utf-8")
+        return out
+
+    # -- an advisory-only change ---------------------------------------
+
+    def test_an_advisory_only_change_passes_with_no_coverage_run(self, ctx_factory):
+        """The reported case: no evidence at all, and the gate still passes."""
+        self.wire(ctx_factory, {self.NEW: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW], None, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert not verdict.skipped, "a granted pass is not 'not applicable'"
+
+    def test_the_advisory_only_pass_names_the_exception_plainly(self, ctx_factory):
+        """A pass that hides the exception is the silent green this rule
+        exists to prevent: count, key, and the coverage run still owed."""
+        self.wire(ctx_factory, {self.NEW: None, self.NEW_TOO: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.NEW_TOO], None, ["web/**"])
+        )
+        assert "2 touched source file(s)" in verdict.message
+        assert "advisory" in verdict.message
+        assert "coverage_advisory_paths" in verdict.message
+        assert "coverage run is still owed" in verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py" in detail and "wire.py" in detail
+        assert "not measured" in detail
+
+    def test_no_figure_is_invented_when_nothing_was_measured(self, ctx_factory):
+        self.wire(ctx_factory, {self.NEW: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW], None, ["web/**"])
+        )
+        assert "%" not in (verdict.detail or "").replace("90%", "")
+
+    def test_an_advisory_file_below_the_floor_is_reported_not_failed(
+        self, ctx_factory
+    ):
+        measured = self.wire(ctx_factory, {self.NEW: 40.0, self.SHARED: 100.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py 40%" in detail
+        assert "below the 90% floor" in detail
+        assert "web/**" in detail
+
+    def test_an_advisory_only_change_with_evidence_reports_its_figures(
+        self, ctx_factory
+    ):
+        measured = self.wire(ctx_factory, {self.NEW: 40.0, self.NEW_TOO: 95.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.NEW_TOO], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert "coverage run is still owed" in verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py 40%" in detail
+        assert "wire.py 95%" in detail
+
+    def test_an_advisory_file_with_no_row_is_named_and_does_not_fail(
+        self, ctx_factory
+    ):
+        """The no-row block is a HELD-file guarantee; advisory files carry none."""
+        measured = self.wire(ctx_factory, {self.NEW: None, self.SHARED: 100.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        detail = verdict.detail or ""
+        assert "engine.py" in detail
+        assert "no coverage row" in detail
+
+    # -- held files keep today's floor ---------------------------------
+
+    def test_a_mixed_change_with_no_evidence_still_blocks(self, ctx_factory):
+        self.wire(ctx_factory, {self.NEW: None, self.SHARED: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], None, ["web/**"])
+        )
+        assert not verdict.ok
+        assert "no coverage was recorded" in verdict.message
+
+    def test_a_held_file_with_no_row_still_blocks(self, ctx_factory):
+        """An advisory row is not evidence for a held file: with it the only
+        measured row, the held file has no overlap at all and still blocks."""
+        measured = self.wire(ctx_factory, {self.NEW: 100.0, self.SHARED: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert not verdict.ok
+        assert "none of it covers the changed files" in verdict.message
+
+    def test_a_held_file_with_no_row_beside_a_measured_one_still_blocks(
+        self, ctx_factory
+    ):
+        other = "src/app/other.py"
+        measured = self.wire(
+            ctx_factory, {self.NEW: 100.0, self.SHARED: None, other: 100.0}
+        )
+        verdict = self.verdict(
+            self.ctx_for(
+                ctx_factory, [self.NEW, self.SHARED, other], measured, ["web/**"]
+            )
+        )
+        assert not verdict.ok
+        assert "1 changed source file(s) have no coverage row" in verdict.message
+        assert "mod.py" in (verdict.detail or "")
+
+    def test_a_held_file_below_the_floor_fails_while_advisory_passes(
+        self, ctx_factory
+    ):
+        measured = self.wire(ctx_factory, {self.NEW: 100.0, self.SHARED: 40.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert not verdict.ok
+        assert "1 file(s) below the 90% floor" in verdict.message
+        detail = verdict.detail or ""
+        assert "mod.py 40%" in detail
+        assert "engine.py 100%" in detail
+        assert "coverage_advisory_paths" in detail
+
+    def test_a_mixed_pass_still_says_what_was_advisory(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.NEW: 50.0, self.SHARED: 100.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert "coverage_advisory_paths" in verdict.message
+        assert "all 1 file(s) at or above 90%" in verdict.message
+
+    def test_the_ratchet_still_applies_to_held_files(self, ctx_factory):
+        measured = self.wire(
+            ctx_factory,
+            {self.NEW: 10.0, self.SHARED: 70.0},
+            f"{self.SHARED} 69.17\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"], self.BASELINE
+        )
+        assert self.verdict(ctx).ok
+
+        measured = self.wire(
+            ctx_factory,
+            {self.NEW: 10.0, self.SHARED: 60.0},
+            f"{self.SHARED} 69.17\n",
+        )
+        ctx = self.ctx_for(
+            ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"], self.BASELINE
+        )
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "recorded coverage baseline" in verdict.message
+
+    def test_an_overstating_run_still_blocks_a_held_file(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.NEW: 100.0, self.SHARED: 100.0})
+        ctx = self.ctx_for(ctx_factory, [self.NEW, self.SHARED], measured, ["web/**"])
+        ctx.pipeline["evidence"]["coverage_run"] = {
+            "overstating_hazards": ["demo.reads_high"]
+        }
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "cannot be trusted upward" in verdict.message
+
+    def test_an_overstating_run_is_named_beside_advisory_figures(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.NEW: 100.0})
+        ctx = self.ctx_for(ctx_factory, [self.NEW], measured, ["web/**"])
+        ctx.pipeline["evidence"]["coverage_run"] = {
+            "overstating_hazards": ["demo.reads_high"]
+        }
+        verdict = self.verdict(ctx)
+        assert verdict.ok
+        assert "demo.reads_high" in (verdict.detail or "")
+
+    def test_a_glob_matching_nothing_changes_nothing(self, ctx_factory):
+        measured = self.wire(ctx_factory, {self.SHARED: 40.0})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.SHARED], measured, ["nothing/**"])
+        )
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+        assert "coverage_advisory_paths" not in (verdict.detail or "")
+
+    def test_a_spelling_variant_matches_through_the_shared_normaliser(
+        self, ctx_factory
+    ):
+        """Matched by `_declared_in_project`, like `coverage_exclude`."""
+        self.wire(ctx_factory, {self.NEW: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW], None, ["./web/"])
+        )
+        assert verdict.ok, verdict.message
+
+    def test_a_held_set_with_nothing_measurable_still_passes_with_the_exception(
+        self, ctx_factory
+    ):
+        """A held test file with no evidence is set aside on its own (BUG_019);
+        the advisory exception must not vanish from that verdict."""
+        test_file = "tests/test_mod.py"
+        self.wire(ctx_factory, {self.NEW: None, test_file: None})
+        verdict = self.verdict(
+            self.ctx_for(ctx_factory, [self.NEW, test_file], None, ["web/**"])
+        )
+        assert verdict.ok, verdict.message
+        assert not verdict.skipped
+        assert "coverage_advisory_paths" in verdict.message
+        assert "test_mod.py" in (verdict.detail or "")
+
+    def test_an_all_scope_floor_does_not_hold_an_advisory_row(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "all",
+                        "coverage_advisory_paths": ["web/**"],
+                    }
+                },
+            },
+        )
+        ctx = ctx_factory(
+            session={"id": "s1"},
+            pipeline={
+                "evidence": {
+                    "coverage": {"src/app.py": 100.0, "web/new.py": 10.0},
+                }
+            },
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert "web/new.py 10%" in (verdict.detail or "")
+
+    def test_an_all_scope_floor_of_only_advisory_rows_passes_and_says_so(
+        self, ctx_factory
+    ):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {
+                    "gates": {
+                        "coverage_min": 90,
+                        "coverage_scope": "all",
+                        "coverage_advisory_paths": ["web/**"],
+                    }
+                },
+            },
+        )
+        ctx = ctx_factory(
+            session={"id": "s1"},
+            pipeline={"evidence": {"coverage": {"web/new.py": 10.0}}},
+        )
+        verdict = self.verdict(ctx)
+        assert verdict.ok, verdict.message
+        assert not verdict.skipped
+        assert "coverage run is still owed" in verdict.message
+
+    # -- the standing exception ----------------------------------------
+
+    def test_a_configured_list_is_reported_as_an_active_exception(self, tmp_path):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import coverage_advisory_exception
+
+        write_manifest(
+            tmp_path,
+            {
+                "version": 1,
+                "methodology": {
+                    "gates": {"coverage_advisory_paths": ["web/**", "Sync/**"]}
+                },
+            },
+        )
+        line = coverage_advisory_exception(Manifest.locate(tmp_path))
+        assert line is not None
+        assert "ACTIVE EXCEPTION" in line
+        assert "web/**" in line and "Sync/**" in line
+        assert "owed" in line
+
+    def test_an_empty_list_is_no_exception(self, tmp_path):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import coverage_advisory_exception
+
+        write_manifest(tmp_path, {"version": 1})
+        assert coverage_advisory_exception(Manifest.locate(tmp_path)) is None
+
+
+class TestAChangeThatAlteredNoCodeIsNotHeldToTheFloor:
+    """The fact half of BUG_026 — a comment-only diff.
+
+    Coverage is a property of executable lines. A change that rewrote only
+    comments moved no number and can move none, so the work the floor demands
+    of it cannot affect the thing being demanded. It arrives on exactly the
+    changes that deserve the least friction: a change that DELETES a symbol
+    must rewrite every comment citing it, and each of those files then owes a
+    coverage debt it did not create and cannot discharge.
+
+    Positive evidence only. Any "cannot tell" — no base, an unreadable
+    revision, an adapter with no opinion on the language — leaves the file in
+    the floor.
+    """
+
+    SRC = "app/mod.swift"
+
+    def repo(self, ctx_factory, before, after):
+        """`before` on the base branch, `after` dirty in the session worktree.
+
+        The real shape: the fixture's worktree is a linked one on its own
+        branch, so the base revision is a commit the session did not make.
+        """
+        main, wt = ctx_factory.main, ctx_factory.wt
+        landed = main / self.SRC
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_text(before, encoding="utf-8")
+        run(["git", "add", "-A"], main)
+        run(["git", "commit", "-qm", "base"], main)
+        run(["git", "merge", "-q", "--ff-only", "master"], wt)
+
+        path = wt / self.SRC
+        path.write_text(after, encoding="utf-8")
+        return {str(path): 30.0}
+
+    def ctx_for(self, ctx_factory, coverage):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["swift"]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        return ctx_factory(
+            cwd=ctx_factory.wt,
+            session={
+                "id": "s1",
+                "files": [self.SRC],
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": coverage}},
+        )
+
+    def verdict(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    BEFORE = '// queued into `pending_imports`\nfunc go() {\n    run("a")\n}\n'
+
+    def test_a_comment_only_edit_below_the_floor_does_not_block(self, ctx_factory):
+        """The reported case: the only edit deletes a citation of a deleted type."""
+        after = '// queued for review\nfunc go() {\n    run("a")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured))
+        assert verdict.ok, verdict.message
+        assert "altered no code" in (verdict.detail or "")
+
+    def test_reindenting_is_not_a_code_change(self, ctx_factory):
+        """Layout is not something a coverage run can see."""
+        after = '// queued for review\nfunc go() {\n        run("a")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        assert self.verdict(self.ctx_for(ctx_factory, measured)).ok
+
+    def test_a_changed_statement_still_blocks(self, ctx_factory):
+        """The control. One line of real code and the floor applies in full."""
+        after = '// queued for review\nfunc go() {\n    run("a")\n    stop()\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured))
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_a_changed_string_literal_still_blocks(self, ctx_factory):
+        """The sharp control, and the reason this cannot reuse the reader that
+        answers `carries_executable_code`.
+
+        That one blanks a literal's CONTENTS — right for "is there a statement
+        here", fatal for "did the code change", because `"a"` and `"b"` reduce
+        to the same text. A reduction that loses this calls a real edit
+        cosmetic, which is the one mistake this answer must never make.
+        """
+        after = '// queued for review\nfunc go() {\n    run("b")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        verdict = self.verdict(self.ctx_for(ctx_factory, measured))
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_no_base_revision_leaves_the_block_in_place(self, ctx_factory):
+        """"Cannot tell" relaxes nothing — there is no before to compare to."""
+        after = '// queued for review\nfunc go() {\n    run("a")\n}\n'
+        measured = self.repo(ctx_factory, self.BEFORE, after)
+        ctx = self.ctx_for(ctx_factory, measured)
+        ctx.session["base"] = ""
+        verdict = self.verdict(ctx)
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+
+class TestBug103AStackedProjectHoldsANonPrimaryCodeChangeToTheFloor:
+    """Repro for BUG_103 — see the work-item entry.
+
+    Fixed in IDEA_031 A3 increment 1: ``executable_text`` takes the file's
+    path and answers ``None`` outside its own ecosystem, so a Python or
+    TypeScript file reaches the adapter that can read it or relaxes nothing.
+
+    The symptom: in a project that declares `swift_xcode` first and a second
+    ecosystem after it, a real code change in a file of that second ecosystem
+    is excused from the coverage floor as comment-only. The contract asserted
+    against is the overview's: reducing too much "calls a real code change
+    cosmetic", the one mistake the comment-only exclusion must never make.
+
+    Asserts the user-visible verdict only, never the suspected cause (which
+    adapter reduced the file).
+    """
+
+    BEFORE = "x = 'http://a' + b\n"
+    AFTER = "x = 'http://zzz' + c\n"
+
+    @pytest.mark.parametrize(
+        ("second", "src"),
+        [("python", "app/mod.py"), ("node", "app/mod.ts")],
+    )
+    def test_BUG_103_a_real_change_in_a_non_primary_file_is_held_to_the_floor(
+        self, ctx_factory, second, src
+    ):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        landed = main / src
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_text(self.BEFORE, encoding="utf-8")
+        run(["git", "add", "-A"], main)
+        run(["git", "commit", "-qm", "base"], main)
+        run(["git", "merge", "-q", "--ff-only", "master"], wt)
+        path = wt / src
+        path.write_text(self.AFTER, encoding="utf-8")
+
+        write_manifest(
+            main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["swift_xcode", second]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        ctx = ctx_factory(
+            cwd=wt,
+            session={
+                "id": "s1",
+                "files": [src],
+                "worktree": str(wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": {str(path): 30.0}}},
+        )
+        verdict = only(evaluate(["coverage.meets_floor"], ctx)).verdict
+        assert "altered no code" not in (verdict.detail or ""), verdict.detail
+        assert not verdict.ok, verdict.message
+        assert "below the 90% floor" in verdict.message
+
+
+class TestAPythonCommentOnlyChangeIsNotHeldToTheFloor:
+    """The comment-only exclusion reaches Python (IDEA_031 A3.1, DN-10).
+
+    Python's ``executable_text`` goes through ``tokenize``: comments, blank
+    lines and layout go, and docstrings and every other literal stay. So a
+    comment-only Python edit is excused from the floor in every Python
+    project, this repository included, and a code change is not. Also in a
+    stacked project, where the Swift reducer used to answer first (BUG_103).
+    """
+
+    SRC = "pkg/mod.py"
+    BEFORE = "def go():\n    # queued into pending_imports\n    return run('http://a')\n"
+
+    def verdict(self, ctx_factory, after, ecosystems, before=BEFORE):
+        main, wt = ctx_factory.main, ctx_factory.wt
+        landed = main / self.SRC
+        landed.parent.mkdir(parents=True, exist_ok=True)
+        landed.write_text(before, encoding="utf-8")
+        run(["git", "add", "-A"], main)
+        run(["git", "commit", "-qm", "base"], main)
+        run(["git", "merge", "-q", "--ff-only", "master"], wt)
+        path = wt / self.SRC
+        path.write_text(after, encoding="utf-8")
+        write_manifest(
+            main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ecosystems},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_scope": "touched"}
+                },
+            },
+        )
+        ctx = ctx_factory(
+            cwd=wt,
+            session={
+                "id": "s1",
+                "files": [self.SRC],
+                "worktree": str(wt),
+                "base": "master",
+            },
+            pipeline={"evidence": {"coverage": {str(path): 30.0}}},
+        )
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    @pytest.mark.parametrize("ecosystems", [["python"], ["swift_xcode", "python"]])
+    def test_a_comment_only_edit_below_the_floor_does_not_block(
+        self, ctx_factory, ecosystems
+    ):
+        after = "def go():\n    # queued for review\n\n    return run('http://a')  # ok\n"
+        verdict = self.verdict(ctx_factory, after, ecosystems)
+        assert verdict.ok, verdict.message
+        assert "altered no code" in (verdict.detail or "")
+
+    @pytest.mark.parametrize("ecosystems", [["python"], ["swift_xcode", "python"]])
+    def test_a_code_change_still_blocks(self, ctx_factory, ecosystems):
+        after = "def go():\n    # queued into pending_imports\n    return run('http://b')\n"
+        verdict = self.verdict(ctx_factory, after, ecosystems)
+        assert not verdict.ok
+        assert "below the 90% floor" in verdict.message
+
+    def test_a_docstring_edit_still_blocks(self, ctx_factory):
+        """Docstrings are kept: reducing too little is the safe direction."""
+        verdict = self.verdict(
+            ctx_factory,
+            'def go():\n    """Two."""\n',
+            ["python"],
+            before='def go():\n    """One."""\n',
+        )
+        assert not verdict.ok
+
+
+class TestTheNormalisedPayloadContract:
+    """BUG_022 — the dependency rule the code no longer kept.
+
+    `overview.md` stated "Nothing above `hosts/` is aware of hook schemas"
+    while two sites above `hosts/` read payload keys, and BUG_010's fix
+    (faa4de0) had come to DEPEND on that departure — the path a call names is
+    what attributes its evidence to the right project. A reader enforcing the
+    documented rule would have read the fix as a layering violation.
+
+    The rule now names the keys instead of denying them. This pins the list, so
+    widening the seam again is a deliberate edit to a stated contract rather
+    than a quiet import.
+    """
+
+    def test_the_contract_names_exactly_the_keys_the_engine_reads(self):
+        assert set(NORMALISED_PAYLOAD_KEYS) == {
+            "tool_name",
+            "tool_input",
+            "tool_input.file_path",
+            "tool_input.notebook_path",
+            "agent_type",
+            "stop_hook_active",
+            "tool_input.subagent_type",
+            "tool_input.prompt",
+            "tool_input.command",
+        }
+
+    def test_the_shell_command_is_part_of_the_contract(self):
+        """ADR-010 D5 widened the seam a third time, and this is the record.
+
+        `sweep.no_full_run` reads a shell call to find a full run of the
+        configured suite made around the CLI. `privacy.clean` already read the
+        same key through `tool_input` to find a `git commit`, and the list did
+        not say so.
+        """
+        assert "tool_input.command" in NORMALISED_PAYLOAD_KEYS
+
+    def test_the_dispatched_agent_is_part_of_the_contract(self):
+        """IDEA_020 widened the seam, and this is the record of that decision.
+
+        `agents.gated_dispatch_has_pipeline` is a rule, so a project can
+        retune it, and a rule reads the payload through this contract. Which
+        agent a dispatch names is what it reads. The brief joined in the same
+        change: `Context.resolution_for_payload` already read it to find the
+        worktree a dispatch names, and the list did not say so.
+        """
+        assert "tool_input.subagent_type" in NORMALISED_PAYLOAD_KEYS
+        assert "tool_input.prompt" in NORMALISED_PAYLOAD_KEYS
+
+    def test_the_acting_agent_is_part_of_the_contract(self):
+        """BUG_028 widened the seam, and this is the record of that decision.
+
+        A dispatch is observed from the PARENT's tool call, which happens
+        before a subagent that starts its own session and pipeline has either.
+        No lookup can attribute an event to a destination that does not exist
+        yet, so the agent that CREATED a pipeline could never be evidence for
+        that pipeline's design gate. The actor CAN be observed — the host
+        stamps it on every payload, the subagent's own calls included — so the
+        engine now reads it, and a second host adapter owes it.
+        """
+        assert "agent_type" in NORMALISED_PAYLOAD_KEYS
+
+    def test_the_rule_context_reads_the_declared_top_level_keys(self, ctx_factory):
+        ctx = ctx_factory(
+            payload={
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "/tmp/x.py"},
+            }
+        )
+        assert ctx.tool_name == "Edit"
+        assert ctx.tool_input == {"file_path": "/tmp/x.py"}
+        assert ctx.target_path == Path("/tmp/x.py")
+
+    def test_the_notebook_spelling_of_the_target_is_declared_too(self, ctx_factory):
+        """`target_path` is derived from either spelling, so both are part of
+        what a host must normalise — a host filling only one leaves the
+        attribution BUG_010 fixed working for some tool calls and not others."""
+        ctx = ctx_factory(
+            payload={"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/tmp/n.ipynb"}}
+        )
+        assert ctx.target_path == Path("/tmp/n.ipynb")
+
+    def test_the_documented_rule_is_the_one_the_overview_states(self):
+        """The doc and the constant are the two halves BUG_022 found apart."""
+        overview = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "architecture"
+            / "overview.rst"
+        ).read_text(encoding="utf-8")
+        assert "NORMALISED_PAYLOAD_KEYS" in overview
+        assert "Nothing above ``hosts/`` is aware of hook schemas." not in overview
+
+
+class TestProofOfRedIsAProofAboutATest:
+    """BUG_029 — `test.new_test_fails` keyed off the exit status alone.
+
+    A compile error, a signing failure or a missing simulator all exit
+    non-zero and execute nothing, and every one of them was reported as
+    "a red run is on record". The gate's name is a claim about a TEST, and
+    the same file one rule below already refuses a GREEN that executed
+    nothing — the asymmetry was the defect.
+    """
+
+    def red(self, **record):
+        return {"evidence": {"test_runs": [{"phase": "red", "passed": False, **record}]}}
+
+    def test_an_unparseable_failure_count_is_not_proof(self, ctx_factory):
+        """The observed run, verbatim: exit 65, nothing countable."""
+        result = only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=65, executed=1, failed=None)),
+            )
+        )
+        assert not result.verdict.ok
+        assert "failure count" in result.verdict.detail
+
+    def test_a_run_that_executed_nothing_is_not_proof(self, ctx_factory):
+        result = only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=65, executed=0, failed=None)),
+            )
+        )
+        assert not result.verdict.ok
+        assert "executed no tests" in result.verdict.detail
+
+    def test_a_non_zero_exit_with_zero_failures_is_not_proof(self, ctx_factory):
+        """The compile-error shape: the tool failed, no test did."""
+        result = only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=65, executed=0, failed=0)),
+            )
+        )
+        assert not result.verdict.ok
+
+    def test_the_rejected_run_is_named(self, ctx_factory):
+        """An inconclusive verdict that does not name the run sends the
+        session hunting a second red rather than reading the build log."""
+        pipeline = self.red(exit_code=65, executed=0, failed=None, command="swift test -x")
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert "swift test -x" in result.verdict.detail
+
+    def test_a_counted_failure_is_proof(self, ctx_factory):
+        assert only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=1, executed=5, failed=2)),
+            )
+        ).verdict.ok
+
+    def test_an_adapter_that_cannot_count_tests_is_not_held_against_the_run(
+        self, ctx_factory
+    ):
+        """`executed is None` means "this adapter does not count", which is
+        the generic adapter's permanent state — the same distinction
+        `TestResult.trustworthy` already draws between None and zero."""
+        assert only(
+            evaluate(
+                ["test.new_test_fails"],
+                ctx_factory(pipeline=self.red(exit_code=1, executed=None, failed=3)),
+            )
+        ).verdict.ok
+
+    def test_one_conclusive_red_among_several_is_enough(self, ctx_factory):
+        pipeline = {
+            "evidence": {
+                "test_runs": [
+                    {"phase": "red", "passed": False, "executed": 0, "failed": None},
+                    {"phase": "red", "passed": False, "executed": 4, "failed": 1},
+                ]
+            }
+        }
+        assert only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok
+
+
+class TestBUG066APassingRedRunSaysWhy:
+    """A red-phase run that passed with expected failures on record says so.
+
+    The recorder reads a strict expected failure as red only when the adapter
+    can confirm the marker is strict. When it cannot, the gate's refusal
+    carries the recorder's reason, so the reproducer is told to write
+    `strict=True` instead of being told its failing test passed.
+    """
+
+    def test_the_recorders_note_reaches_the_verdict(self, ctx_factory):
+        note = "1 expected failure ran, but the adapter could not confirm its marker is strict"
+        pipeline = {
+            "evidence": {
+                "test_runs": [
+                    {"phase": "red", "passed": True, "expected_failures": 1, "note": note}
+                ]
+            }
+        }
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert not result.verdict.ok
+        assert note in result.verdict.detail
+
+    def test_a_plain_pass_keeps_the_plain_detail(self, ctx_factory):
+        pipeline = {"evidence": {"test_runs": [{"phase": "red", "passed": True}]}}
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert result.verdict.detail.startswith("A test that passes")
+        assert "expected failure" not in result.verdict.detail
+
+
+class TestProofOfRedReadsTheMachinesOwnRedState:
+    """BUG_030 — the rule hardcoded the state name `red`.
+
+    `bugfix` runs triaging -> reproducing -> fixing, and `reproducing` is the
+    state that DECLARES this gate. `advance red` is not a legal transition
+    from anywhere on that machine, so the gate its own machine names as an
+    exit condition was unsatisfiable except by labelling a run with a state
+    the pipeline was never in.
+    """
+
+    def test_the_bugfix_machines_red_state_satisfies_the_gate(self, ctx_factory):
+        pipeline = {
+            "methodology": "bugfix",
+            "state": "reproducing",
+            "evidence": {
+                "test_runs": [
+                    {"phase": "reproducing", "passed": False, "executed": 3, "failed": 1}
+                ]
+            },
+        }
+        assert only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok
+
+    def test_the_advice_names_the_phase_this_machine_can_produce(self, ctx_factory):
+        pipeline = {"methodology": "bugfix", "state": "reproducing", "evidence": {}}
+        result = only(evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline)))
+        assert not result.verdict.ok
+        assert "--phase reproducing" in " ".join(result.verdict.fixes)
+
+    def test_tdd_still_reads_red(self, ctx_factory):
+        pipeline = {
+            "methodology": "tdd",
+            "state": "red",
+            "evidence": {
+                "test_runs": [{"phase": "red", "passed": False, "executed": 3, "failed": 1}]
+            },
+        }
+        assert only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok
+
+    def test_a_machine_that_cannot_be_loaded_is_not_a_pass(self, ctx_factory):
+        """An unanswerable question is not a pass — the AUD-08 convention."""
+        pipeline = {
+            "methodology": "no-such-methodology",
+            "evidence": {
+                "test_runs": [{"phase": "red", "passed": False, "executed": 3, "failed": 1}]
+            },
+        }
+        assert not only(
+            evaluate(["test.new_test_fails"], ctx_factory(pipeline=pipeline))
+        ).verdict.ok
+
+
+class TestTheDeliverablesGate:
+    """`session.deliverables_complete` — a session lands once, when it is done.
+
+    The model this serves is a session that accumulates work across several
+    agent-host sessions and merges ONCE. Nothing enforced the "once, when it is
+    done" half: the merge was reachable from any `reviewed` record, so the
+    thing that decided whether the work was finished was whichever host session
+    happened to be looking. This gate reads the list the operator wrote about
+    their own work and asks whether they finished it.
+    """
+
+    def session(self, *, state="reviewed", done=0, open_=0):
+        plan = [
+            {"n": i, "title": f"done {i}", "done": True, "done_at": 1.0}
+            for i in range(1, done + 1)
+        ]
+        plan += [
+            {"n": done + i, "title": f"open {i}", "done": False, "done_at": None}
+            for i in range(1, open_ + 1)
+        ]
+        return {"state": state, "branch": "session/x", "base": "master", "plan": plan}
+
+    def verdict(self, ctx_factory, session):
+        return only(evaluate(["session.deliverables_complete"], ctx_factory(session=session))).verdict
+
+    # -- the five rungs -------------------------------------------------
+
+    def test_no_session_is_not_applicable(self, ctx_factory):
+        assert self.verdict(ctx_factory, None).skipped
+
+    def test_a_finished_session_is_not_asked_again(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.session(state="torn_down", open_=3))
+        assert verdict.skipped
+        assert "torn_down" in verdict.message
+
+    def test_an_empty_plan_abstains_rather_than_passing_or_failing(self, ctx_factory):
+        """The load-bearing rung.
+
+        `clean` is the vacuous green — an empty plan is not "the plan is
+        finished", it is "no plan was made", and this gate guards the merge.
+        `fail` would make declaring a checklist mandatory for every session
+        including a one-line chore, and a gate legitimate work must override
+        routinely is what teaches people to reach for `--force`.
+        """
+        verdict = self.verdict(ctx_factory, self.session())
+        assert verdict.ok and verdict.skipped
+
+    def test_the_empty_plan_skip_names_the_command_that_would_arm_it(
+        self, ctx_factory
+    ):
+        """BUG_027: a `[skip:BLOCK]` that says "not applicable here" tells a
+        reader a gate went inert and nothing about how to make it mean
+        something."""
+        verdict = self.verdict(ctx_factory, self.session())
+        assert verdict.message != "not applicable here"
+        assert "invariant session plan add" in verdict.message
+
+    def test_open_deliverables_are_a_finding(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.session(done=1, open_=2))
+        assert not verdict.ok and not verdict.skipped
+        assert "2 of 3" in verdict.message
+
+    def test_the_recorded_route_is_named_before_the_forced_one(self, ctx_factory):
+        """What stops `--force` becoming the reflex.
+
+        `plan remove` retires the number permanently, so the record still shows
+        WHICH deliverable was abandoned. Forcing the merge records only that
+        somebody went past a gate.
+        """
+        fixes = self.verdict(ctx_factory, self.session(open_=1)).fixes
+        first_remove = next(i for i, f in enumerate(fixes) if "plan remove" in f)
+        first_force = next(i for i, f in enumerate(fixes) if "--force" in f)
+        assert first_remove < first_force
+        assert any("plan done" in f for f in fixes)
+
+    def test_a_finished_plan_passes_and_says_so(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.session(done=3))
+        assert verdict.ok and not verdict.skipped
+        assert "3/3" in verdict.message
+
+    # -- binding and level ----------------------------------------------
+
+    def test_it_is_a_machine_gate_and_not_a_hook(self, ctx_factory):
+        """A merge is a transition. Attaching this to `stop` as well would ask
+        it on every turn of a session that is nowhere near landing."""
+        from invariant.core.rules import get_rule
+
+        assert get_rule("session.deliverables_complete").events == ()
+
+    def test_it_blocks_under_standard_and_strict_and_advises_under_loose(self):
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        def level(profile):
+            raw = yaml.safe_load(
+                (DATA_DIR / "profiles" / f"{profile}.yaml").read_text(encoding="utf-8")
+            )
+            return raw["rules"]["session.deliverables_complete"]
+
+        assert level("standard") == "block"
+        assert level("strict") == "block"
+        assert level("loose") == "warn"
+
+    def test_an_unloadable_session_machine_fails_rather_than_stepping_aside(
+        self, tmp_path
+    ):
+        """The terminal check needs the machine. AUD-08: an unanswerable
+        question is not a pass."""
+        from invariant.core.manifest import Manifest
+
+        write_manifest(
+            tmp_path,
+            {"version": 1, "project": {"name": "demo"},
+             "methodology": {"pipeline": "bug"}},
+        )
+        ctx = RuleContext(
+            manifest=Manifest.locate(tmp_path),
+            cwd=tmp_path,
+            session={"state": "reviewed", "plan": []},
+        )
+        # The session machine is shipped and loads; what this pins is that the
+        # rule reads the SESSION machine's terminal set rather than the
+        # pipeline's, which a mistyped methodology would otherwise break.
+        verdict = only(evaluate(["session.deliverables_complete"], ctx)).verdict
+        assert verdict.skipped and "plan add" in verdict.message
+
+    def test_a_session_machine_that_cannot_load_fails_this_gate_too(self, tmp_path):
+        """The other half of AUD-08 for this rule: not just "reads the right
+        machine" (above) but "fails, not skips, when THAT machine is broken".
+
+        Shadowed via `methodology.extra_machines`, the sanctioned route a
+        project uses to override a shipped machine — not by corrupting the
+        package.
+        """
+        ctx = RuleContext(
+            manifest=manifest_with_unloadable_session_machine(tmp_path),
+            cwd=tmp_path,
+            session={"state": "reviewed", "plan": [{"n": 1, "title": "x", "done": False}]},
+        )
+        verdict = only(evaluate(["session.deliverables_complete"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "session machine could not be loaded" in verdict.message
+
+
+class TestTheBranchIsCurrentRule:
+    """`session.branch_is_current` — the model said "rebase onto the local base
+    after every commit" and nothing owned it, so it was prose.
+
+    `warn` in every profile, deliberately. A stale branch costs a rebase and
+    never data, and a `block` here would fire whenever a peer landed anything —
+    a gate whose trigger is someone else's commit.
+    """
+
+    def behind(self, ctx_factory, commits=1):
+        """Base moves on; the session branch does not."""
+        for n in range(commits):
+            (ctx_factory.main / f"base{n}.txt").write_text("x", encoding="utf-8")
+            run(["git", "add", "-A"], ctx_factory.main)
+            run(["git", "commit", "-qm", f"base {n}"], ctx_factory.main)
+        return {"state": "working", "branch": "session/x", "base": "master"}
+
+    def verdict(self, ctx_factory, session, cwd=None):
+        ctx = ctx_factory(cwd=cwd, session=session)
+        return only(evaluate(["session.branch_is_current"], ctx)).verdict
+
+    def test_it_runs_at_the_close_of_a_turn(self):
+        assert "session.branch_is_current" in {s.id for s in rules_for_event("stop")}
+
+    def test_a_branch_the_base_has_moved_past_is_a_finding(self, ctx_factory):
+        verdict = self.verdict(ctx_factory, self.behind(ctx_factory, commits=2))
+        assert not verdict.ok and not verdict.skipped
+        assert "2 commit(s) behind" in verdict.message
+        assert any("session sync" in fix for fix in verdict.fixes)
+
+    def test_a_current_branch_passes(self, ctx_factory):
+        session = {"state": "working", "branch": "session/x", "base": "master"}
+        verdict = self.verdict(ctx_factory, session)
+        assert verdict.ok and not verdict.skipped
+
+    def test_a_branch_merely_ahead_is_not_behind(self, ctx_factory):
+        """The two questions are opposite argument orders of one helper, and
+        getting them the wrong way round would make every session with work on
+        it report as stale."""
+        (ctx_factory.wt / "work.txt").write_text("x", encoding="utf-8")
+        run(["git", "add", "-A"], ctx_factory.wt)
+        run(["git", "commit", "-qm", "work"], ctx_factory.wt)
+        session = {"state": "working", "branch": "session/x", "base": "master"}
+        assert self.verdict(ctx_factory, session).ok
+
+    def test_no_session_and_no_branch_are_both_not_applicable(self, ctx_factory):
+        assert self.verdict(ctx_factory, None).skipped
+        assert self.verdict(ctx_factory, {"state": "working", "branch": ""}).skipped
+
+    def test_a_finished_session_is_not_asked_to_rebase(self, ctx_factory):
+        session = self.behind(ctx_factory)
+        session["state"] = "torn_down"
+        assert self.verdict(ctx_factory, session).skipped
+
+    def test_a_comparison_git_cannot_make_is_skipped_with_a_stated_reason(
+        self, ctx_factory, tmp_path
+    ):
+        session = {"state": "working", "branch": "session/x", "base": "no-such-ref"}
+        verdict = self.verdict(ctx_factory, session)
+        assert verdict.skipped
+        assert "no-such-ref" in verdict.message
+
+    def test_it_advises_in_every_profile(self):
+        import yaml
+
+        from invariant.core.manifest import DATA_DIR
+
+        for profile in ("standard", "strict", "loose"):
+            raw = yaml.safe_load(
+                (DATA_DIR / "profiles" / f"{profile}.yaml").read_text(encoding="utf-8")
+            )
+            assert raw["rules"]["session.branch_is_current"] == "warn", profile
+
+    def test_a_session_machine_that_cannot_load_fails_this_gate_too(self, tmp_path):
+        """AUD-08 again, for this rule's own terminal-set read: a configuration
+        error is not a skip. Shadowed via `methodology.extra_machines`, the
+        sanctioned override route — not by corrupting the package."""
+        ctx = RuleContext(
+            manifest=manifest_with_unloadable_session_machine(tmp_path),
+            cwd=tmp_path,
+            session={"state": "working", "branch": "session/x", "base": "master"},
+        )
+        verdict = only(evaluate(["session.branch_is_current"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped
+        assert "session machine could not be loaded" in verdict.message
+
+
+# -- BUG_071: a declared path matches however it is spelled ---------------
+
+#: Every spelling of one in-project directory a manifest author might write.
+#: ``{main}`` is the main checkout's absolute path.
+EQUIVALENT_SPELLINGS = (
+    "{rel}",
+    "./{rel}",
+    "{rel}/",
+    "./{rel}/",
+    "{first}//{rest}",
+    "{first}/x/../{rest}",
+    "{main}/{rel}",
+)
+
+
+def spell(template, rel, main):
+    first, rest = rel.split("/", 1)
+    return template.format(rel=rel, first=first, rest=rest, main=main)
+
+
+class TestADeclaredStoreIsExemptHoweverItIsSpelled:
+    """`items.path`, `paths.reports` and `session.exempt_paths` (BUG_071).
+
+    `_is_exempt` compared the target's project-relative spelling with the
+    declaration AS WRITTEN, and a project-relative spelling never starts with
+    ``./`` — so ``items.path: ./docs/backlog`` exempted nothing, and every
+    write to the work-item store in the main checkout was refused by an
+    isolation rule that named neither the path nor the spelling.
+    """
+
+    ISOLATION_RULES = ("session.isolated_before_edit", "session.no_edit_in_main_checkout")
+
+    def assert_exempt(self, ctx_factory, body, rel, cwd=None):
+        write_manifest(ctx_factory.main, {"version": 1, "project": {"name": "demo"}, **body})
+        ctx = ctx_factory(
+            cwd=cwd or ctx_factory.main, payload=edit_payload(ctx_factory.main / rel)
+        )
+        for rule_id in self.ISOLATION_RULES:
+            verdict = only(evaluate([rule_id], ctx)).verdict
+            assert verdict.skipped, f"{rule_id}: {verdict.message}"
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_work_item_store(self, ctx_factory, template):
+        written = spell(template, "docs/backlog", ctx_factory.main)
+        self.assert_exempt(
+            ctx_factory, {"items": {"path": written}}, "docs/backlog/BUG_001.md"
+        )
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_work_item_store_seen_from_a_worktree(self, ctx_factory, template):
+        written = spell(template, "docs/backlog", ctx_factory.main)
+        self.assert_exempt(
+            ctx_factory,
+            {"items": {"path": written}},
+            "docs/backlog/BUG_001.md",
+            cwd=ctx_factory.wt,
+        )
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_report_store(self, ctx_factory, template):
+        written = spell(template, "out/reports", ctx_factory.main)
+        self.assert_exempt(
+            ctx_factory, {"paths": {"reports": written}}, "out/reports/sessions.md"
+        )
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_a_declared_exempt_path(self, ctx_factory, template):
+        written = spell(template, "notes/shared", ctx_factory.main) + "/**"
+        self.assert_exempt(
+            ctx_factory,
+            {"session": {"exempt_paths": [written]}},
+            "notes/shared/today.md",
+        )
+
+    def test_items_exempt_false_still_withholds_the_exemption(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {"items": {"path": "./docs/backlog", "exempt": False}},
+        )
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "docs" / "backlog" / "BUG_001.md")
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+    def test_a_sibling_of_the_store_is_not_exempt(self, ctx_factory):
+        """Normalising must not widen: `./docs/backlog` is not `docs/backlog*`."""
+        write_manifest(ctx_factory.main, {"items": {"path": "./docs/backlog"}})
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "docs" / "backlog-tools" / "a.py")
+        )
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+    @pytest.mark.parametrize("written", [".", "./", "docs/.."])
+    def test_a_store_declared_as_the_root_does_not_exempt_the_project(
+        self, ctx_factory, written
+    ):
+        write_manifest(ctx_factory.main, {"items": {"path": written}})
+        ctx = ctx_factory(payload=edit_payload(ctx_factory.main / "src" / "app.py"))
+        assert not only(evaluate(["session.no_edit_in_main_checkout"], ctx)).verdict.ok
+
+
+class TestADeclarationOutsideTheProjectExemptsNothing:
+    """Absolute paths and climbing ``..`` must not reach past the project.
+
+    Before the shared normaliser an absolute pattern was matched against the
+    absolute spelling `_project_relative_forms` falls back to for a path in no
+    checkout, so a sweeping declaration above the project answered "exempt"
+    for files in an unrelated directory.
+    """
+
+    def is_exempt(self, ctx_factory, body, target):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import is_exempt_path
+
+        write_manifest(ctx_factory.main, {"version": 1, **body})
+        return is_exempt_path(Manifest.locate(ctx_factory.main), ctx_factory.main, target)
+
+    def test_an_absolute_exempt_glob_above_the_project(self, ctx_factory, tmp_path):
+        outside = tmp_path / "unrelated" / "a.md"
+        body = {"session": {"exempt_paths": [f"{tmp_path}/**"]}}
+        assert not self.is_exempt(ctx_factory, body, outside)
+        assert not self.is_exempt(ctx_factory, body, ctx_factory.main / "src" / "app.py")
+
+    @pytest.mark.parametrize("written", ["../unrelated", "{tmp}/unrelated"])
+    def test_a_store_outside_the_project(self, ctx_factory, tmp_path, written):
+        written = written.format(tmp=tmp_path)
+        outside = tmp_path / "unrelated" / "BUG_001.md"
+        for body in ({"items": {"path": written}}, {"paths": {"reports": written}}):
+            assert not self.is_exempt(ctx_factory, body, outside), body
+
+
+    def test_an_undeclared_store_contributes_nothing(self, ctx_factory):
+        """A null store adds no pattern; with nothing else declared, nothing
+        is exempt — not the whole project."""
+        body = {
+            "session": {"exempt_paths": []},
+            "items": {"path": None},
+            "paths": {"reports": None},
+        }
+        target = ctx_factory.main / "docs" / "backlog" / "BUG_001.md"
+        assert not self.is_exempt(ctx_factory, body, target)
+
+
+class TestAPrivacyScopeIsScannedHoweverItIsSpelled:
+    """`privacy.scope` literal prefixes and the `paths.*` keywords it resolves.
+
+    `Path()` already absorbed ``./`` and a trailing ``/``; it did not absorb a
+    climbing ``..`` or an absolute in-project path, either of which put a
+    document outside a scope that names it.
+    """
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_a_literal_prefix(self, ctx_factory, template):
+        written = spell(template, "notes/private", ctx_factory.main)
+        write_manifest(ctx_factory.main, {"privacy": {"scope": [written]}})
+        ctx = ctx_factory(
+            payload=edit_payload(
+                ctx_factory.main / "notes" / "private" / "a.md", "the crash fired at 14:05"
+            )
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, verdict.message
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_the_memory_keyword(self, ctx_factory, template):
+        written = spell(template, "kb/memory", ctx_factory.main)
+        write_manifest(
+            ctx_factory.main,
+            {"paths": {"memory": written}, "privacy": {"scope": ["memory"]}},
+        )
+        ctx = ctx_factory(
+            payload=edit_payload(
+                ctx_factory.main / "kb" / "memory" / "a.md", "the crash fired at 14:05"
+            )
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert not verdict.ok and not verdict.skipped, verdict.message
+
+    def test_a_prefix_outside_the_project_scopes_nothing(self, ctx_factory):
+        write_manifest(ctx_factory.main, {"privacy": {"scope": ["../notes"]}})
+        ctx = ctx_factory(
+            payload=edit_payload(ctx_factory.main / "notes" / "a.md", "at 14:05")
+        )
+        assert only(evaluate(["privacy.clean"], ctx)).verdict.skipped
+
+
+class TestTheDocsRootIsFoundHoweverItIsSpelled:
+    """`paths.docs` in every tree, including an absolute main-checkout path.
+
+    Relativised against the manifest root alone, an absolute value naming the
+    main checkout read as "outside the project" from a linked worktree, whose
+    manifest root is the worktree — so reads of the worktree's own copy were
+    not evidence for `docs.read_architecture`.
+    """
+
+    def roots(self, ctx_factory, written):
+        from invariant.core.manifest import Manifest
+        from invariant.core.rules import docs_roots
+
+        wt = ctx_factory.wt
+        write_manifest(wt, {"version": 1, "paths": {"docs": written}})
+        return docs_roots(Manifest.locate(wt), wt)
+
+    @pytest.mark.parametrize("template", EQUIVALENT_SPELLINGS)
+    def test_every_tree_is_a_docs_root(self, ctx_factory, template):
+        written = spell(template, "docs/architecture", ctx_factory.main)
+        roots = self.roots(ctx_factory, written)
+        for tree in (ctx_factory.main, ctx_factory.wt):
+            assert (tree / "docs" / "architecture").resolve() in roots, (written, roots)
+
+    def test_a_docs_root_outside_the_project_is_used_as_given(self, ctx_factory, tmp_path):
+        elsewhere = tmp_path / "shared-docs"
+        assert self.roots(ctx_factory, str(elsewhere)) == [elsewhere.resolve()]
+
+
+    def test_the_gate_names_a_docs_root_outside_the_project_as_given(
+        self, ctx_factory, tmp_path
+    ):
+        elsewhere = tmp_path / "shared-docs"
+        write_manifest(ctx_factory.main, {"version": 1, "paths": {"docs": str(elsewhere)}})
+        ctx = ctx_factory(cwd=ctx_factory.wt)
+        verdict = only(evaluate(["docs.read_architecture"], ctx)).verdict
+        assert not verdict.ok
+        assert str(elsewhere.resolve()) in verdict.message
+
+
+class TestNonSourceGlobsMatchHoweverTheyAreSpelled:
+    """`methodology.gates.non_source` through the shared normaliser (BUG_071).
+
+    Uses its neighbour's fixtures through an instance rather than by
+    inheriting, so the neighbour's own tests are not collected twice.
+    """
+
+    def verdict_for(self, ctx_factory, written):
+        h = TestANonSourceAssetCommittedBesideCodeDoesNotBlock()
+        h.setup_bundle(ctx_factory)
+        return h.verdict(
+            h.ctx_for(
+                ctx_factory,
+                h.measured_row(ctx_factory),
+                [h.MEASURED, f"{h.BUNDLE}/src/ow-kit.jsx"],
+                gates={"non_source": [written]},
+            )
+        )
+
+    @pytest.mark.parametrize("written", ["./design/**", "design/", "./design", "design//"])
+    def test_the_spelling_does_not_decide_the_verdict(self, ctx_factory, written):
+        verdict = self.verdict_for(ctx_factory, written)
+        assert verdict.ok, verdict.message
+
+    def test_the_verdict_names_the_pattern_as_written(self, ctx_factory):
+        verdict = self.verdict_for(ctx_factory, "./design/**")
+        assert "'./design/**'" in (verdict.detail or "")
+
+
+class TestCoverageExcludeGlobsMatchHoweverTheyAreSpelled:
+    """`methodology.gates.coverage_exclude` through the shared normaliser."""
+
+    @pytest.mark.parametrize("written", ["./tests/**", "tests/", "./tests", "tests//"])
+    def test_the_spelling_does_not_decide_the_verdict(self, ctx_factory, written):
+        h = TestPathsTheManifestHoldsOutOfTheFloor()
+        verdict = h.verdict(
+            h.ctx_for(ctx_factory, [h.SRC, h.TEST], [written], h.wire(ctx_factory))
+        )
+        assert verdict.ok, verdict.message
+        assert repr(written) in (verdict.detail or "")
+
+
+class TestBaselineEntriesMatchHoweverTheyAreSpelled:
+    """A baseline entry is keyed by the spelling measured rows are keyed by.
+
+    The LOOKUP already tolerated ``./`` through `_same_file`; the duplicate
+    check did not, so ``x`` and ``./x`` were two records for one file and the
+    first one silently won — the last-wins ambiguity the duplicate refusal
+    exists to prevent, by another route.
+    """
+
+    def verdict_for(self, ctx_factory, baseline_text):
+        h = TestTheRecordedBaselineThatRatchetsTheFloor()
+        measured = h.wire(ctx_factory, {h.LEGACY: 70.99}, baseline_text)
+        return h.verdict(h.ctx_for(ctx_factory, [h.LEGACY], measured, h.BASELINE))
+
+    @pytest.mark.parametrize("prefix", ["./", ""])
+    def test_a_dot_slash_entry_is_the_files_entry(self, ctx_factory, prefix):
+        legacy = TestTheRecordedBaselineThatRatchetsTheFloor.LEGACY
+        verdict = self.verdict_for(ctx_factory, f"{prefix}{legacy} 69.17\n")
+        assert verdict.ok, verdict.message
+
+    def test_two_spellings_of_one_file_are_a_duplicate(self, ctx_factory):
+        legacy = TestTheRecordedBaselineThatRatchetsTheFloor.LEGACY
+        verdict = self.verdict_for(ctx_factory, f"{legacy} 69.17\n./{legacy} 40\n")
+        assert not verdict.ok
+        assert "already recorded" in (verdict.detail or "")
+
+
+class TestReadsWithoutOptionalLocks:
+    """``without_optional_locks`` keeps a reader out of another process's index.
+
+    A plain ``git status`` or ``git diff`` may refresh the index's stat cache
+    as a side effect, which takes ``index.lock``. The oracle's gate cache asks
+    git about worktrees a host is working in, so it reads with
+    ``GIT_OPTIONAL_LOCKS=0`` (ADR-007 D16). The scope is a context variable,
+    so it reaches exactly the git calls made inside it, in the thread that
+    entered it, and nothing else in the process.
+    """
+
+    @pytest.fixture
+    def spy(self, monkeypatch):
+        from invariant.core import git
+
+        seen: list = []
+        real = git.subprocess.run
+
+        def record(argv, *args, **kwargs):
+            seen.append(kwargs.get("env"))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(git.subprocess, "run", record)
+        return seen
+
+    def test_outside_the_scope_git_inherits_the_environment(self, spy, tmp_path):
+        from invariant.core import git
+
+        git.is_repo(tmp_path)
+        git.staged_blob(tmp_path, "x")
+        assert spy == [None, None]
+
+    def test_inside_it_both_runners_turn_optional_locks_off(self, spy, tmp_path, monkeypatch):
+        from invariant.core import git
+
+        monkeypatch.setenv("SOME_MARKER", "kept")
+        with git.without_optional_locks():
+            git.is_repo(tmp_path)
+            git.staged_blob(tmp_path, "x")
+        assert len(spy) == 2
+        for env in spy:
+            assert env["GIT_OPTIONAL_LOCKS"] == "0"
+            assert env["SOME_MARKER"] == "kept"
+
+    def test_the_scope_ends_with_the_block_even_on_an_error(self, spy, tmp_path):
+        from invariant.core import git
+
+        with pytest.raises(RuntimeError), git.without_optional_locks():
+            raise RuntimeError("boom")
+        git.is_repo(tmp_path)
+        assert spy == [None]
+
+    def test_it_nests(self, spy, tmp_path):
+        from invariant.core import git
+
+        with git.without_optional_locks():
+            with git.without_optional_locks():
+                pass
+            git.is_repo(tmp_path)
+        assert spy[0]["GIT_OPTIONAL_LOCKS"] == "0"
+
+    def test_another_thread_is_not_in_the_scope(self, spy, tmp_path):
+        import threading
+
+        from invariant.core import git
+
+        with git.without_optional_locks():
+            worker = threading.Thread(target=git.is_repo, args=(tmp_path,))
+            worker.start()
+            worker.join()
+        assert spy == [None]
+
+    def test_the_process_environment_is_never_changed(self, tmp_path, monkeypatch):
+        import os
+
+        from invariant.core import git
+
+        monkeypatch.delenv("GIT_OPTIONAL_LOCKS", raising=False)
+        with git.without_optional_locks():
+            assert "GIT_OPTIONAL_LOCKS" not in os.environ
+            assert git.is_repo(tmp_path) is False
+
+
+# -- sweep.fresh (IDEA_032 increment 4, ADR-010 D6) --------------------------
+
+
+def _utc_today():
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).date()
+
+
+def sweep_record(ran_on, seq=1, head="c" * 40, branch="master", files=None, command="coverage"):
+    from invariant.core.sweep import SweepRecord
+
+    return SweepRecord(
+        seq=seq,
+        ran_on=ran_on,
+        branch=branch,
+        head=head,
+        previous=None,
+        command=command,
+        executed=10,
+        failed=0,
+        passed=True,
+        failing=[],
+        files=files if files is not None else {"src/app/mod.py": 97.0},
+        floor=90.0,
+    )
+
+
+def commit_sweep(root, rec, directory="docs/sweeps"):
+    target = Path(root) / directory / rec.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(rec.to_json(), encoding="utf-8")
+    run(["git", "add", "--", str(target)], root)
+    run(["git", "commit", "-qm", f"Sweep {rec.seq}"], root)
+
+
+def days_ago(n):
+    from datetime import timedelta
+
+    return (_utc_today() - timedelta(days=n)).isoformat()
+
+
+def cadence_manifest(root, schedule=None, extra_gates=None, rules=None):
+    gates = {
+        "coverage_min": 90,
+        "coverage_scope": "touched",
+        "schedule": schedule
+        if schedule is not None
+        else {"cadence_days": 7, "gates": ["coverage.meets_floor", "test.all_pass"]},
+    }
+    gates.update(extra_gates or {})
+    body = {
+        "version": 1,
+        "project": {"name": "demo", "ecosystems": ["python"]},
+        "methodology": {"gates": gates},
+    }
+    if rules:
+        body["enforcement"] = {"rules": rules}
+    write_manifest(root, body)
+
+
+def fresh(ctx):
+    return only(evaluate(["sweep.fresh"], ctx))
+
+
+class TestSweepFresh:
+    """A sweep cadence's evidence is only as good as the last sweep (ADR-010 D6).
+
+    The rule warns when no sweep is recorded or the last is older than the
+    cadence plus grace, names the age either way, and never stops work: its
+    level is capped at warn by validation (D3 item 5).
+    """
+
+    SESSION: ClassVar[dict] = {"id": "s1", "files": [], "base": "master"}
+
+    def test_without_a_cadence_it_does_not_apply(self, ctx_factory):
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.skipped
+        assert "no sweep cadence" in result.verdict.message
+
+    def test_no_sweep_recorded_warns_and_never_blocks(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "no sweep recorded on master" in result.verdict.message
+        assert result.level is Level.WARN
+        assert not result.blocks
+        assert any("invariant sweep run" in fix for fix in result.verdict.fixes)
+
+    def test_a_fresh_sweep_is_clean_and_names_its_age(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(2)))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.ok and not result.verdict.skipped, result.verdict.message
+        assert "2 day(s)" in result.verdict.message
+        assert "c" * 12 in result.verdict.message
+
+    def test_a_stale_sweep_warns_naming_its_age_and_commit(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(11)))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "11 day(s)" in result.verdict.message
+        assert "c" * 12 in result.verdict.message
+        assert "7" in result.verdict.message and "3" in result.verdict.message
+        assert not result.blocks
+
+    def test_the_grace_is_three_days_by_default(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(10)))
+        assert fresh(ctx_factory(session=self.SESSION)).verdict.ok
+
+    def test_the_grace_is_configurable(self, ctx_factory):
+        cadence_manifest(
+            ctx_factory.main,
+            schedule={"cadence_days": 7, "grace_days": 0, "gates": ["test.all_pass"]},
+            rules={"coverage.meets_floor": "warn"},
+        )
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(8)))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "8 day(s)" in result.verdict.message
+
+    def test_the_latest_record_on_the_base_branch_is_the_one_judged(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(20), seq=1, head="a" * 40))
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(1), seq=2, head="b" * 40))
+        commit_sweep(
+            ctx_factory.main,
+            sweep_record(days_ago(0), seq=9, head="d" * 40, branch="other"),
+        )
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.ok
+        assert "b" * 12 in result.verdict.message
+
+    def test_a_worktree_cut_before_the_sweep_still_sees_it(self, ctx_factory):
+        """Freshness reads the BASE branch's committed records, never the
+        worktree's tree: the sweep lands on the base after the session cut."""
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(1)))
+        assert not (ctx_factory.wt / "docs" / "sweeps").exists()
+        result = fresh(ctx_factory(cwd=ctx_factory.wt, session=self.SESSION))
+        assert result.verdict.ok, result.verdict.message
+
+    def test_an_uncommitted_record_is_not_a_sweep(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        rec = sweep_record(days_ago(1))
+        target = ctx_factory.main / "docs" / "sweeps" / rec.name
+        target.parent.mkdir(parents=True)
+        target.write_text(rec.to_json(), encoding="utf-8")
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert "no sweep recorded" in result.verdict.message
+
+    def test_without_a_session_the_checked_out_branch_is_read(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(3)))
+        result = fresh(ctx_factory())
+        assert result.verdict.ok
+        assert "3 day(s)" in result.verdict.message
+
+    def test_a_base_git_cannot_read_warns_rather_than_passing(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        result = fresh(ctx_factory(session={**self.SESSION, "base": "no-such-branch"}))
+        assert not result.verdict.ok
+        assert "no-such-branch" in result.verdict.message
+
+    def test_an_unreadable_record_is_named(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(1)))
+        bad = ctx_factory.main / "docs" / "sweeps" / "2026-01-01-broken.json"
+        bad.write_text("{not json", encoding="utf-8")
+        run(["git", "add", "-A"], ctx_factory.main)
+        run(["git", "commit", "-qm", "broken"], ctx_factory.main)
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert result.verdict.ok
+        assert "2026-01-01-broken.json" in result.verdict.detail
+
+    def test_a_record_whose_date_cannot_be_read_is_not_fresh(self, ctx_factory):
+        cadence_manifest(ctx_factory.main)
+        commit_sweep(ctx_factory.main, sweep_record("someday"))
+        result = fresh(ctx_factory(session=self.SESSION))
+        assert not result.verdict.ok
+        assert "someday" in result.verdict.message
+
+    @pytest.mark.parametrize("profile", ["loose", "standard", "strict"])
+    def test_it_warns_in_every_profile(self, ctx_factory, profile):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "enforcement": {"profile": profile},
+                "methodology": {
+                    "gates": {
+                        "schedule": {
+                            "cadence_days": 7,
+                            "gates": ["coverage.meets_floor", "test.all_pass"],
+                        }
+                    }
+                },
+            },
+        )
+        from invariant.core.manifest import Manifest
+
+        manifest = Manifest.locate(ctx_factory.main)
+        assert manifest.rule_level("sweep.fresh") is Level.WARN
+
+
+class TestTheAdvisoryVerdictNamesTheLastSweep:
+    """Under a cadence an advisory file's scoped figure is a lower bound; the
+    verdict names the figure the last sweep measured for it, and that sweep's
+    commit, so the reader sees the number the floor is really held to."""
+
+    SHARED = "src/app/mod.py"
+
+    def ctx(self, ctx_factory, coverage=None):
+        cadence_manifest(ctx_factory.main)
+        path = ctx_factory.wt / self.SHARED
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def f():\n    return g()\n", encoding="utf-8")
+        evidence = {}
+        if coverage is not None:
+            evidence = {
+                "coverage": {str(path): coverage},
+                "coverage_run": {"scope": "scoped", "selectors": ["tests/test_mod.py"]},
+            }
+        return ctx_factory(
+            session={
+                "id": "s1",
+                "files": [self.SHARED],
+                "worktree": str(ctx_factory.wt),
+                "base": "master",
+            },
+            pipeline={"evidence": evidence},
+        )
+
+    def floor(self, ctx):
+        return only(evaluate(["coverage.meets_floor"], ctx)).verdict
+
+    def test_the_last_sweeps_figure_and_commit_are_named(self, ctx_factory):
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(2), head="e" * 40))
+        verdict = self.floor(self.ctx(ctx_factory, coverage=65.0))
+        assert verdict.ok, verdict.message
+        assert f"{self.SHARED} 65%, below the 90% floor" in verdict.detail
+        assert "last sweep 97%" in verdict.detail
+        assert "e" * 12 in verdict.detail
+
+    def test_an_unmeasured_file_still_gets_the_sweeps_figure(self, ctx_factory):
+        commit_sweep(ctx_factory.main, sweep_record(days_ago(2), head="e" * 40))
+        verdict = self.floor(self.ctx(ctx_factory))
+        assert "not measured" in verdict.detail
+        assert "last sweep 97%" in verdict.detail
+
+    def test_a_file_the_last_sweep_did_not_measure_says_so(self, ctx_factory):
+        commit_sweep(
+            ctx_factory.main, sweep_record(days_ago(2), head="e" * 40, files={"other.py": 99.0})
+        )
+        verdict = self.floor(self.ctx(ctx_factory, coverage=95.0))
+        assert "not in the last sweep" in verdict.detail
+        assert "e" * 12 in verdict.detail
+
+    def test_a_sweep_that_ran_no_coverage_says_so(self, ctx_factory):
+        commit_sweep(
+            ctx_factory.main,
+            sweep_record(days_ago(2), head="e" * 40, files={}, command="test"),
+        )
+        verdict = self.floor(self.ctx(ctx_factory, coverage=95.0))
+        assert "measured no coverage" in verdict.detail
+
+    def test_no_sweep_recorded_is_said_once(self, ctx_factory):
+        verdict = self.floor(self.ctx(ctx_factory, coverage=95.0))
+        assert verdict.detail.count("No sweep is recorded on master") == 1
+
+    def test_a_glob_advisory_verdict_never_reads_the_sweep(self, ctx_factory):
+        write_manifest(
+            ctx_factory.main,
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "methodology": {
+                    "gates": {"coverage_min": 90, "coverage_advisory_paths": ["src/**"]}
+                },
+            },
+        )
+        path = ctx_factory.wt / self.SHARED
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("def f():\n    return g()\n", encoding="utf-8")
+        verdict = self.floor(
+            ctx_factory(
+                session={"id": "s1", "files": [self.SHARED], "worktree": str(ctx_factory.wt),
+                         "base": "master"},
+                pipeline={"evidence": {}},
+            )
+        )
+        assert "sweep" not in verdict.detail
+
+
+class TestSweepCadenceSummary:
+    def test_it_names_held_paths_and_a_stale_sweep(self, ctx_factory):
+        from invariant.core.rules import sweep_cadence_summary
+
+        cadence_manifest(
+            ctx_factory.main,
+            schedule={
+                "cadence_days": 7,
+                "gates": ["coverage.meets_floor"],
+                "held_paths": ["core/**"],
+            },
+            rules={"coverage.meets_floor": "warn"},
+        )
+        text = sweep_cadence_summary(ctx_factory())
+        assert "held_paths: core/**" in text
+        assert "STALE: no sweep recorded on master" in text
+
+    def test_without_a_cadence(self, ctx_factory):
+        from invariant.core.rules import sweep_cadence_summary
+
+        assert sweep_cadence_summary(ctx_factory()) == "none configured"

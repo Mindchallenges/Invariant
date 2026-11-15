@@ -1,0 +1,33 @@
+<!-- @dsCard group="Behaviour" height=330 subtitle="Initial, state, final; start, decision, io, end, fork" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>StateFlow — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var s = "";
+s += A.node({type: "state", kind: "initial", x: 30, y: 30});
+s += A.relation({link: "next", points: [[48, 39], [90, 39]]});
+s += A.node({type: "state", label: "Idle", x: 90, y: 18, w: 110});
+s += A.relation({link: "next", points: [[200, 39], [290, 39]], label: "window opens", labelAt: [245, 31]});
+s += A.node({type: "state", label: "Streaming", x: 290, y: 18, w: 110});
+s += A.relation({link: "next", points: [[400, 39], [530, 39]], label: "retries exhausted", labelAt: [465, 31]});
+s += A.node({type: "state", kind: "final", x: 530, y: 29});
+s += '<text class="av-cap" x="10" y="100">state machine</text>';
+s += A.node({type: "step", kind: "start", label: "Upload window", x: 10, y: 130, w: 130});
+s += A.relation({link: "next", points: [[140, 151], [180, 151]]});
+s += A.node({type: "step", kind: "decision", label: "Spool has data?", x: 180, y: 123});
+s += A.relation({link: "next", points: [[337, 151], [380, 151]], label: "yes", labelAt: [358, 143]});
+s += A.node({type: "step", kind: "io", label: "Send chunk", x: 380, y: 130, w: 120});
+s += A.relation({link: "next", points: [[258, 179], [258, 230]], label: "no", labelAt: [268, 210], anchor: "start"});
+s += A.node({type: "step", kind: "end", label: "Sleep", x: 208, y: 230, w: 100});
+s += A.node({type: "step", kind: "fork", x: 380, y: 230, w: 120});
+s += '<text class="av-cap" x="440" y="256" text-anchor="middle">fork / join</text>';
+s += '<text class="av-cap" x="10" y="290">flowchart / activity</text>';
+document.getElementById("root").innerHTML = A.svg(580, 300, s, "State and flow");
+
+</script>
+</body>
+</html>

@@ -1,0 +1,3348 @@
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+import yaml
+
+from invariant.core.errors import GateFailure, StateError, TransitionError, UsageError
+from invariant.core.items import (
+    JsonBackend,
+    MarkdownBackend,
+    SphinxNeedsBackend,
+    backend_for,
+)
+from invariant.core.manifest import MANIFEST_RELPATH, Level, Manifest
+from invariant.core.rules import Evaluated, Verdict
+from invariant.core.store import UNKNOWN_KEYS, PreservesUnknownKeys
+from invariant.domains.pipeline import PipelineDomain, describe_run, summarise
+from invariant.domains.session import Session, SessionDomain
+from invariant.domains.workitem import WorkItemDomain
+
+
+def git_project(root: Path, manifest: dict | None = None) -> Manifest:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=root, check=True)
+    (root / "docs" / "architecture").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "architecture" / "overview.md").write_text(
+        "# Overview\n\n```mermaid\ngraph TD\n  A-->B\n```\n", encoding="utf-8"
+    )
+    path = root / MANIFEST_RELPATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(manifest or {"version": 1, "project": {"name": "demo"}}),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
+    return Manifest.locate(root)
+
+
+@pytest.fixture
+def m(tmp_path):
+    return git_project(tmp_path / "proj")
+
+
+# -- session -----------------------------------------------------------
+
+
+class TestSessionDomain:
+    def test_start_registers(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("add-widget")
+        assert session.state == "registered"
+        # The name carries the id: it is an address, not a label.
+        assert domain.get(session.id).name == f"add-widget-{session.id}"
+
+    def test_name_is_slugified(self, m):
+        session = SessionDomain(m).start("Add The Widget")
+        assert session.name == f"add-the-widget-{session.id}"
+
+    def test_an_unnameable_session_is_refused(self, m):
+        with pytest.raises(UsageError, match="at least one alphanumeric"):
+            SessionDomain(m).start("!!!")
+
+    def test_duplicate_id_is_refused(self, m):
+        domain = SessionDomain(m)
+        domain.start("one", session_id="abc")
+        with pytest.raises(UsageError, match="already exists"):
+            domain.start("two", session_id="abc")
+
+    def test_state_root_is_shared_across_worktrees(self, m, tmp_path):
+        """The property a per-worktree state directory would break."""
+        domain = SessionDomain(m)
+        session = domain.start("shared")
+        domain.isolate(session.id, execute=True)
+
+        worktree = Path(domain.get(session.id).worktree)
+        from_worktree = Manifest.locate(worktree)
+        assert from_worktree.state_root == m.state_root
+        assert SessionDomain(from_worktree).get(session.id) is not None
+
+    def test_a_registered_session_is_findable_before_it_isolates(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("pre-isolation")
+        # Without the origin fallback this returns None and the session can
+        # never be isolated, because isolate needs to find it first.
+        assert domain.current(cwd=m.root).id == session.id
+
+    def test_current_prefers_the_worktree_match(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("iso")
+        domain.isolate(session.id, execute=True)
+        worktree = Path(domain.get(session.id).worktree)
+        assert domain.current(cwd=worktree).id == session.id
+
+    def test_ambiguous_origin_lists_the_candidates(self, m):
+        domain = SessionDomain(m)
+        domain.start("one")
+        domain.start("two")
+        with pytest.raises(UsageError, match="--id <id>"):
+            domain.current(cwd=m.root)
+
+    def test_torn_down_sessions_are_not_current(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("gone")
+        session.state = "torn_down"
+        domain._save(session)
+        assert domain.current(cwd=m.root) is None
+
+    def test_isolation_plan_is_derived_from_the_id(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("x", session_id="deadbeef")
+        plan = domain.isolation_plan(session)
+        assert plan["branch"] == "session/deadbeef"
+        assert "deadbeef" in plan["worktree"]
+        assert not Path(plan["worktree"]).is_relative_to(m.root)
+
+    def test_isolate_without_execute_only_plans(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        plan = domain.isolate(session.id, execute=False)
+        assert "git worktree add" in plan["command"]
+        assert domain.get(session.id).state == "registered"
+
+    def test_isolate_creates_the_worktree_and_advances(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        plan = domain.isolate(session.id, execute=True)
+        assert Path(plan["worktree"]).is_dir()
+        assert domain.get(session.id).state == "isolated"
+
+    def test_worktree_dir_places_the_worktree_inside_the_repository(self, tmp_path):
+        """Some hosts trust exactly one location and confirm every other.
+
+        The default deliberately sits beside the repository; a project that
+        needs the worktree somewhere specific must be able to say so without
+        the location being smuggled into the name via worktree_prefix.
+        """
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "session": {"worktree_dir": ".claude/worktrees"},
+            },
+        )
+        domain = SessionDomain(m)
+        plan = domain.isolation_plan(domain.start("x", session_id="deadbeef"))
+        assert Path(plan["worktree"]) == m.root / ".claude" / "worktrees" / "proj-wt-deadbeef"
+
+    def test_an_absolute_worktree_dir_is_used_as_given(self, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "session": {"worktree_dir": str(elsewhere)},
+            },
+        )
+        domain = SessionDomain(m)
+        plan = domain.isolation_plan(domain.start("x", session_id="deadbeef"))
+        assert Path(plan["worktree"]).parent == elsewhere
+
+    def test_isolate_creates_a_configured_directory_that_does_not_exist_yet(self, tmp_path):
+        """The first session of a fresh checkout must not fail on a missing dir.
+
+        No code here creates it: `git worktree add` makes the leading
+        directories itself. Asserted rather than assumed, because the opposite
+        would break every project that configures a directory, and only on the
+        very first session — the least convenient moment to discover it.
+        """
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "session": {"worktree_dir": ".claude/worktrees"},
+            },
+        )
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        assert not (m.root / ".claude" / "worktrees").exists()
+        plan = domain.isolate(session.id, execute=True)
+        assert Path(plan["worktree"]).is_dir()
+        assert domain.get(session.id).state == "isolated"
+
+    def test_illegal_transition_is_refused(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        with pytest.raises(TransitionError, match="Legal from 'registered'"):
+            domain.transition(session.id, "pushed")
+
+    def test_force_records_an_override(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        updated = domain.transition(session.id, "pushed", reason="recovery", force=True)
+        assert updated.state == "pushed"
+        assert updated.overrides[0]["reason"] == "recovery"
+
+    def test_files_accumulate_without_duplicates(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.add_files(session.id, ["a.py", "b.py"])
+        assert domain.add_files(session.id, ["a.py", "c.py"]).files == ["a.py", "b.py", "c.py"]
+
+    def test_a_word_split_accident_is_refused_rather_than_recorded(self, m):
+        """The observed case: 48 paths arrived as ONE argument.
+
+        `session files add $FILES` unquoted under zsh does NOT word-split, so
+        the whole list was written down as a single 2,189-character entry. It
+        can never be opened, `privacy.clean` unions the declared set in at the
+        review boundary, and the merge then blocked on a path nobody could
+        delete. Refusing the write is the only place this is cheap.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        joined = " ".join(f"src/file{i}.py" for i in range(300))
+        assert len(joined) > 4096
+        with pytest.raises(UsageError) as excinfo:
+            domain.add_files(session.id, [joined])
+        # The message has to name the CAUSE, not just the symptom - the next
+        # person hits this from a shell, not from the library.
+        assert "word-split" in str(excinfo.value)
+        assert domain.require(session.id).files == []
+
+    def test_a_legitimate_path_with_spaces_is_still_accepted(self, m):
+        """Length is the check; a space is not.
+
+        A filename may legitimately contain spaces, so rejecting on whitespace
+        would refuse real paths to catch a shell accident. Only the PATH_MAX
+        bound distinguishes them.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        assert domain.add_files(session.id, ["docs/My Design Notes.md"]).files == [
+            "docs/My Design Notes.md"
+        ]
+
+    def test_files_can_be_removed_again(self, m):
+        """`add` without `remove` left no way back from a bad entry."""
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.add_files(session.id, ["a.py", "b.py", "c.py"])
+        assert domain.remove_files(session.id, ["b.py"]).files == ["a.py", "c.py"]
+        # Removing something absent is not an error - the caller's goal is the
+        # end state, and failing here would punish a retry.
+        assert domain.remove_files(session.id, ["nope.py"]).files == ["a.py", "c.py"]
+
+    def test_repair_marks_a_vanished_worktree_abandoned(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.isolate(session.id, execute=True)
+        shutil.rmtree(domain.get(session.id).worktree)
+
+        actions = domain.repair()
+        assert any("abandoned" in a for a in actions)
+        # The record survives: it is the evidence of what happened.
+        assert domain.get(session.id).state == "abandoned"
+
+    def test_repair_dry_run_changes_nothing(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.isolate(session.id, execute=True)
+        shutil.rmtree(domain.get(session.id).worktree)
+        domain.repair(dry_run=True)
+        assert domain.get(session.id).state == "isolated"
+
+
+class TestSessionGatesOnTheGenericTransitionPath:
+    """AUD-05: ``_advance`` validated only the edge.
+
+    The entry and exit gates in ``session.yaml`` were read by exactly two
+    hardcoded call sites (``session review``, ``session merge``), so the
+    generic ``session transition`` walked the whole lifecycle with zero gates
+    — and ``session.named_after_isolating`` was a gate no code path evaluated
+    at all (AUD-14). Every route now runs through the machine's gates inside
+    ``_advance``, the same way ``PipelineDomain.advance`` always has.
+    """
+
+    def strict_project(self, tmp_path):
+        return git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "enforcement": {"profile": "strict"},
+            },
+        )
+
+    def test_entry_gates_gate_the_generic_transition(self, tmp_path):
+        """The known positive: legal edge, no pipeline, must not advance."""
+        m = self.strict_project(tmp_path)
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.isolate(session.id, execute=True)
+        domain.transition(session.id, "working")
+
+        with pytest.raises(GateFailure) as exc:
+            domain.transition(session.id, "reviewed")
+        assert any(
+            v.rule_id == "pipeline.complete" and v.blocks for v in exc.value.verdicts
+        )
+        assert domain.get(session.id).state == "working"
+
+    def test_a_forced_transition_records_the_gate_override(self, tmp_path):
+        m = self.strict_project(tmp_path)
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        domain.isolate(session.id, execute=True)
+        domain.transition(session.id, "working")
+
+        domain.transition(session.id, "reviewed", reason="fixture", force=True)
+        updated = domain.get(session.id)
+        assert updated.state == "reviewed"
+        override = updated.overrides[-1]
+        assert "pipeline.complete" in override.get("gates", [])
+        assert override["reason"] == "fixture"
+
+    def test_a_session_named_after_its_branch_is_refused_isolation(self, tmp_path):
+        """``session.named_after_isolating`` is live, with a failing input.
+
+        The record is written the way earlier tooling wrote it — named after
+        its branch rather than its task — which ``start`` itself can no longer
+        produce. The gate exists for exactly these records, and until AUD-05
+        no code path ever evaluated it (AUD-14).
+        """
+        m = self.strict_project(tmp_path)
+        domain = SessionDomain(m)
+        session = domain.start("placeholder")
+        session.name = "session/deadbeef"
+        domain._save(session)
+
+        with pytest.raises(GateFailure) as exc:
+            domain.transition(session.id, "isolated")
+        assert any(
+            v.rule_id == "session.named_after_isolating" and v.blocks
+            for v in exc.value.verdicts
+        )
+        assert domain.get(session.id).state == "registered"
+
+    def test_push_enabled_is_read_from_the_machine(self, m):
+        """`pushed`'s entry gate holds on the generic path, not only in the CLI.
+
+        The standard profile blocks on ``session.push_enabled`` and this
+        project has publishing off, so walking ``transition pushed`` by hand
+        must refuse — it used to succeed, because the setting lived in a
+        hardcoded ``if`` inside ``cmd_session_push`` that the generic
+        transition never passed through (AUD-05).
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x")
+        session.state = "merged"
+        domain._save(session)
+
+        with pytest.raises(GateFailure) as exc:
+            domain.transition(session.id, "pushed")
+        assert any(
+            v.rule_id == "session.push_enabled" and v.blocks
+            for v in exc.value.verdicts
+        )
+        assert domain.get(session.id).state == "merged"
+
+
+# -- pipeline ----------------------------------------------------------
+
+
+class TestPipelineDomain:
+    def setup_pipeline(self, m):
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id, task="a task")
+        return sessions, pipelines, session
+
+    def test_start_enters_the_initial_state(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        assert pipelines.current(session.id).state == "designing"
+
+    def test_a_second_pipeline_is_refused_while_one_runs(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        with pytest.raises(UsageError, match="already running"):
+            pipelines.start(session.id)
+
+    def test_advance_is_blocked_by_a_failing_gate(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        with pytest.raises(GateFailure, match="1 gate"):
+            pipelines.advance(session.id, "red", cwd=m.root)
+
+    def test_recorded_evidence_satisfies_the_gate(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_docs_read(
+            session.id, str(m.root / "docs" / "architecture" / "overview.md")
+        )
+        pipeline, _ = pipelines.advance(session.id, "red", cwd=m.root)
+        assert pipeline.state == "red"
+
+    def test_an_agent_run_is_recorded_as_evidence(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_agent_run(session.id, "feature-architect")
+        assert pipelines.current(session.id).evidence["agents_run"] == [
+            "feature-architect"
+        ]
+
+    def test_the_same_agent_twice_is_recorded_once(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_agent_run(session.id, "feature-architect")
+        pipelines.record_agent_run(session.id, "feature-architect")
+        assert pipelines.current(session.id).evidence["agents_run"] == [
+            "feature-architect"
+        ]
+
+    def test_an_agent_run_survives_a_reload(self, m):
+        """Evidence that is not persisted is not evidence."""
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_agent_run(session.id, "compliance-reviewer")
+        fresh = PipelineDomain(m)
+        assert "compliance-reviewer" in fresh.current(session.id).evidence["agents_run"]
+
+    def test_the_advance_gate_reads_that_evidence(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.record_docs_read(
+            session.id, str(m.root / "docs" / "architecture" / "overview.md")
+        )
+        pipelines.record_agent_run(session.id, "feature-architect")
+        # The agent-role gates live on the review state's exit, because a
+        # dispatch is recorded when the agent RETURNS (ADR-003 D1).
+        pipeline = pipelines.current(session.id)
+        pipeline.state = "reviewing"
+        pipelines._save(session.id, pipeline)
+        verdicts = pipelines.evaluate_gates(
+            session.id, session=session.to_dict(), cwd=m.root
+        )
+        design = [v for v in verdicts if v.rule_id == "agents.design_agent_ran"]
+        assert design and design[0].verdict.ok
+
+    def test_force_without_a_reason_is_refused(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        with pytest.raises(UsageError, match="--force requires --reason"):
+            pipelines.advance(session.id, "red", force=True, cwd=m.root)
+
+    def test_force_with_a_reason_records_the_override(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipeline, _ = pipelines.advance(
+            session.id, "red", force=True, reason="no structural change", cwd=m.root
+        )
+        assert pipeline.overrides[0]["reason"] == "no structural change"
+        assert "docs.read_architecture" in pipeline.overrides[0]["gates"]
+
+    def test_a_structurally_illegal_edge_needs_force_too(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        with pytest.raises(TransitionError):
+            pipelines.advance(session.id, "committed", cwd=m.root)
+
+    def test_gates_query_does_not_advance(self, m):
+        _, pipelines, session = self.setup_pipeline(m)
+        pipelines.evaluate_gates(session.id, target="red", cwd=m.root)
+        assert pipelines.current(session.id).state == "designing"
+
+    def test_run_tests_records_what_happened(self, tmp_path):
+        m = git_project(
+            tmp_path / "proj",
+            {"version": 1, "commands": {"test": "echo '2 passed in 0.1s'"},
+             "project": {"ecosystems": ["python"]}},
+        )
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        record = pipelines.run_tests(session.id, phase="red", cwd=m.root)
+        assert record["passed"] is True and record["phase"] == "red"
+        assert pipelines.current(session.id).evidence["test_runs"][0]["phase"] == "red"
+
+    def test_a_failing_command_is_recorded_as_failing(self, tmp_path):
+        m = git_project(
+            tmp_path / "proj",
+            {"version": 1, "commands": {"test": "exit 1"},
+             "project": {"ecosystems": ["python"]}},
+        )
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        assert pipelines.run_tests(session.id, phase="red", cwd=m.root)["passed"] is False
+
+    def test_docs_read_outside_a_pipeline_is_ignored_not_fatal(self, m):
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        PipelineDomain(m).record_docs_read(session.id, "anything.md")  # no raise
+
+
+class TestTheMethodologyIsPinnedToThePipeline:
+    """`pipeline start --methodology` must not wedge the pipeline it starts.
+
+    The override was persisted in the record and then ignored: every later
+    domain instance loaded the manifest-default machine and asked it about a
+    state it does not have, which wedged `status`, `gates` and `advance` — and,
+    through the hook's fail-open path, turned all enforcement off (AUD-02).
+    Pinning the machine to the RECORD also closes AUD-03: editing
+    `methodology.pipeline` mid-pipeline no longer swaps the running pipeline's
+    gate set, because the record answers, not the manifest.
+    """
+
+    def start_chore(self, m):
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        PipelineDomain(m).start(session.id, methodology="chore", task="t")
+        return session
+
+    def test_an_override_survives_a_reload(self, m):
+        """The known positive: every one of these raised before the fix.
+
+        The manifest is RE-loaded, as every later CLI invocation loads it —
+        the old in-memory swap survived only within the process that ran
+        `start`, which is exactly why the wedge escaped the domain tests.
+        """
+        session = self.start_chore(m)
+        fresh = PipelineDomain(Manifest.locate(m.root))
+        pipeline = fresh.current(session.id)
+        assert pipeline.state == "doing"
+        fresh.evaluate_gates(session.id, cwd=m.root)  # must not raise
+        advanced, _ = fresh.advance(session.id, "reviewing", cwd=m.root)
+        assert advanced.state == "reviewing"
+
+    def test_machine_for_resolves_the_persisted_methodology(self, m):
+        session = self.start_chore(m)
+        fresh = PipelineDomain(Manifest.locate(m.root))
+        assert fresh.machine_for(fresh.current(session.id)).id == "chore"
+
+    def test_the_override_does_not_rewrite_the_shared_manifest(self, m):
+        """The old in-memory swap mutated the manifest object it was handed."""
+        self.start_chore(m)
+        assert m.get("methodology.pipeline") == "tdd"
+
+    def test_a_running_override_pipeline_still_refuses_a_second(self, m):
+        session = self.start_chore(m)
+        with pytest.raises(UsageError, match="already running"):
+            PipelineDomain(Manifest.locate(m.root)).start(session.id)
+
+    def test_editing_the_manifest_mid_pipeline_does_not_swap_the_gate_set(self, m):
+        """AUD-03: one exempt manifest line must not silently retune the gates."""
+        sessions = SessionDomain(m)
+        session = sessions.start("y")
+        PipelineDomain(m).start(session.id, task="t")  # records tdd
+
+        path = m.root / MANIFEST_RELPATH
+        body = yaml.safe_load(path.read_text(encoding="utf-8"))
+        body.setdefault("methodology", {})["pipeline"] = "docs"
+        path.write_text(yaml.safe_dump(body), encoding="utf-8")
+
+        fresh = PipelineDomain(Manifest.locate(m.root))
+        pipeline = fresh.current(session.id)
+        assert fresh.machine_for(pipeline).id == "tdd"
+        verdicts = fresh.evaluate_gates(session.id, target="red", cwd=m.root)
+        assert "docs.read_architecture" in {v.rule_id for v in verdicts}
+
+    def test_a_pipeline_whose_machine_is_gone_can_be_replaced(self, tmp_path):
+        """Losing the machine file must not wedge `start` forever.
+
+        Every other operation on such a pipeline honestly refuses (the machine
+        is unloadable), so starting a fresh pipeline — which archives the old
+        record rather than discarding it — is the one route out.
+        """
+        machine_dir = tmp_path / "proj" / "machines"
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo"},
+                "methodology": {"extra_machines": ["machines"]},
+            },
+        )
+        machine_dir.mkdir()
+        (machine_dir / "local.yaml").write_text(
+            "id: local\nkind: pipeline\ninitial: first\nterminal: [done]\n"
+            "states:\n  first:\n    next: [done]\n  done: {}\n",
+            encoding="utf-8",
+        )
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        PipelineDomain(m).start(session.id, methodology="local")
+        (machine_dir / "local.yaml").unlink()
+
+        fresh = PipelineDomain(m)
+        replacement = fresh.start(session.id, task="recovered")
+        assert replacement.methodology == "tdd"
+        assert fresh.history(session.id)[-1]["methodology"] == "local"
+
+
+class TestSummarise:
+    def test_counts_each_category_separately(self, m):
+        _, pipelines, session = TestPipelineDomain().setup_pipeline(m)
+        verdicts = pipelines.evaluate_gates(session.id, target="red", cwd=m.root)
+        text = summarise(verdicts)
+        assert "passed" in text
+
+    def test_empty(self):
+        assert summarise([]) == "no gates on this transition"
+
+    def test_a_skipped_blocking_gate_is_counted_apart_from_a_skipped_warning(self):
+        """BUG_020: "1 not applicable" hid which gate the project enforces.
+
+        A warn-level gate going inert is advisory noise; a block-level one
+        means a gate the project chose to enforce did not run. Collapsing both
+        into one count makes the second unreportable.
+        """
+        text = summarise(
+            [
+                Evaluated("a", Level.BLOCK, Verdict.na()),
+                Evaluated("b", Level.WARN, Verdict.na()),
+            ]
+        )
+        assert "2 not applicable" in text
+        assert "1 blocking" in text
+
+    def test_only_warning_skips_do_not_claim_a_blocking_one(self):
+        text = summarise([Evaluated("b", Level.WARN, Verdict.na())])
+        assert "1 not applicable" in text
+        assert "blocking" not in text
+
+
+# -- work items --------------------------------------------------------
+
+
+class TestWorkItemDomain:
+    def test_new_item_starts_in_the_initial_state(self, m):
+        domain = WorkItemDomain(m)
+        assert domain.new("bug", "A defect").status == "filed"
+        assert domain.new("idea", "A want").status == "proposed"
+
+    def test_ids_increment_per_type(self, m):
+        domain = WorkItemDomain(m)
+        assert domain.new("bug", "one").id == "BUG_001"
+        assert domain.new("bug", "two").id == "BUG_002"
+        assert domain.new("idea", "three").id == "IDEA_001"
+
+    def test_id_prefix_is_applied(self, tmp_path):
+        m = git_project(tmp_path / "proj", {"version": 1, "items": {"id_prefix": "X"}})
+        assert WorkItemDomain(m).new("bug", "one").id == "XBUG_001"
+
+    def test_a_titleless_item_is_refused(self, m):
+        with pytest.raises(UsageError, match="needs a title"):
+            WorkItemDomain(m).new("bug", "   ")
+
+    def test_unknown_type(self, m):
+        with pytest.raises(UsageError, match="known types"):
+            WorkItemDomain(m).new("epic", "x")
+
+    def test_fixing_an_unreproduced_bug_is_blocked(self, m):
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "A defect")
+        with pytest.raises(TransitionError):
+            domain.transition(bug.id, "fixed", cwd=m.root)
+
+    def test_the_reproduced_route_is_open(self, m):
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "A defect")
+        domain.transition(bug.id, "reproduced", cwd=m.root)
+        item, _ = domain.transition(bug.id, "fixed", cwd=m.root)
+        assert item.status == "fixed"
+
+    def test_declining_is_distinct_from_failing_to_reproduce(self, m):
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "A defect")
+        item, _ = domain.transition(bug.id, "wont_fix", reason="by design", cwd=m.root)
+        assert item.status == "wont_fix"
+
+    def test_closing_with_residue_warns_but_does_not_block(self, m):
+        """Residue matching advises even under `strict`, by design.
+
+        It compares free text against a status, which is a judgement call. A
+        blocking heuristic is a false positive with authority, so this one
+        reports and lets the human decide.
+        """
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "A defect")
+        for target in ("reproduced", "fixed", "verified"):
+            domain.transition(bug.id, target, cwd=m.root)
+        domain.add_residue(bug.id, "a live-environment leg is owed")
+        item, verdicts = domain.transition(bug.id, "closed", cwd=m.root)
+        assert item.status == "closed"
+        residue_verdict = next(
+            v for v in verdicts if v.rule_id == "item.residue_matches_status"
+        )
+        assert residue_verdict.warns and "still owed" in residue_verdict.verdict.message
+
+    def test_a_project_can_promote_the_residue_rule_to_blocking(self, tmp_path):
+        """The per-rule override is what makes a shipped default negotiable."""
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "enforcement": {"rules": {"item.residue_matches_status": "block"}},
+            },
+        )
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "A defect")
+        for target in ("reproduced", "fixed", "verified"):
+            domain.transition(bug.id, target, cwd=m.root)
+        domain.add_residue(bug.id, "a leg is owed")
+        with pytest.raises(GateFailure):
+            domain.transition(bug.id, "closed", cwd=m.root)
+
+    def test_clearing_the_residue_unblocks_the_close(self, m):
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "A defect")
+        for target in ("reproduced", "fixed", "verified"):
+            domain.transition(bug.id, target, cwd=m.root)
+        domain.add_residue(bug.id, "a leg is owed")
+        domain.clear_residue(bug.id, "a leg is owed")
+        item, _ = domain.transition(bug.id, "closed", cwd=m.root)
+        assert item.status == "closed"
+
+    def test_clearing_absent_residue_reports_what_is_there(self, m):
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "x")
+        domain.add_residue(bug.id, "real thing")
+        with pytest.raises(UsageError, match="real thing"):
+            domain.clear_residue(bug.id, "imaginary thing")
+
+    def test_history_records_each_transition(self, m):
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "x")
+        domain.transition(bug.id, "reproduced", reason="red test", cwd=m.root)
+        assert domain.get(bug.id).history[-1]["reason"] == "red test"
+
+    def test_open_filter_excludes_terminal_states(self, m):
+        domain = WorkItemDomain(m)
+        a = domain.new("bug", "open one")
+        b = domain.new("bug", "declined one")
+        domain.transition(b.id, "wont_fix", cwd=m.root)
+        open_ids = {i.id for i in domain.list(open_only=True)}
+        assert a.id in open_ids and b.id not in open_ids
+
+    def test_open_table_marks_owed_work(self, m):
+        domain = WorkItemDomain(m)
+        bug = domain.new("bug", "x")
+        domain.add_residue(bug.id, "a leg is owed")
+        assert "+1 owed" in domain.open_table()
+
+    def test_open_table_when_empty(self, m):
+        assert WorkItemDomain(m).open_table() == "No open items."
+
+
+# -- backends ----------------------------------------------------------
+
+
+class TestBackends:
+    def roundtrip(self, backend):
+        from invariant.core.items import Item
+
+        item = Item(
+            id="BUG_001",
+            type="bug",
+            title="A defect",
+            status="filed",
+            fields={"severity": "high", "batch": "P1"},
+            residue=["a leg is owed"],
+            body="Steps to reproduce.",
+        )
+        backend.save(item)
+        loaded = backend.get("BUG_001")
+        assert loaded is not None
+        assert loaded.title == "A defect"
+        assert loaded.status == "filed"
+        assert loaded.fields["severity"] == "high"
+        assert loaded.residue == ["a leg is owed"]
+        assert "Steps to reproduce" in loaded.body
+        return loaded
+
+    def test_markdown_roundtrip(self, tmp_path):
+        self.roundtrip(MarkdownBackend(tmp_path / "backlog"))
+
+    def test_json_roundtrip(self, tmp_path):
+        self.roundtrip(JsonBackend(tmp_path / "backlog.json"))
+
+    def test_sphinx_needs_roundtrip(self, tmp_path):
+        self.roundtrip(SphinxNeedsBackend(tmp_path / "backlog.rst"))
+
+    def test_sphinx_needs_renders_directives(self, tmp_path):
+        backend = SphinxNeedsBackend(tmp_path / "backlog.rst")
+        self.roundtrip(backend)
+        text = (tmp_path / "backlog.rst").read_text(encoding="utf-8")
+        assert ".. bug:: A defect" in text
+        assert ":id: BUG_001" in text
+
+    def test_sphinx_needs_updates_in_place(self, tmp_path):
+        backend = SphinxNeedsBackend(tmp_path / "backlog.rst")
+        item = self.roundtrip(backend)
+        item.status = "reproduced"
+        backend.save(item)
+        text = (tmp_path / "backlog.rst").read_text(encoding="utf-8")
+        assert text.count(":id: BUG_001") == 1
+        assert ":status: reproduced" in text
+
+    def test_sphinx_needs_preserves_surrounding_prose(self, tmp_path):
+        path = tmp_path / "backlog.rst"
+        path.write_text("Backlog\n=======\n\nIntro prose.\n", encoding="utf-8")
+        self.roundtrip(SphinxNeedsBackend(path))
+        assert "Intro prose." in path.read_text(encoding="utf-8")
+
+    def test_null_backend_refuses_writes_with_a_reason(self, tmp_path):
+        m = git_project(tmp_path / "proj", {"version": 1, "items": {"backend": "none"}})
+        with pytest.raises(UsageError, match="disabled"):
+            WorkItemDomain(m).new("bug", "x")
+
+    def test_backend_selection_from_the_manifest(self, tmp_path):
+        m = git_project(tmp_path / "proj", {"version": 1, "items": {"backend": "json"}})
+        assert isinstance(backend_for(m), JsonBackend)
+
+    def test_markdown_skips_unparseable_files(self, tmp_path):
+        backend = MarkdownBackend(tmp_path / "backlog")
+        self.roundtrip(backend)
+        (tmp_path / "backlog" / "junk.md").write_text("no frontmatter", encoding="utf-8")
+        assert len(backend.load_all()) == 1
+
+
+class TestHostSessionAttribution:
+    """Attribution must not depend on the working directory.
+
+    A host may reset cwd to the project root between tool calls. When it does,
+    every concurrent session looks identical from the main checkout — so
+    cwd-based attribution fails precisely when more than one session is live,
+    which is the case the isolation rules exist for.
+    """
+
+    def three_sessions(self, m):
+        domain = SessionDomain(m)
+        made = []
+        for name, host in (
+            ("alpha", "aaaaaaaa-1111-2222-3333-4444cc9185d7"),
+            ("beta", "bbbbbbbb-1111-2222-3333-44440615b555"),
+            ("gamma", "cccccccc-1111-2222-3333-44441654f8b0"),
+        ):
+            made.append(domain.start(name, host_session_id=host))
+        return domain, made
+
+    def test_cwd_alone_is_ambiguous_with_three_sessions(self, m):
+        domain, _ = self.three_sessions(m)
+        with pytest.raises(UsageError, match="--id <id>"):
+            domain.current(cwd=m.root)
+
+    def test_the_host_identifier_resolves_it(self, m):
+        domain, made = self.three_sessions(m)
+        found = domain.current(
+            cwd=m.root, host_session_id="bbbbbbbb-1111-2222-3333-44440615b555"
+        )
+        assert found is not None and found.name.startswith("beta-")
+
+    def test_resolution_works_from_any_directory(self, m, tmp_path):
+        domain, _ = self.three_sessions(m)
+        for where in (m.root, tmp_path, Path("/")):
+            found = domain.current(
+                cwd=where,
+                strict=False,
+                host_session_id="cccccccc-1111-2222-3333-44441654f8b0",
+            )
+            assert found is not None and found.name.startswith("gamma-"), where
+
+    def test_the_short_id_is_the_LAST_eight_alphanumerics(self, m):
+        # This project's own tooling has always derived worktree names that
+        # way. Taking the first eight would match nothing.
+        from invariant.domains.session import host_slug
+
+        assert host_slug("d3e22c15-f3c9-47da-b1e0-955ecc9185d7") == "cc9185d7"
+        assert host_slug("") == ""
+        assert host_slug(None) == ""
+
+    def test_a_session_registered_before_the_field_existed_still_matches(self, m):
+        """No migration: the derived short form is the fallback."""
+        domain = SessionDomain(m)
+        legacy = domain.start("legacy", session_id="cc9185d7")
+        assert legacy.host_session_id is None
+        found = domain.current(
+            cwd=m.root, host_session_id="d3e22c15-f3c9-47da-b1e0-955ecc9185d7"
+        )
+        assert found is not None and found.id == "cc9185d7"
+
+    def test_an_unknown_host_id_does_not_match_something_else(self, m):
+        domain, _ = self.three_sessions(m)
+        assert domain.by_host_session("zzzzzzzz-0000-0000-0000-000000000000") is None
+
+    def test_a_torn_down_session_is_never_matched(self, m):
+        domain, made = self.three_sessions(m)
+        session = made[0]
+        session.state = "torn_down"
+        domain._save(session)
+        assert domain.by_host_session("aaaaaaaa-1111-2222-3333-4444cc9185d7") is None
+
+    def test_explicit_env_still_outranks_the_host_id(self, m, monkeypatch):
+        domain, made = self.three_sessions(m)
+        monkeypatch.setenv("INVARIANT_SESSION_ID", made[0].id)
+        found = domain.current(
+            cwd=m.root, host_session_id="bbbbbbbb-1111-2222-3333-44440615b555"
+        )
+        assert found.id == made[0].id
+
+    def test_start_derives_the_id_from_the_host_when_not_given(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("derived", host_session_id="xxxx-1111-2222-abcd1234")
+        assert session.id == "abcd1234"
+
+    def test_adopt_binds_a_host_id_after_the_fact(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("later", session_id="deadbeef")
+        domain.adopt_host_session("deadbeef", "ffffffff-0000-0000-0000-000000009999")
+        found = domain.current(
+            cwd=m.root, host_session_id="ffffffff-0000-0000-0000-000000009999"
+        )
+        assert found is not None and found.id == "deadbeef"
+
+
+class TestAttributionByEditTarget:
+    """Who is editing is answered by where the edit lands.
+
+    The host runs hooks from the project root and resets the working directory
+    between tool calls, so with several sessions live, cwd identifies nobody.
+    An Edit call carries an absolute target path, and that path is inside
+    exactly one session's worktree — a fact, not a heuristic.
+    """
+
+    def two_sessions(self, m):
+        domain = SessionDomain(m)
+        ids = []
+        for name in ("alpha", "beta"):
+            session = domain.start(name)
+            domain.isolate(session.id, execute=True)
+            ids.append(session.id)
+        return domain, domain.get(ids[0]), domain.get(ids[1])
+
+    def test_a_target_inside_a_worktree_names_its_session(self, m):
+        domain, a, b = self.two_sessions(m)
+        target = Path(a.worktree) / "src" / "thing.swift"
+        assert domain.current(m.root, strict=False, target=target).id == a.id
+
+    def test_the_other_worktree_names_the_other_session(self, m):
+        domain, a, b = self.two_sessions(m)
+        target = Path(b.worktree) / "src" / "thing.swift"
+        assert domain.current(m.root, strict=False, target=target).id == b.id
+
+    def test_without_a_target_the_same_call_is_ambiguous(self, m):
+        """The blocked case, stated as a test.
+
+        Two live sessions, cwd in the main checkout, no host identifier: this
+        is precisely what an Edit call looked like, and it resolved to nobody.
+        """
+        domain, _, _ = self.two_sessions(m)
+        assert domain.current(m.root, strict=False) is None
+
+    def test_a_target_in_the_main_checkout_does_not_invent_a_session(self, m):
+        domain, _, _ = self.two_sessions(m)
+        target = m.root / "src" / "thing.swift"
+        assert domain.current(m.root, strict=False, target=target) is None
+
+    def test_an_explicit_id_still_wins(self, m, monkeypatch):
+        domain, a, b = self.two_sessions(m)
+        monkeypatch.setenv("INVARIANT_SESSION_ID", b.id)
+        target = Path(a.worktree) / "f.swift"
+        assert domain.current(m.root, strict=False, target=target).id == b.id
+
+    def test_the_host_identifier_still_outranks_the_target(self, m):
+        """Who is calling beats where the bytes land.
+
+        Kept in that order so that a session writing into a peer's worktree is
+        still attributed to the writer — which is what makes that a detectable
+        violation rather than a silent reattribution.
+        """
+        domain, a, b = self.two_sessions(m)
+        domain.adopt_host_session(b.id, "host-aaaa-bbbb-" + b.id)
+        target = Path(a.worktree) / "f.swift"
+        resolved = domain.current(
+            m.root, strict=False, target=target, host_session_id="host-aaaa-bbbb-" + b.id
+        )
+        assert resolved.id == b.id
+
+    def test_resolution_reports_how_it_decided(self, m):
+        domain, a, _ = self.two_sessions(m)
+        assert domain.resolve(m.root, target=Path(a.worktree) / "f").how == "target"
+        assert domain.resolve(m.root).how == "ambiguous"
+
+    def test_a_dead_session_does_not_claim_its_old_worktree(self, m):
+        domain, a, b = self.two_sessions(m)
+        a.state = "abandoned"
+        domain._save(a)
+        target = Path(a.worktree) / "f.swift"
+        assert domain.resolve(m.root, target=target).session != a
+
+    def test_an_unclaimed_target_falls_through_rather_than_stopping(self, m):
+        """A target nobody owns is not an answer, so resolution continues.
+
+        This is what keeps an edit to the main checkout attributable: the path
+        belongs to no worktree, resolution falls through to the registered
+        session, and `session.no_edit_in_main_checkout` — whose job it actually
+        is — gets a session to report against instead of abstaining.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("solo")
+        domain.isolate(session.id, execute=True)
+        resolution = domain.resolve(m.root, target=m.root / "src" / "f.swift")
+        assert resolution.session.id == session.id
+        assert resolution.how == "origin"
+
+
+
+def branch_names(m) -> set[str]:
+    """The branches that exist in the project's main checkout."""
+    out = subprocess.run(
+        ["git", "branch", "--format=%(refname:short)"],
+        cwd=str(m.root), capture_output=True, text=True,
+    ).stdout
+    return set(out.split())
+
+
+def merged_session(m, *, name="feature", host_session_id=None, host_ended=False):
+    """An isolated session whose branch is already on the base.
+
+    Teardown is only legal from ``merged`` and its safe branch delete refuses
+    an unmerged branch, so both are arranged here: a case about a *different*
+    precondition must not be masked by one of these two.
+    """
+    domain = SessionDomain(m)
+    session = domain.start(name)
+    domain.isolate(session.id, execute=True)
+    session = domain.get(session.id)
+    subprocess.run(
+        ["git", "merge", "--ff-only", session.branch],
+        cwd=str(m.root), check=True, capture_output=True,
+    )
+    # Set rather than adopted: `adopt_host_session` is one-to-one and would
+    # refuse the second session in a test that wants two, and `host_ended` is
+    # not reachable through it at all.
+    session.host_session_id = host_session_id
+    session.host_ended = host_ended
+    # The transitions themselves are covered elsewhere, and driving them here
+    # would test them twice while obscuring what these cases are about.
+    session.state = "merged"
+    domain._save(session)
+    return domain, session
+
+
+class TestTeardownRemovesTheBranch:
+    """A session ends by leaving nothing behind but the merged work."""
+
+    def test_the_branch_is_gone_afterwards(self, m):
+        domain, session = merged_session(m)
+        assert session.branch in branch_names(m)
+        domain.teardown(session.id)
+        assert session.branch not in branch_names(m)
+
+    def test_the_worktree_is_gone_afterwards(self, m):
+        domain, session = merged_session(m)
+        domain.teardown(session.id)
+        assert not Path(session.worktree).exists()
+
+    def test_keep_branch_leaves_it(self, m):
+        domain, session = merged_session(m)
+        domain.teardown(session.id, remove_branch=False)
+        assert session.branch in branch_names(m)
+
+    def test_an_unmerged_branch_is_refused_rather_than_forced(self, m):
+        """The refusal is the signal, not an obstacle to route around.
+
+        Reaching teardown is supposed to mean the work is merged. A branch that
+        will not delete safely is evidence the merge did not do what it looked
+        like it did — and forcing it would destroy the only copy and report
+        success.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("unmerged")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        worktree = Path(session.worktree)
+        (worktree / "new.txt").write_text("work\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=str(worktree), check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "unmerged work"],
+            cwd=str(worktree), check=True, capture_output=True,
+        )
+
+        session.state = "merged"  # claimed, but the branch says otherwise
+        domain._save(session)
+
+        with pytest.raises(StateError, match="not merged"):
+            domain.teardown(session.id)
+        assert session.branch in branch_names(m)
+
+    def test_a_session_that_never_isolated_cannot_be_torn_down(self, m):
+        """It has nothing to tear down; the honest ending is `abandoned`.
+
+        Written the other way round first, which was wrong: teardown means
+        "the merged work is in and the scaffolding is gone", and a session
+        that never had scaffolding never got there.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("never-isolated")
+        with pytest.raises(TransitionError):
+            domain.teardown(session.id)
+
+
+class TestTeardownAndALiveHostBinding:
+    """Teardown's preconditions used to ask git and never who was standing there.
+
+    BUG_009. The binding is now read before anything is removed, and removing
+    an *occupied* worktree — one the caller is standing in — while the binding
+    that would be stranded is still live is refused outright.
+
+    The refusal is a conjunction, and both halves are load-bearing:
+
+    * **The binding is live.** A spent binding (`SessionEnd` fired) or none at
+      all leaves nobody to wedge; a caller in a deleted directory then recovers
+      with a `cd`, which is an inconvenience rather than a deadlock.
+    * **The caller is standing in it.** This is the only evidence of occupancy
+      the library has — the binding is a scalar with no notion of where its
+      host stands (BUG_010) — and without this half the check refuses every
+      healthy teardown, because a session torn down normally is bound to the
+      live host session that is doing the tearing down.
+    """
+
+    def test_teardown_does_not_consult_a_live_host_binding(self, m):
+        """Repro for BUG_009 — see docs/backlog/BUG_009.md.
+
+        The reported symptom is a WEDGED host session, which is environment
+        state and not a return value: the host's own worktree isolation then
+        refuses every shell call and orders the caller back into a directory
+        that no longer exists, and the repair commands sit behind that same
+        refusal. That deadlock is not expressible here and this test does not
+        attempt it. What is expressible is the missing precondition underneath
+        it, which is what `docs/architecture/state_model.md` "Host binding"
+        makes checkable: `SessionEnd` marks the binding spent, so a session
+        carrying a `host_session_id` with `host_ended` still False is a
+        binding that is, by the documented model, LIVE.
+
+        The entry's contract: "Removing a directory another system holds a
+        live reference to should not be a silent success."
+
+        Deliberately NOT asserting the suspected cause's shape, and
+        deliberately NOT asserting any particular reaction. Whether teardown
+        should REFUSE or merely WARN is an open design decision, and a test
+        that hardcoded one would foreclose the other. So this pins only that
+        teardown never CONSULTS the binding at all, by measuring reads of the
+        two binding fields that happen while the worktree is still on disk —
+        that is, in time to be a precondition.
+
+        The ordering discriminator is load-bearing rather than decorative.
+        Teardown does read `host_session_id` afterwards, twice for the
+        transition's telemetry watermark and once more when the record is
+        serialised, so a naive "was it read at all" spy reports a consultation
+        that never happened. Reads after the directory is already gone cannot
+        be a precondition on removing it.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("host-occupied")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        # Land the branch on the base so the safe `git branch -d` accepts it:
+        # an unmerged branch is refused by a precondition that DOES exist, and
+        # that refusal would mask the absence of this one.
+        subprocess.run(
+            ["git", "merge", "--ff-only", session.branch],
+            cwd=str(m.root), check=True, capture_output=True,
+        )
+        domain.adopt_host_session(session.id, "host-0000-1111-2222")
+        session = domain.get(session.id)
+        session.state = "merged"  # teardown is only legal from `merged`
+        domain._save(session)
+
+        session = domain.get(session.id)
+        assert session.host_session_id == "host-0000-1111-2222"
+        assert session.host_ended is False, "SessionEnd never fired: the binding is live"
+        worktree = Path(session.worktree)
+        assert worktree.is_dir()
+
+        # Record every read of the binding, tagged with whether the directory
+        # still existed at that moment. `require()` rebuilds the Session from
+        # the store, so the spy has to sit on the class, not on this instance.
+        reads: list[tuple[str, bool]] = []
+        unspied = Session.__getattribute__
+
+        def spy(self, name):
+            if name in {"host_session_id", "host_ended"}:
+                try:
+                    reads.append((name, worktree.exists()))
+                except OSError:
+                    reads.append((name, False))
+            return unspied(self, name)
+
+        Session.__getattribute__ = spy
+        try:
+            refusal = None
+            try:
+                domain.teardown(session.id)
+            except StateError as exc:
+                refusal = str(exc)
+        finally:
+            Session.__getattribute__ = unspied
+
+        consulted = [name for name, still_there in reads if still_there]
+        destroyed = not worktree.exists()
+
+        # One condition, satisfiable by either fix. A refusal leaves the
+        # worktree standing and passes on `destroyed`; a warning removes it but
+        # has to read the binding first and passes on `consulted`. Today
+        # neither holds: the directory is gone and nothing ever asked.
+        assert not (destroyed and not consulted), (
+            "teardown removed the worktree of a session whose host binding is "
+            f"still live, without ever consulting it. Reads of the binding "
+            f"while the directory still existed: {consulted}; reads after it "
+            f"was already gone (telemetry and serialisation, too late to be a "
+            f"precondition): {[n for n, s in reads if not s]}. Refusal raised: "
+            f"{refusal!r}."
+        )
+
+    # -- the wedge itself: occupied, and the binding still live -------------
+
+    def test_removing_an_occupied_worktree_is_refused(self, m):
+        """The one case with no in-band recovery, so it is a refusal.
+
+        Standing in the directory *is* the occupancy evidence: under the 1:1
+        binding, a caller inside a session's worktree whose binding is live is
+        that session's host.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        worktree = Path(session.worktree)
+
+        with pytest.raises(UsageError, match="worktree it would remove"):
+            domain.teardown(session.id, cwd=worktree)
+
+        # Nothing was removed and nothing was recorded: a refusal that had
+        # already deleted half of what it refused would be the phantom-session
+        # class arrived at from the other end.
+        assert worktree.is_dir()
+        assert session.branch in branch_names(m)
+        assert domain.get(session.id).state == "merged"
+
+    def test_the_refusal_names_the_step_that_clears_it(self, m):
+        """A refusal nobody can act on costs the same wedged session.
+
+        The caller cannot read the code from inside the deadlock it is warning
+        about, so the message carries the way out rather than a diagnosis.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError) as exc:
+            domain.teardown(session.id, cwd=Path(session.worktree))
+        message = str(exc.value)
+
+        assert session.id in message
+        assert session.worktree in message
+        # The step out, spelled as a command rather than described.
+        assert f"invariant session teardown --id {session.id}" in message
+        assert f"cd {m.root}" in message
+        # And the deliberate override, for a caller who knows better.
+        assert "--force" in message
+
+    def test_a_deeper_directory_inside_the_worktree_counts_as_standing_in_it(self, m):
+        """Occupancy is the subtree, not the one path.
+
+        A caller is normally several directories down inside the worktree, and
+        removing it strands them exactly as thoroughly as removing the root.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        deeper = Path(session.worktree) / "docs" / "architecture"
+        assert deeper.is_dir()
+        with pytest.raises(UsageError, match="worktree it would remove"):
+            domain.teardown(session.id, cwd=deeper)
+
+    # -- the companion negatives: everything else must still end cleanly ----
+
+    def test_a_live_binding_tears_down_from_the_main_checkout(self, m):
+        """The NORMAL ending, and the case a liveness-only check would break.
+
+        A session torn down the documented way is bound to the very host
+        session running the teardown, and `SessionEnd` has not fired because
+        that host is still alive. So a live binding cannot on its own be the
+        refusal's trigger: it is the resting state of every healthy teardown.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+
+        domain.teardown(session.id, cwd=m.root)
+
+        assert not Path(session.worktree).exists()
+        assert session.branch not in branch_names(m)
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_a_spent_binding_tears_down_from_inside_the_worktree(self, m):
+        """`SessionEnd` fired: there is no host left to strand.
+
+        The caller's own shell is left in a deleted directory, which one `cd`
+        undoes. That is not the deadlock this refusal exists for, and refusing
+        it would block the cleanup of exactly the sessions most likely to need
+        it.
+        """
+        domain, session = merged_session(
+            m, host_session_id="host-aaaa-1111", host_ended=True
+        )
+        domain.teardown(session.id, cwd=Path(session.worktree))
+        assert not Path(session.worktree).exists()
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_an_unbound_session_tears_down_from_inside_the_worktree(self, m):
+        """No binding at all — a session registered by hand, or before hooks."""
+        domain, session = merged_session(m)
+        assert session.host_session_id is None
+        domain.teardown(session.id, cwd=Path(session.worktree))
+        assert not Path(session.worktree).exists()
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_keeping_the_worktree_is_never_refused(self, m):
+        """The refusal guards a removal; `--keep-worktree` performs none.
+
+        The branch is kept too, because git will not delete one that a live
+        worktree still has checked out — an existing refusal that would mask
+        the absence of this one.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        domain.teardown(
+            session.id,
+            remove_worktree=False,
+            remove_branch=False,
+            cwd=Path(session.worktree),
+        )
+        assert Path(session.worktree).is_dir()
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_force_tears_down_an_occupied_worktree(self, m):
+        """The deliberate case: the operator knows the host has already moved.
+
+        Same shape as every other override here — a refusal that cannot be
+        overridden at all gets routed around outside the tool.
+
+        Asserted to completion rather than to the removal, because forcing is
+        the only way to reach the case where git's own working directory is
+        the directory being removed: the branch delete used to run from inside
+        it and fail with an unrelated ENOENT, leaving the worktree gone, the
+        branch alive and no transition recorded.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+        domain.teardown(session.id, cwd=Path(session.worktree), force=True)
+        assert not Path(session.worktree).exists()
+        assert session.branch not in branch_names(m)
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_an_unreadable_working_directory_does_not_block_the_cleanup(
+        self, m, monkeypatch
+    ):
+        """The aftermath of the wedge must not be locked behind the guard.
+
+        A shell whose directory has already been deleted cannot answer where
+        it is standing. Nothing can be inside a path that cannot be named, and
+        failing closed here would refuse the teardown of exactly the sessions
+        that got into this state.
+        """
+        domain, session = merged_session(m, host_session_id="host-aaaa-1111")
+
+        def gone():
+            raise FileNotFoundError(2, "No such file or directory")
+
+        monkeypatch.setattr(Path, "cwd", staticmethod(gone))
+
+        domain.teardown(session.id)
+        assert domain.get(session.id).state == "torn_down"
+
+    def test_a_sibling_worktree_is_not_the_one_being_removed(self, m):
+        """Standing in *a* worktree is not standing in *this* one.
+
+        Concurrent sessions are the normal case, and a peer tearing down its
+        own finished session from inside its own live worktree touches nothing
+        the caller is standing in.
+        """
+        domain, session = merged_session(m, name="doomed", host_session_id="host-a")
+        _, neighbour = merged_session(m, name="bystander", host_session_id="host-b")
+
+        domain.teardown(session.id, cwd=Path(neighbour.worktree))
+
+        assert not Path(session.worktree).exists()
+        assert Path(neighbour.worktree).is_dir()
+
+
+class TestHostBindingIsOneToOne:
+    """A host session and an invariant session are the same unit of work.
+
+    They used to be independent namespaces, which meant an ambiguity report
+    could offer six candidates to a caller for whom five were provably wrong.
+    """
+
+    def test_a_host_may_not_own_two_sessions(self, m):
+        domain = SessionDomain(m)
+        domain.start("first", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="already owns session"):
+            domain.start("second", host_session_id="host-aaaa-1111")
+
+    def test_the_refusal_names_the_session_and_how_to_end_it(self, m):
+        domain = SessionDomain(m)
+        first = domain.start("first", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError) as exc:
+            domain.start("second", host_session_id="host-aaaa-1111")
+        assert first.id in str(exc.value)
+        assert "teardown" in str(exc.value)
+
+    def test_a_finished_session_frees_the_host(self, m):
+        """1:1 is about LIVE sessions; a host outlives the work it did."""
+        domain = SessionDomain(m)
+        first = domain.start("first", host_session_id="host-aaaa-1111")
+        first.state = "torn_down"
+        domain._save(first)
+        assert domain.start("second", host_session_id="host-aaaa-1111")
+
+    def test_rebinding_to_another_host_is_refused(self, m):
+        """A LIVE binding. A spent one is `session resume`'s to replace."""
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="bound to a LIVE host session"):
+            domain.adopt_host_session(session.id, "host-bbbb-2222")
+
+    def test_rebinding_is_possible_deliberately(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        updated = domain.adopt_host_session(session.id, "host-bbbb-2222", force=True)
+        assert updated.host_session_id == "host-bbbb-2222"
+
+    def test_adopting_is_refused_when_the_host_already_owns_one(self, m):
+        domain = SessionDomain(m)
+        domain.start("owned", host_session_id="host-aaaa-1111")
+        other = domain.start("unowned")
+        with pytest.raises(UsageError, match="already owns"):
+            domain.adopt_host_session(other.id, "host-aaaa-1111")
+
+    def test_readopting_the_same_pair_is_not_an_error(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        assert domain.adopt_host_session(session.id, "host-aaaa-1111").id == session.id
+
+    def test_the_short_form_only_claims_an_unbound_session(self, m):
+        """Matching by derived id is a fallback, not an override.
+
+        A session already answering to another host that happens to share the
+        derived short form is a naming coincidence, not a match.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("x", session_id="abcd1234")
+        domain.adopt_host_session(session.id, "host-zzzz-0000abcd1234", force=True)
+        assert domain.by_host_session("other-host-0000abcd1234") is None
+
+
+class TestAttributionCandidates:
+    """Who could plausibly be calling. Every exclusion removes a wrong answer."""
+
+    def test_a_stranded_session_stops_competing(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("gone")
+        domain.isolate(session.id, execute=True)
+        shutil.rmtree(domain.get(session.id).worktree)
+
+        assert domain.get(session.id).is_stranded
+        assert session.id not in [s.id for s in domain.attributable()]
+
+    def test_a_session_that_never_isolated_is_not_stranded(self, m):
+        """The deliberate no-worktree case: a soak owning no code.
+
+        The binding is host-to-session, never host-to-worktree, so having no
+        worktree must not read as having lost one.
+        """
+        domain = SessionDomain(m)
+        session = domain.start("device-soak")
+        assert not session.is_stranded
+        assert session.id in [s.id for s in domain.attributable()]
+
+    def test_a_session_whose_host_ended_stops_competing(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("over", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        assert session.id not in [s.id for s in domain.attributable()]
+
+    def test_ending_a_host_does_not_destroy_the_work(self, m):
+        """A closed terminal is not a reason to abandon unmerged work."""
+        domain = SessionDomain(m)
+        session = domain.start("over", host_session_id="host-aaaa-1111")
+        domain.isolate(session.id, execute=True)
+        domain.end_host_session("host-aaaa-1111")
+
+        after = domain.get(session.id)
+        assert after.state == "isolated"
+        assert Path(after.worktree).exists()
+        assert after.host_ended
+
+    def test_a_session_bound_elsewhere_stops_competing(self, m):
+        domain = SessionDomain(m)
+        theirs = domain.start("theirs", host_session_id="host-bbbb-2222")
+        mine = domain.start("mine")
+        visible = [s.id for s in domain.attributable("host-aaaa-1111")]
+        assert theirs.id not in visible
+        assert mine.id in visible
+
+    def test_an_ended_host_cannot_reclaim_its_old_session(self, m):
+        """A new host reusing the record would inherit somebody else's work."""
+        domain = SessionDomain(m)
+        domain.start("over", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        assert domain.by_host_session("host-aaaa-1111") is None
+
+
+class TestReapStranded:
+    def test_a_worktree_and_branch_both_gone_is_reaped(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("dead")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        shutil.rmtree(session.worktree)
+        subprocess.run(
+            ["git", "worktree", "prune"], cwd=str(m.root), check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "branch", "-D", session.branch],
+            cwd=str(m.root), check=True, capture_output=True,
+        )
+
+        assert [s.id for s in domain.reap_stranded()] == [session.id]
+        assert domain.get(session.id).state == "abandoned"
+
+    def test_a_surviving_branch_is_not_reaped(self, m):
+        """The narrow condition, and why it is narrow.
+
+        A worktree can be removed while its branch still holds unmerged
+        commits. That work is recoverable, so a missing directory alone must
+        not be enough to write the session off.
+        """
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("recoverable")
+        domain.isolate(session.id, execute=True)
+        shutil.rmtree(domain.get(session.id).worktree)
+
+        assert domain.reap_stranded() == []
+        assert domain.get(session.id).state == "isolated"
+
+    def test_dry_run_changes_nothing(self, m):
+        import shutil
+
+        domain = SessionDomain(m)
+        session = domain.start("dead")
+        domain.isolate(session.id, execute=True)
+        session = domain.get(session.id)
+        shutil.rmtree(session.worktree)
+        subprocess.run(["git", "worktree", "prune"], cwd=str(m.root), capture_output=True)
+        subprocess.run(
+            ["git", "branch", "-D", session.branch], cwd=str(m.root), capture_output=True
+        )
+
+        assert [s.id for s in domain.reap_stranded(dry_run=True)] == [session.id]
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_live_session_is_never_reaped(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("alive")
+        domain.isolate(session.id, execute=True)
+        assert domain.reap_stranded() == []
+
+
+
+class TestAcknowledgingAnAdvisoryGate:
+    """A warn that repeats forever cannot distinguish two very different states.
+
+    "Considered and declined" and "never read" produce identical output, which
+    is the real defect — more than the repetition is. An acknowledgement costs
+    an explicit act with a stated reason and leaves that reason in the record.
+    """
+
+    def pipeline_at(self, m):
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id, task="a task")
+        return pipelines, session
+
+    def at_review(self, pipelines, session):
+        """Park the pipeline where the agent-role gates live (ADR-003 D1).
+
+        Set directly rather than advanced through, because advancing there is
+        what the gates under test would themselves have to permit.
+        """
+        pipeline = pipelines.current(session.id)
+        pipeline.state = "reviewing"
+        pipelines._save(session.id, pipeline)
+        return pipelines, session
+
+    def verdict_for(self, pipelines, session, m, rule_id):
+        verdicts = pipelines.evaluate_gates(session.id, cwd=m.root)
+        for evaluated in verdicts:
+            if evaluated.rule_id == rule_id:
+                return evaluated
+        raise AssertionError(f"{rule_id} was not among the gates here")
+
+    def test_the_gate_warns_before_it_is_acknowledged(self, m):
+        pipelines, session = self.at_review(*self.pipeline_at(m))
+        evaluated = self.verdict_for(
+            pipelines, session, m, "agents.design_agent_ran"
+        )
+        assert not evaluated.verdict.ok
+
+    def test_acknowledging_turns_it_into_a_recorded_skip(self, m):
+        pipelines, session = self.at_review(*self.pipeline_at(m))
+        pipelines.acknowledge(
+            session.id, "agents.design_agent_ran", "one-line fix; no design content"
+        )
+        evaluated = self.verdict_for(
+            pipelines, session, m, "agents.design_agent_ran"
+        )
+        # Skipped, not passed. The gate did not become satisfied; it became
+        # answered.
+        assert evaluated.verdict.skipped
+        assert "one-line fix" in evaluated.verdict.message
+
+    def test_the_reason_is_kept_in_the_record(self, m):
+        pipelines, session = self.pipeline_at(m)
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+        evidence = pipelines.current(session.id).evidence
+        assert evidence["acknowledged"]["agents.design_agent_ran"] == "deliberate"
+
+    def test_it_survives_a_reload(self, m):
+        pipelines, session = self.at_review(*self.pipeline_at(m))
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+        fresh = PipelineDomain(m)
+        evaluated = self.verdict_for(fresh, session, m, "agents.design_agent_ran")
+        assert evaluated.verdict.skipped
+
+    def test_a_reason_is_required(self, m):
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError, match="silencer"):
+            pipelines.acknowledge(session.id, "agents.design_agent_ran", "   ")
+
+    def test_a_blocking_gate_cannot_be_acknowledged(self, m):
+        """Otherwise block and warn are the same level, spelled differently.
+
+        A blocking gate is satisfied, or overridden on the transition itself
+        where the override is recorded against that transition rather than
+        standing for the rest of the run.
+        """
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError, match="blocks in this project"):
+            pipelines.acknowledge(session.id, "docs.read_architecture", "later")
+
+    def test_the_refusal_points_at_the_recorded_override_instead(self, m):
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError) as exc:
+            pipelines.acknowledge(session.id, "docs.read_architecture", "later")
+        assert "--force --reason" in str(exc.value)
+
+    def test_an_unknown_rule_is_refused(self, m):
+        pipelines, session = self.pipeline_at(m)
+        with pytest.raises(UsageError, match="no rule"):
+            pipelines.acknowledge(session.id, "agents.no_such_rule", "why")
+
+    def test_acknowledging_does_not_affect_other_gates(self, m):
+        pipelines, session = self.pipeline_at(m)
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+        other = self.verdict_for(pipelines, session, m, "docs.read_architecture")
+        assert not other.verdict.ok
+
+    def test_it_is_scoped_to_one_pipeline(self, m):
+        """It must not quietly become project policy."""
+        pipelines, session = self.at_review(*self.pipeline_at(m))
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "deliberate")
+
+        sessions = SessionDomain(m)
+        other = sessions.start("second")
+        pipelines.start(other.id, task="another task")
+        self.at_review(pipelines, other)
+        evaluated = self.verdict_for(pipelines, other, m, "agents.design_agent_ran")
+        assert not evaluated.verdict.ok
+
+    def test_a_passing_gate_is_unaffected_by_an_acknowledgement(self, m):
+        """It rewrites failures only — never manufactures a skip over a pass."""
+        pipelines, session = self.at_review(*self.pipeline_at(m))
+        pipelines.record_agent_run(session.id, "feature-architect")
+        pipelines.acknowledge(session.id, "agents.design_agent_ran", "belt and braces")
+        evaluated = self.verdict_for(pipelines, session, m, "agents.design_agent_ran")
+        assert evaluated.verdict.ok and not evaluated.verdict.skipped
+
+
+
+class CoverageFixture:
+    """Shared setup only — a mixin, so its cases are not inherited and re-run."""
+
+    def pipeline_with(self, m, script, report=None):
+        """A project whose coverage command(s) are scripts we control.
+
+        `report=None` is the single-command ecosystem: one program both runs
+        the suite and prints the numbers, so `commands.coverage_report` is
+        explicitly null and the command speaks for itself. The adapter default
+        would otherwise supply one, since this fixture claims an ecosystem.
+        """
+        path = m.root / "fake-coverage.sh"
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o755)
+        commands = {"coverage": f"sh {path}", "coverage_report": None}
+        if report is not None:
+            report_path = m.root / "fake-report.sh"
+            report_path.write_text(report, encoding="utf-8")
+            report_path.chmod(0o755)
+            commands["coverage_report"] = f"sh {report_path}"
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo", "ecosystems": ["swift"]},
+                    "commands": commands,
+                }
+            ),
+            encoding="utf-8",
+        )
+        fresh = Manifest.locate(m.root)
+        sessions = SessionDomain(fresh)
+        session = sessions.start("x")
+        pipelines = PipelineDomain(fresh)
+        pipelines.start(session.id, task="t")
+        return pipelines, session
+
+
+class TestCoverageFromARedSuite(CoverageFixture):
+    """Whether a measurement can be trusted depends on whether the suite RAN.
+
+    Not on whether it passed. Those are different claims, and in a repository
+    whose main branch is not green the first is the steady state.
+    """
+
+    RED_RUN_WITH_REPORT = """
+echo "Test Suite 'All tests' failed at 2026-08-09."
+echo "\t Executed 6 tests, with 4 failures (0 unexpected) in 6.5 (6.5) seconds"
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 65
+"""
+
+    def test_a_failing_suite_still_yields_a_measurement(self, m):
+        pipelines, session = self.pipeline_with(m, self.RED_RUN_WITH_REPORT)
+        result = pipelines.run_coverage(session.id, cwd=m.root)
+        assert result["files"] == 1
+        assert result["suite_passed"] is False
+
+    def test_the_suite_state_is_recorded_with_the_numbers(self, m):
+        """100% measured on a red run is not the same fact as on a green one."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN_WITH_REPORT)
+        pipelines.run_coverage(session.id, cwd=m.root)
+        run = pipelines.current(session.id).evidence["coverage_run"]
+        assert run["executed"] == 6
+        assert run["failed"] == 4
+        assert run["suite_passed"] is False
+
+    def test_a_run_that_executed_nothing_is_refused(self, m):
+        """A build failure produces a report describing the previous world."""
+        script = """
+echo "error: build failed"
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 65
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        with pytest.raises(UsageError, match="executed no tests"):
+            pipelines.run_coverage(session.id, cwd=m.root)
+
+    def test_nothing_is_recorded_when_the_run_is_refused(self, m):
+        script = """
+echo "error: build failed"
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 65
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        with pytest.raises(UsageError):
+            pipelines.run_coverage(session.id, cwd=m.root)
+        assert "coverage" not in pipelines.current(session.id).evidence
+
+    def test_a_run_with_tests_but_no_report_is_still_refused(self, m):
+        script = """
+echo "Test Suite 'All tests' failed at 2026-08-09."
+echo "\t Executed 6 tests, with 4 failures (0 unexpected) in 6.5 (6.5) seconds"
+echo "xccov: error: could not read bundle"
+exit 65
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        with pytest.raises(UsageError, match="no per-file measurements"):
+            pipelines.run_coverage(session.id, cwd=m.root)
+
+    def test_a_green_run_records_normally(self, m):
+        script = """
+echo "Test Suite 'All tests' passed at 2026-08-09."
+echo "\t Executed 6 tests, with 0 failures (0 unexpected) in 6.5 (6.5) seconds"
+echo "    /repo/Sources/App/Store.swift    92.00% (46/50)"
+exit 0
+"""
+        pipelines, session = self.pipeline_with(m, script)
+        result = pipelines.run_coverage(session.id, cwd=m.root)
+        assert result["suite_passed"] is True
+        assert result["coverage"]["/repo/Sources/App/Store.swift"] == 92.0
+
+    def test_a_stale_bundle_cannot_be_reported_as_a_fresh_measurement(self, m):
+        """The bundle is removed before each run, so a failed run cannot
+        silently republish the previous run's numbers."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN_WITH_REPORT)
+        pipelines.run_coverage(session.id, cwd=m.root)
+
+        # Per session AND per kind: a test run and a coverage run must not
+        # share a bundle, or one would clear the other's mid-flight.
+        bundle = (
+            Path(pipelines.store.root) / "coverage" / f"{session.id}.coverage.xcresult"
+        )
+        bundle.mkdir(parents=True, exist_ok=True)
+        (bundle / "marker").write_text("stale", encoding="utf-8")
+
+        pipelines.run_coverage(session.id, cwd=m.root)
+        assert not (bundle / "marker").exists()
+
+
+class TestBUG_088_ScopedZeroExecutedRefusal:
+    """Repro for BUG_088 — see docs/backlog/BUG_088.md.
+
+    Fails while the defect is live. When the fix lands, delete the
+    expected-failure marker; the assertion must then pass unchanged.
+
+    A scoped coverage run (`pipeline coverage --selector`, commands.coverage_one)
+    that builds, launches and exits 0 having executed nothing is refused — that
+    part is right. The symptom is the hint: it blames a build or launch failure,
+    when for a scoped run the likelier cause is a selector that matched nothing.
+    The assertion asks only that the refusal SAY a selector may have matched
+    nothing; it does not require certainty (BUG_038: under swift_xcode a zero
+    can also be a swift-testing run the scrape counted as nothing).
+    """
+
+    CLEAN_ZERO_RUN = """
+echo "Test Suite 'Selected tests' passed at 2026-10-27."
+echo "\t Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.001) seconds"
+echo "** TEST SUCCEEDED **"
+exit 0
+"""
+
+    def test_BUG_088_scopedZeroExecutedRefusalNamesTheSelector(self, m):
+        path = m.root / "fake-coverage.sh"
+        path.write_text(self.CLEAN_ZERO_RUN, encoding="utf-8")
+        path.chmod(0o755)
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(
+                {
+                    "version": 1,
+                    "project": {"name": "demo", "ecosystems": ["swift"]},
+                    "commands": {
+                        "coverage": f"sh {path}",
+                        "coverage_one": f"sh {path} {{selector}}",
+                        "coverage_report": None,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        fresh = Manifest.locate(m.root)
+        session = SessionDomain(fresh).start("x")
+        pipelines = PipelineDomain(fresh)
+        pipelines.start(session.id, task="t")
+
+        with pytest.raises(UsageError, match="executed no tests") as refused:
+            pipelines.run_coverage(
+                session.id, cwd=m.root, selectors=["AppTests/NoSuchClass"]
+            )
+        assert "matched nothing" in str(refused.value).lower(), str(refused.value)
+
+
+class TestTheSuiteStatusAndTheReadStatusAreNotTheSameNumber(CoverageFixture):
+    """A shell reports the LAST command's status, so a chain cannot say both.
+
+    These two legs were one command joined by `;` and the conflation lied in
+    both directions: a red suite followed by a clean read exited 0, and a green
+    suite followed by a failed read exited non-zero. The second one is what
+    actually happened — `xcrun` answers 72 for "utility not found", the
+    `DEVELOPER_DIR=` prefix repairing the toolchain applied to the first
+    command alone and never crossed the semicolon, and the resulting empty
+    measurement was twice attributed to the suite and once to an imagined race
+    before anyone looked at the reporting tool.
+    """
+
+    RED_RUN = """
+echo "Test Suite 'All tests' failed at 2026-08-09."
+echo "\t Executed 6 tests, with 4 failures (0 unexpected) in 6.5 (6.5) seconds"
+exit 65
+"""
+    GREEN_RUN = """
+echo "Test Suite 'All tests' passed at 2026-08-09."
+echo "\t Executed 6 tests, with 0 failures (0 unexpected) in 6.5 (6.5) seconds"
+exit 0
+"""
+    CLEAN_REPORT = """
+echo "    /repo/Sources/App/Store.swift    100.00% (55/55)"
+exit 0
+"""
+    UNREACHABLE_REPORT = """
+echo "xcrun: error: unable to find utility \\"xccov\\"" >&2
+exit 72
+"""
+
+    def test_a_red_suite_is_not_laundered_by_a_clean_read(self, m):
+        """Chained, this exited 0 and the suite was recorded as passing."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN, self.CLEAN_REPORT)
+        result = pipelines.run_coverage(session.id, cwd=m.root)
+        assert result["files"] == 1
+        assert result["suite_passed"] is False
+        assert result["failed"] == 4
+
+    def test_the_two_statuses_are_recorded_apart(self, m):
+        pipelines, session = self.pipeline_with(m, self.RED_RUN, self.CLEAN_REPORT)
+        pipelines.run_coverage(session.id, cwd=m.root)
+        run = pipelines.current(session.id).evidence["coverage_run"]
+        assert run["exit_code"] == 65
+        assert run["report_exit_code"] == 0
+
+    def test_an_unreadable_report_does_not_accuse_the_suite(self, m):
+        """The real incident. The suite was green; only the reader was missing."""
+        pipelines, session = self.pipeline_with(
+            m, self.GREEN_RUN, self.UNREACHABLE_REPORT
+        )
+        with pytest.raises(UsageError) as raised:
+            pipelines.run_coverage(session.id, cwd=m.root)
+        message = str(raised.value)
+        assert "Only the reporting leg came back empty" in message
+        assert "executed=6 failed=0" in message
+        assert "fake-report.sh" in message
+
+    def test_a_manifest_that_still_chains_the_legs_is_refused(self, m):
+        """Adopting the split without splitting must not look like adopting it.
+
+        Left alone, such a manifest runs the reporter twice AND keeps the
+        first command's status meaning the reporter's — the defect intact
+        behind a configuration that appears migrated.
+        """
+        pipelines, session = self.pipeline_with(m, self.GREEN_RUN, self.CLEAN_REPORT)
+        chained = yaml.safe_load(
+            (m.root / MANIFEST_RELPATH).read_text(encoding="utf-8")
+        )
+        commands = chained["commands"]
+        commands["coverage"] = f"{commands['coverage']} ; {commands['coverage_report']}"
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(chained), encoding="utf-8"
+        )
+        fresh = Manifest.locate(m.root)
+        with pytest.raises(UsageError, match="still runs the reporting tool"):
+            PipelineDomain(fresh).run_coverage(session.id, cwd=m.root)
+
+    def test_a_command_that_merely_chains_something_else_is_allowed(self, m):
+        """Detection is by containment, not by the presence of a `;`."""
+        pipelines, session = self.pipeline_with(m, self.RED_RUN, self.CLEAN_REPORT)
+        chained = yaml.safe_load(
+            (m.root / MANIFEST_RELPATH).read_text(encoding="utf-8")
+        )
+        chained["commands"]["coverage"] = (
+            f"echo preparing ; {chained['commands']['coverage']}"
+        )
+        (m.root / MANIFEST_RELPATH).write_text(
+            yaml.safe_dump(chained), encoding="utf-8"
+        )
+        fresh = Manifest.locate(m.root)
+        result = PipelineDomain(fresh).run_coverage(session.id, cwd=m.root)
+        assert result["suite_passed"] is False
+        assert result["files"] == 1
+
+
+class TestDescribeRun:
+    """Two numbers in one line must not be counted in different things.
+
+    `executed=14 failed=6` sent a reader hunting for six failing tests among
+    fourteen. There were two; the six were assertions, because one test tripped
+    four asserts after its first failed.
+    """
+
+    def test_assertions_and_tests_are_named_apart(self):
+        line = describe_run({"executed": 14, "failed": 6, "failed_tests": 2})
+        assert "6 assertion(s) failed in 2 test(s)" in line
+        assert "14 test(s) executed" in line
+
+    def test_a_single_number_is_not_padded_with_a_second_unit(self):
+        line = describe_run({"executed": 14, "failed": 2, "failed_tests": 2})
+        assert "2 failure(s)" in line
+        assert "assertion" not in line
+
+    def test_a_green_run_says_no_failures(self):
+        assert "no failures" in describe_run(
+            {"executed": 14, "failed": 0, "failed_tests": None}
+        )
+
+    def test_an_unknown_count_says_unknown_not_zero(self):
+        """`failed: None` means the run failed and the count could not be
+        parsed; rendering it as a number would invent one."""
+        line = describe_run({"executed": 13945, "failed": None, "failed_tests": None})
+        assert "unknown" in line
+        assert "0" not in line.split(",")[1]
+
+    def test_a_missing_executed_count_is_marked_rather_than_guessed(self):
+        assert "? test(s) executed" in describe_run(
+            {"executed": None, "failed": 0, "failed_tests": None}
+        )
+
+
+class TestDescribeRunNamesItsSource:
+    def test_a_console_fallback_says_so(self):
+        """A scraped count and a bundle read render the same otherwise, and
+        they are not equally trustworthy."""
+        line = describe_run(
+            {"executed": 34, "failed": 0, "failed_tests": None, "source": "console"}
+        )
+        assert "scraped from console" in line
+
+    def test_a_bundle_read_is_not_annotated(self):
+        line = describe_run(
+            {"executed": 13950, "failed": 625, "failed_tests": 625,
+             "source": "result_bundle"}
+        )
+        assert "scraped" not in line
+
+    def test_the_device_is_named_when_known(self):
+        line = describe_run(
+            {"executed": 10, "failed": 0, "source": "result_bundle",
+             "device": "Heap-wt-mine (ABC)"}
+        )
+        assert "on Heap-wt-mine (ABC)" in line
+
+    def test_skipped_tests_are_reported(self):
+        line = describe_run(
+            {"executed": 100, "failed": 0, "skipped": 2, "source": "result_bundle"}
+        )
+        assert "2 skipped" in line
+
+
+class TestSphinxMultiLineOptions:
+    """A wrapped option value used to fall into the body, and take every
+    option after it along. Silent, and on data this library did not write."""
+
+    def backend(self, tmp_path, text):
+        from invariant.core.items import SphinxNeedsBackend
+
+        path = tmp_path / "backlog.rst"
+        path.write_text(text, encoding="utf-8")
+        return SphinxNeedsBackend(path)
+
+    WRAPPED = """
+.. bug:: Drain treats every failure as transient
+   :id: BUG_DRAIN
+   :area: Frameworks/Intake,
+          Frameworks/Database
+   :severity: high
+   :status: open
+
+   The drain retries permanent failures forever.
+"""
+
+    def test_the_wrapped_value_stays_in_its_field(self, tmp_path):
+        item = self.backend(tmp_path, self.WRAPPED).load_all()[0]
+        assert item.fields["area"] == "Frameworks/Intake, Frameworks/Database"
+
+    def test_options_after_a_wrapped_one_are_not_lost(self, tmp_path):
+        """The compounding half: `option and not body` failed for all of them."""
+        item = self.backend(tmp_path, self.WRAPPED).load_all()[0]
+        assert item.fields["severity"] == "high"
+        assert item.status == "open"
+
+    def test_the_body_contains_only_the_body(self, tmp_path):
+        item = self.backend(tmp_path, self.WRAPPED).load_all()[0]
+        assert item.body == "The drain retries permanent failures forever."
+        assert "severity" not in item.body
+        assert "Frameworks/Database" not in item.body
+
+    def test_a_single_line_option_block_still_parses(self, tmp_path):
+        text = (
+            ".. bug:: Simple\n   :id: BUG_X\n   :status: open\n\n   Body here.\n"
+        )
+        item = self.backend(tmp_path, text).load_all()[0]
+        assert item.id == "BUG_X" and item.status == "open"
+        assert item.body == "Body here."
+
+    def test_an_entry_with_no_body_parses(self, tmp_path):
+        text = ".. bug:: Bare\n   :id: BUG_Y\n   :status: open\n"
+        item = self.backend(tmp_path, text).load_all()[0]
+        assert item.id == "BUG_Y" and item.body == ""
+
+    def test_a_colon_in_the_body_is_not_read_as_an_option(self, tmp_path):
+        text = (
+            ".. bug:: T\n   :id: BUG_Z\n\n   Note: this is prose, not a field.\n"
+        )
+        item = self.backend(tmp_path, text).load_all()[0]
+        assert "Note: this is prose" in item.body
+        assert "Note" not in item.fields
+
+
+class TestSphinxInsertsBesideItsOwnKind:
+    """Appending to the end of the file put an entry outside its section.
+
+    A file the tool writes and a person must then repair is worse than one it
+    declines to write, because the broken state is commit-shaped.
+    """
+
+    DOC = """Backlog
+=======
+
+Open bugs
+---------
+
+.. bug:: First
+   :id: BUG_ONE
+   :status: open
+
+   One.
+
+Closed
+------
+
+Nothing here yet.
+"""
+
+    def backend(self, tmp_path):
+        from invariant.core.items import Item, SphinxNeedsBackend
+
+        path = tmp_path / "backlog.rst"
+        path.write_text(self.DOC, encoding="utf-8")
+        return SphinxNeedsBackend(path), path, Item
+
+    def test_a_new_entry_lands_after_the_last_of_its_type(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        text = path.read_text(encoding="utf-8")
+        assert text.index("BUG_TWO") < text.index("Closed")
+
+    def test_the_trailing_section_survives(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        text = path.read_text(encoding="utf-8")
+        assert "Closed" in text and "Nothing here yet." in text
+
+    def test_the_existing_entry_is_untouched(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        assert backend.get("BUG_ONE").title == "First"
+
+    def test_both_entries_parse_back(self, tmp_path):
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="BUG_TWO", type="bug", title="Second", status="open"))
+        assert {i.id for i in backend.load_all()} == {"BUG_ONE", "BUG_TWO"}
+
+    def test_with_no_entry_of_that_type_it_appends(self, tmp_path):
+        """No anchor, so nothing clever — it says so rather than guessing."""
+        backend, path, Item = self.backend(tmp_path)
+        backend.save(Item(id="IDEA_ONE", type="idea", title="An idea", status="open"))
+        text = path.read_text(encoding="utf-8")
+        assert text.index("IDEA_ONE") > text.index("Nothing here yet.")
+
+
+class TestSlugIdStrategy:
+    """A numeric id is unlinkable in a backlog whose entries are referenced by
+    name — as :need: targets in architecture docs, say — and inconsistent with
+    every neighbour."""
+
+    def domain(self, tmp_path, strategy):
+        m = git_project(
+            tmp_path / "proj",
+            {"version": 1, "items": {"backend": "markdown", "id_strategy": strategy}},
+        )
+        return WorkItemDomain(m)
+
+    def test_numeric_is_still_the_default(self, tmp_path):
+        m = git_project(tmp_path / "proj", {"version": 1})
+        assert WorkItemDomain(m).new("bug", "Anything at all").id == "BUG_001"
+
+    def test_slug_derives_from_the_title(self, tmp_path):
+        item = self.domain(tmp_path, "slug").new(
+            "bug", "Drain treats every failure as transient"
+        )
+        assert item.id == "BUG_DRAIN_TREATS_EVERY_FAILURE_AS_TRANSIENT"
+
+    def test_punctuation_and_case_are_normalised(self, tmp_path):
+        item = self.domain(tmp_path, "slug").new("bug", "xccov: it's 100.00% wrong!")
+        assert item.id == "BUG_XCCOV_IT_S_100_00_WRONG"
+
+    def test_a_colliding_slug_is_suffixed_rather_than_overwriting(self, tmp_path):
+        domain = self.domain(tmp_path, "slug")
+        first = domain.new("bug", "Same title")
+        second = domain.new("bug", "Same title")
+        assert first.id != second.id
+        assert second.id.endswith("_2")
+
+    def test_a_titleless_slug_falls_back_to_the_stem(self):
+        """Tested on the helper: the domain refuses an empty title upstream,
+        so this branch is unreachable through `new` and asserting it there
+        would be asserting nothing."""
+        from invariant.core.items import _slug_id
+
+        assert _slug_id("BUG_", "", set()) == "BUG"
+
+    def test_an_unknown_strategy_is_refused_by_name(self, tmp_path):
+        with pytest.raises(UsageError, match="id_strategy"):
+            self.domain(tmp_path, "hieroglyph").new("bug", "x")
+
+
+class TestSeveralSelectorsRunOrRefuse:
+    """BUG_031 — a repeated `--selector` kept only the last one and reported
+    a healthy green for a scope nobody asked for. A flag that is accepted and
+    then discarded is the worst of the three outcomes, because the caller
+    believes a scope was covered that was not.
+
+    How several selectors are spelled in one command is ecosystem knowledge:
+    pytest takes node ids positionally, xcodebuild needs a repeated
+    `-only-testing:` flag the manifest template owns. So the adapter supplies
+    the fact and the domain keeps the policy — run them, or refuse.
+    """
+
+    def project(self, tmp_path, ecosystem, test_one):
+        return git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"ecosystems": [ecosystem]},
+                "commands": {"test": "true", "test_one": test_one},
+            },
+        )
+
+    def pipeline_for(self, m):
+        session = SessionDomain(m).start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        return pipelines, session
+
+    def test_both_selectors_reach_the_command(self, tmp_path):
+        m = self.project(tmp_path, "python", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        record = pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+        assert "A" in record["command"] and "B" in record["command"]
+
+    def test_a_single_selector_is_unchanged(self, tmp_path):
+        m = self.project(tmp_path, "python", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        record = pipelines.run_tests(session.id, phase="red", selectors=["A"], cwd=m.root)
+        assert record["command"] == "echo ran A"
+
+    def test_an_ecosystem_that_cannot_join_them_refuses(self, tmp_path):
+        """Refusal costs the caller one retry. A discard costs them the
+        belief that the scope was covered."""
+        m = self.project(tmp_path, "generic", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        with pytest.raises(UsageError, match="one selector at a time"):
+            pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+
+    def test_the_refusal_names_both_selectors(self, tmp_path):
+        m = self.project(tmp_path, "generic", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        with pytest.raises(UsageError) as exc:
+            pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+        assert "A" in str(exc.value) and "B" in str(exc.value)
+
+    def test_nothing_is_recorded_when_the_request_is_refused(self, tmp_path):
+        """A refused request must not leave a run behind for `test.all_pass`
+        to read as the current state of the suite."""
+        m = self.project(tmp_path, "generic", "echo ran {selector}")
+        pipelines, session = self.pipeline_for(m)
+        with pytest.raises(UsageError):
+            pipelines.run_tests(session.id, phase="red", selectors=["A", "B"], cwd=m.root)
+        assert pipelines.current(session.id).evidence.get("test_runs") is None
+
+
+class TestTheSuiteDoesNotInheritTheRecordersIdentity:
+    """BUG_035 — `INVARIANT_SESSION_ID` was inherited by the spawned test
+    process. In THIS repository, whose own suite exercises session creation,
+    every test that starts a session then collided with the named live one
+    and died on `session '<id>' already exists`: 25 false failures recorded
+    as durable red evidence, against a bare run that was fully green.
+
+    The documented way to name a run for recording purposes must not change
+    what the suite it records measures.
+    """
+
+    def env_probe(self, tmp_path):
+        return git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"ecosystems": ["python"]},
+                "commands": {
+                    "test": "test -z \"$INVARIANT_SESSION_ID\"",
+                    "coverage": "test -z \"$INVARIANT_SESSION_ID\"",
+                },
+            },
+        )
+
+    def test_the_test_command_does_not_see_it(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INVARIANT_SESSION_ID", "live-session")
+        m = self.env_probe(tmp_path)
+        session = SessionDomain(m).start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        record = pipelines.run_tests(session.id, phase="red", cwd=m.root)
+        assert record["passed"], "the spawned suite inherited INVARIANT_SESSION_ID"
+
+    def test_the_parents_own_environment_is_untouched(self, tmp_path, monkeypatch):
+        """Stripping it for the child must not deregister the caller."""
+        import os
+
+        monkeypatch.setenv("INVARIANT_SESSION_ID", "live-session")
+        m = self.env_probe(tmp_path)
+        session = SessionDomain(m).start("x")
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id)
+        pipelines.run_tests(session.id, phase="red", cwd=m.root)
+        assert os.environ["INVARIANT_SESSION_ID"] == "live-session"
+
+
+class TestSessionNamesAreAddresses:
+    """A name that does not identify a session is a name you cannot resume by.
+
+    The id is appended at `start`, after the identifier is settled, so
+    uniqueness is structural: ids are unique, therefore `slug-id` is. Nothing
+    checks for a collision because nothing can produce one.
+    """
+
+    def test_a_name_carries_the_id(self, m):
+        session = SessionDomain(m).start("add-widget", session_id="abcd1234")
+        assert session.name == "add-widget-abcd1234"
+
+    def test_the_slug_is_still_a_slug(self, m):
+        session = SessionDomain(m).start("Add The Widget", session_id="abcd1234")
+        assert session.name == "add-the-widget-abcd1234"
+
+    def test_qualifying_is_idempotent(self):
+        """The name people copy back out of a greeting already carries the id."""
+        from invariant.domains.session import qualified_name
+
+        assert qualified_name("add-widget", "abcd1234") == "add-widget-abcd1234"
+        assert qualified_name("add-widget-abcd1234", "abcd1234") == "add-widget-abcd1234"
+
+    def test_two_sessions_for_one_task_do_not_collide(self, m):
+        domain = SessionDomain(m)
+        first = domain.start("same", session_id="aaaa1111")
+        second = domain.start("same", session_id="bbbb2222", force=True)
+        assert first.name != second.name
+
+    def test_resolve_by_id(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("thing", session_id="abcd1234")
+        found, candidates = domain.resolve_name("abcd1234")
+        assert found is not None and found.id == session.id and candidates == []
+
+    def test_resolve_by_full_name(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("thing", session_id="abcd1234")
+        found, _ = domain.resolve_name("thing-abcd1234")
+        assert found is not None and found.id == session.id
+
+    def test_resolve_by_bare_slug(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("thing", session_id="abcd1234")
+        found, _ = domain.resolve_name("thing")
+        assert found is not None and found.id == session.id
+
+    def test_resolve_by_unique_prefix(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("a-long-task-name", session_id="abcd1234")
+        found, _ = domain.resolve_name("a-long")
+        assert found is not None and found.id == session.id
+
+    def test_an_ambiguous_prefix_hands_back_the_candidates(self, m):
+        domain = SessionDomain(m)
+        domain.start("shared-one", session_id="aaaa1111")
+        domain.start("shared-two", session_id="bbbb2222")
+        found, candidates = domain.resolve_name("shared")
+        assert found is None
+        assert {c.id for c in candidates} == {"aaaa1111", "bbbb2222"}
+
+    def test_an_ambiguous_bare_slug_hands_back_the_candidates(self, m):
+        """Two sessions for one task is exactly what `--force` produces."""
+        domain = SessionDomain(m)
+        domain.start("same", session_id="aaaa1111")
+        domain.start("same", session_id="bbbb2222", force=True)
+        found, candidates = domain.resolve_name("same")
+        assert found is None and len(candidates) == 2
+
+    def test_nothing_matches_is_not_an_ambiguity(self, m):
+        assert SessionDomain(m).resolve_name("nothing-like-this") == (None, [])
+        assert SessionDomain(m).resolve_name("") == (None, [])
+
+    def test_a_dead_session_still_resolves_by_id(self, m):
+        """So the refusal can name the state instead of saying 'no such session'."""
+        domain = SessionDomain(m)
+        session = domain.start("done", session_id="abcd1234")
+        session.state = "torn_down"
+        domain._save(session)
+        found, _ = domain.resolve_name("abcd1234")
+        assert found is not None and found.state == "torn_down"
+
+    def test_a_dead_session_is_not_reachable_by_name(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("done", session_id="abcd1234")
+        session.state = "abandoned"
+        domain._save(session)
+        assert domain.resolve_name("done") == (None, [])
+
+    def test_the_id_outranks_a_name_that_happens_to_match_it(self, m):
+        domain = SessionDomain(m)
+        by_id = domain.start("other", session_id="collide")
+        domain.start("collide", session_id="zzzz9999")
+        found, _ = domain.resolve_name("collide")
+        assert found is not None and found.id == by_id.id
+
+    def test_name_matches_is_exported_for_a_caller_with_no_live_set(self, m):
+        """`domains/stats` joins on a name it read off a record, not off disk."""
+        from invariant.domains.session import name_matches
+
+        assert name_matches("add-widget-abcd1234", "abcd1234", "add-widget-abcd1234")
+        assert name_matches("add-widget-abcd1234", "abcd1234", "add-widget")
+        assert name_matches("add-widget-abcd1234", "abcd1234", "add-wid")
+        assert not name_matches("add-widget-abcd1234", "abcd1234", "other")
+        assert not name_matches("add-widget-abcd1234", "abcd1234", "")
+
+    def test_name_rank_says_WHICH_rung_answered_where_the_predicate_flattens(self, m):
+        """The half `name_matches` cannot express, and its caller needs.
+
+        A predicate that says only yes cannot tell a bare slug from a prefix,
+        so a caller holding several matches has no way to prefer the narrower
+        one. The rank is that ordering, exported for the same reason the
+        predicate is: `domains/stats` scans records, not sessions.
+        """
+        from invariant.domains.session import name_rank
+
+        assert name_rank("add-widget-abcd1234", "abcd1234", "add-widget-abcd1234") == 0
+        assert name_rank("add-widget-abcd1234", "abcd1234", "add-widget") == 1
+        assert name_rank("add-widget-abcd1234", "abcd1234", "add-wid") == 2
+        assert name_rank("add-widget-abcd1234", "abcd1234", "other") is None
+        assert name_rank("add-widget-abcd1234", "abcd1234", "") is None
+
+    def test_the_predicate_and_the_rank_cannot_disagree(self, m):
+        """One answer, two shapes: the predicate is the rank having one."""
+        from invariant.domains.session import name_matches, name_rank
+
+        for query in ("add-widget-abcd1234", "add-widget", "add-wid", "other", ""):
+            assert name_matches("add-widget-abcd1234", "abcd1234", query) is (
+                name_rank("add-widget-abcd1234", "abcd1234", query) is not None
+            )
+
+    def test_the_ambiguity_message_names_every_candidate_and_the_way_out(self, m):
+        from invariant.domains.session import name_ambiguity_message
+
+        domain = SessionDomain(m)
+        domain.start("same", session_id="aaaa1111")
+        domain.start("same", session_id="bbbb2222", force=True)
+        _, candidates = domain.resolve_name("same")
+        text = name_ambiguity_message(candidates)
+        assert "same-aaaa1111" in text and "same-bbbb2222" in text
+        assert "invariant session resume" in text
+
+    def test_the_ambiguity_message_does_not_raise_on_an_empty_list(self):
+        """A message builder that raises while explaining a failure replaces
+        the diagnosis with a traceback about the diagnosis."""
+        from invariant.domains.session import name_ambiguity_message
+
+        assert "0 sessions" in name_ambiguity_message([])
+
+
+@dataclass
+class OlderSession(PreservesUnknownKeys):
+    """`Session` as a build that predates the deliverables plan declares it.
+
+    A trimmed copy rather than a subclass: a subclass INHERITS the fields it is
+    supposed not to have, so it would round-trip them as fields and prove
+    nothing about a build that does not know them.
+    """
+
+    id: str
+    name: str
+    state: str = "registered"
+    branch: str | None = None
+    worktree: str | None = None
+    host_session_id: str | None = None
+    host_ended: bool = False
+    base: str = "master"
+    files: list = field(default_factory=list)
+    push_count: int = 0
+    history: list = field(default_factory=list)
+    heartbeat: float = 0.0
+    _extra: dict = field(default_factory=dict)
+
+
+@dataclass
+class OlderPipeline(PreservesUnknownKeys):
+    """`Pipeline` the same way, for the twin defect on the same store."""
+
+    session_id: str
+    methodology: str
+    task: str = ""
+    state: str = ""
+    evidence: dict = field(default_factory=dict)
+    history: list = field(default_factory=list)
+    started: float = 0.0
+    _extra: dict = field(default_factory=dict)
+
+
+class TestTheDeliverablesPlan:
+    """The set a session owes, so that finishing is a fact rather than a feeling."""
+
+    def test_a_new_session_is_unplanned(self, m):
+        session = SessionDomain(m).start("work")
+        assert session.plan == []
+        assert session.plan_total == 0
+        assert session.plan_touched == 0.0
+
+    def test_a_record_written_before_the_field_existed_still_loads(self, m):
+        """No migration: `from_dict` filters unknown keys and every field has a
+        default, so an old record loads with an empty plan and behaves as it
+        did."""
+        legacy = {"id": "old12345", "name": "legacy", "state": "working"}
+        session = Session.from_dict(legacy)
+        assert session.plan == []
+        assert session.resumed_count == 0
+        assert session.hosts == []
+        assert session.plan_complete is False
+
+    def test_a_record_written_after_the_field_existed_survives_an_older_build(self, m):
+        """The mirror of the test above, and the half that was never designed
+        (BUG_061). Forward compatibility is what the unknown-key filter buys;
+        backward compatibility is what it used to spend. A build that has never
+        heard of `plan` now writes it back instead of deleting it.
+
+        The stand-in below is honest about what the fix can and cannot do: it
+        carries the round-trip contract and NOT the four fields, because a
+        build predating the contract has no way to preserve anything. This
+        stops the next asymmetry, not the one already installed.
+        """
+        session = SessionDomain(m).start("work")
+        session.plan = [{"n": 1, "title": "read the docs", "done": False, "done_at": None}]
+        session.plan_touched = 900.0
+        session.resumed_count = 2
+        session.hosts = ["host-aaaa-1111"]
+        written = session.to_dict()
+
+        older = OlderSession.from_dict(written)
+        older.state = "working"
+        rewritten = older.to_dict()
+
+        reloaded = Session.from_dict(rewritten)
+        assert reloaded.plan == session.plan
+        assert reloaded.plan_touched == 900.0
+        assert reloaded.resumed_count == 2
+        assert reloaded.hosts == ["host-aaaa-1111"]
+        assert reloaded.state == "working"
+
+    def test_numbers_start_at_one_and_count_up(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "read the docs")
+        after = domain.plan_add(session.id, "write the tests")
+        assert [e["n"] for e in after.plan] == [1, 2]
+        assert [e["title"] for e in after.plan] == ["read the docs", "write the tests"]
+
+    def test_numbers_are_never_reused_after_a_removal(self, m):
+        """`plan done 3` means the same thing before and after a `plan remove`."""
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        for title in ("a", "b", "c"):
+            domain.plan_add(session.id, title)
+        domain.plan_remove(session.id, 2)
+        after = domain.plan_add(session.id, "d")
+        assert [e["n"] for e in after.plan] == [1, 3, 4]
+
+    def test_done_marks_and_stamps(self, m):
+        domain = SessionDomain(m, clock=lambda: 500.0)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        after = domain.plan_done(session.id, 1)
+        assert after.plan[0]["done"] is True
+        assert after.plan[0]["done_at"] == 500.0
+        assert after.plan_complete is True
+
+    def test_marking_a_done_entry_again_keeps_the_first_moment(self, m):
+        times = iter([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        first = domain.plan_done(session.id, 1).plan[0]["done_at"]
+        again = domain.plan_done(session.id, 1).plan[0]["done_at"]
+        assert again == first
+
+    def test_reopen_is_the_way_back(self, m):
+        """A `done` that cannot be undone is BUG_057 one field over."""
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        domain.plan_done(session.id, 1)
+        after = domain.plan_reopen(session.id, 1)
+        assert after.plan[0]["done"] is False
+        assert after.plan[0]["done_at"] is None
+        assert after.plan_complete is False
+
+    def test_remove_is_the_other_way_back(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        domain.plan_add(session.id, "b")
+        after = domain.plan_remove(session.id, 1)
+        assert [e["title"] for e in after.plan] == ["b"]
+
+    def test_an_unknown_number_names_what_does_exist(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        domain.plan_add(session.id, "a")
+        for call in (domain.plan_done, domain.plan_reopen, domain.plan_remove):
+            with pytest.raises(UsageError, match="no deliverable 9"):
+                call(session.id, 9)
+
+    def test_an_empty_title_is_refused(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        with pytest.raises(UsageError, match="cannot be empty"):
+            domain.plan_add(session.id, "   ")
+
+    def test_a_title_with_a_newline_is_refused(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        with pytest.raises(UsageError, match="newline"):
+            domain.plan_add(session.id, "a\nb")
+
+    def test_an_overlong_title_is_refused_with_the_zsh_explanation(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        with pytest.raises(UsageError, match="word-split"):
+            domain.plan_add(session.id, "x" * 5000)
+
+    def test_the_open_set_keeps_the_recorded_order(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        for title in ("a", "b", "c"):
+            domain.plan_add(session.id, title)
+        after = domain.plan_done(session.id, 2)
+        assert [e["title"] for e in after.plan_open] == ["a", "c"]
+        assert after.plan_done_count == 1
+
+    def test_every_mutation_moves_plan_touched(self, m):
+        times = iter([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work")
+        seen = []
+        for call in (
+            lambda: domain.plan_add(session.id, "a"),
+            lambda: domain.plan_done(session.id, 1),
+            lambda: domain.plan_reopen(session.id, 1),
+            lambda: domain.plan_remove(session.id, 1),
+        ):
+            seen.append(call().plan_touched)
+        assert seen == sorted(seen) and len(set(seen)) == len(seen)
+
+    def test_a_plan_mutation_never_touches_the_heartbeat(self, m):
+        """`heartbeat` anchors per-transition `elapsed`; stamping it on a
+        checklist edit would silently shorten the next transition's duration."""
+        times = iter([100.0, 200.0, 300.0, 400.0, 500.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work")
+        before = session.heartbeat
+        domain.plan_add(session.id, "a")
+        domain.plan_done(session.id, 1)
+        assert domain.get(session.id).heartbeat == before
+
+    def test_an_empty_plan_is_unplanned_rather_than_finished(self, m):
+        assert SessionDomain(m).start("work").plan_complete is False
+
+
+class TestResumingASessionThatOutlivedItsHost:
+    """One invariant session, several Claude sessions, one merge at the end."""
+
+    def ended(self, m, domain=None, name="work", host="host-aaaa-1111"):
+        domain = domain or SessionDomain(m)
+        session = domain.start(name, host_session_id=host)
+        domain.end_host_session(host)
+        return domain, domain.get(session.id)
+
+    # -- which sessions are on offer -----------------------------------
+
+    def test_a_host_ended_session_is_resumable(self, m):
+        domain, session = self.ended(m)
+        assert [s.id for s in domain.resumable(cwd=m.root)] == [session.id]
+
+    def test_a_live_session_is_not_resumable(self, m):
+        """The exact complement of `attributable`'s host-ended exclusion."""
+        domain = SessionDomain(m)
+        live = domain.start("live", host_session_id="host-aaaa-1111")
+        assert live.id not in {s.id for s in domain.resumable(cwd=m.root)}
+        assert live.id in {s.id for s in domain.attributable()}
+
+    def test_a_stranded_session_is_not_resumable(self, m):
+        import shutil
+
+        domain, session = self.ended(m)
+        domain.isolate(session.id, execute=True)
+        domain.end_host_session("host-aaaa-1111")
+        shutil.rmtree(domain.get(session.id).worktree)
+        assert domain.resumable(cwd=m.root) == []
+
+    def test_a_torn_down_session_is_not_resumable(self, m):
+        domain, session = self.ended(m)
+        session.state = "torn_down"
+        domain._save(session)
+        assert domain.resumable(cwd=m.root) == []
+
+    def test_resumable_is_scoped_to_where_the_session_was_registered(self, m, tmp_path):
+        domain, _ = self.ended(m)
+        assert domain.resumable(cwd=tmp_path) == []
+
+    def test_the_one_whose_plan_moved_last_is_offered_first(self, m):
+        times = iter([float(i) for i in range(1, 40)])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        older = domain.start("older", host_session_id="host-a")
+        domain.end_host_session("host-a")
+        newer = domain.start("newer", host_session_id="host-b")
+        domain.end_host_session("host-b")
+        domain.plan_add(older.id, "moved most recently")
+        assert [s.id for s in domain.resumable(cwd=m.root)] == [older.id, newer.id]
+
+    # -- picking one up -------------------------------------------------
+
+    def test_resume_rebinds_the_host_and_counts_the_pickup(self, m):
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        assert after.host_session_id == "host-bbbb-2222"
+        assert after.resumed_count == 1
+        assert after.hosts == ["host-aaaa-1111"]
+
+    def test_resume_replaces_the_binding_and_never_vacates_it(self, m):
+        """Clearing `host_ended` without setting a new id would put the session
+        back into `attributable()` for every host that owns nothing."""
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        assert after.host_ended is False
+        assert domain.by_host_session("host-bbbb-2222").id == session.id
+
+    def test_resume_does_not_widen_attributable(self, m):
+        """Resuming one session must not be able to refuse another's tool call.
+
+        A vacated binding rejoins `attributable()`; a peer host that owns
+        nothing then sees two origin candidates instead of one, `resolve`
+        answers `ambiguous`, `rule_context` renders `session=None`, and
+        `pre-tool-use` DENIES an unattributed edit.
+        """
+        domain = SessionDomain(m)
+        mine = domain.start("mine", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        peer = domain.start("peer")
+
+        domain.resume(mine.id, host_session_id="host-cccc-3333")
+
+        resolution = domain.resolve(cwd=m.root, host_session_id="host-bbbb-2222")
+        assert resolution.how == "origin"
+        assert resolution.session is not None and resolution.session.id == peer.id
+
+    def test_resume_is_recorded_as_a_standstill_row(self, m):
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        entry = after.history[-1]
+        assert entry["from"] == entry["to"] == after.state
+        assert entry["resumed"] is True
+        assert entry["host"] == "host-bbbb-2222"
+        assert entry["previous_host"] == "host-aaaa-1111"
+
+    def test_resume_absorbs_the_dormant_interval(self, m):
+        """Without this row, the days between two host sessions land on the
+        next real transition and read as 'this state took three days'."""
+        times = iter([10.0, 100_000.0, 100_001.0, 100_002.0])
+        domain = SessionDomain(m, clock=lambda: next(times))
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        domain.end_host_session("host-aaaa-1111")
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222")
+        assert after.history[-1]["elapsed"] == pytest.approx(99_990.0)
+        assert after.heartbeat == 100_000.0
+
+    def test_resume_moves_plan_touched(self, m):
+        domain = SessionDomain(m, clock=lambda: 777.0)
+        _, session = self.ended(m, domain=SessionDomain(m, clock=lambda: 1.0))
+        assert domain.resume(session.id, host_session_id="host-b").plan_touched == 777.0
+
+    def test_resume_without_a_host_leaves_the_spent_binding_alone(self, m, monkeypatch):
+        """Nothing to bind to. Clearing `host_ended` with a stale id would let
+        `by_host_session` hand the session back to the host that ended."""
+        monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
+        domain, session = self.ended(m)
+        after = domain.resume(session.id)
+        assert after.resumed_count == 1
+        assert after.host_ended is True
+        assert domain.by_host_session("host-aaaa-1111") is None
+
+    # -- what resume refuses --------------------------------------------
+
+    def test_a_torn_down_session_cannot_be_resumed(self, m):
+        domain, session = self.ended(m)
+        session.state = "torn_down"
+        domain._save(session)
+        with pytest.raises(UsageError, match="nothing to resume"):
+            domain.resume(session.id, host_session_id="host-b")
+
+    def test_a_merged_session_is_refused_without_force(self, m):
+        domain, session = self.ended(m)
+        session.state = "merged"
+        domain._save(session)
+        with pytest.raises(UsageError, match="push_barrier|already landed"):
+            domain.resume(session.id, host_session_id="host-b")
+
+    def test_a_merged_session_can_be_resumed_deliberately(self, m):
+        domain, session = self.ended(m)
+        session.state = "merged"
+        domain._save(session)
+        assert domain.resume(session.id, host_session_id="host-b", force=True)
+
+    def test_a_stranded_session_names_its_worktree_and_its_branch(self, m):
+        import shutil
+
+        domain, session = self.ended(m)
+        domain.isolate(session.id, execute=True)
+        worktree = domain.get(session.id).worktree
+        shutil.rmtree(worktree)
+        with pytest.raises(UsageError) as exc:
+            domain.resume(session.id, host_session_id="host-b")
+        assert worktree in str(exc.value)
+        assert "session reap" in str(exc.value)
+
+    def test_a_live_binding_elsewhere_is_refused(self, m):
+        """ADR-001 D19 forbids the hand-over; resume is not a back door to it."""
+        domain = SessionDomain(m)
+        session = domain.start("live", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="LIVE host session"):
+            domain.resume(session.id, host_session_id="host-bbbb-2222")
+
+    def test_a_live_binding_can_be_taken_over_deliberately(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("live", host_session_id="host-aaaa-1111")
+        after = domain.resume(session.id, host_session_id="host-bbbb-2222", force=True)
+        assert after.host_session_id == "host-bbbb-2222"
+
+    def test_resuming_the_same_host_is_not_a_hand_over(self, m):
+        domain, session = self.ended(m)
+        after = domain.resume(session.id, host_session_id="host-aaaa-1111")
+        assert after.hosts == []
+        assert after.host_ended is False
+
+    def test_a_host_that_already_owns_a_live_session_is_refused(self, m):
+        domain, session = self.ended(m)
+        domain.start("other", host_session_id="host-bbbb-2222")
+        with pytest.raises(UsageError, match="already owns session"):
+            domain.resume(session.id, host_session_id="host-bbbb-2222")
+
+    # -- the seam adopt_host_session gives up ---------------------------
+
+    def test_adopting_may_replace_a_SPENT_binding(self, m):
+        """Nobody is on the other end to have a pipeline taken away from them."""
+        domain, session = self.ended(m)
+        after = domain.adopt_host_session(session.id, "host-bbbb-2222")
+        assert after.host_session_id == "host-bbbb-2222"
+        assert after.host_ended is False
+        assert after.hosts == ["host-aaaa-1111"]
+
+    def test_adopting_still_refuses_a_LIVE_binding(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError, match="LIVE host session"):
+            domain.adopt_host_session(session.id, "host-bbbb-2222")
+
+    def test_the_refusal_names_resume_as_the_route_for_the_spent_case(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        with pytest.raises(UsageError) as exc:
+            domain.adopt_host_session(session.id, "host-bbbb-2222")
+        assert "session resume" in str(exc.value)
+
+    def test_a_legacy_record_acquires_its_own_history_on_the_first_rebind(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("work", host_session_id="host-aaaa-1111")
+        assert session.hosts == []
+        after = domain.adopt_host_session(session.id, "host-bbbb-2222", force=True)
+        assert after.hosts == ["host-aaaa-1111"]
+
+    # -- start refuses to fork a plan -----------------------------------
+
+    def test_start_refuses_to_fork_a_resumable_plan(self, m):
+        domain, session = self.ended(m, name="add-widget")
+        domain.plan_add(session.id, "read the docs")
+        domain.plan_add(session.id, "write the tests")
+        domain.plan_done(session.id, 1)
+        with pytest.raises(UsageError) as exc:
+            domain.start("add-widget", host_session_id="host-bbbb-2222")
+        text = str(exc.value)
+        assert domain.get(session.id).name in text
+        assert "1 of 2 done" in text
+        assert "invariant session resume" in text
+        assert "--force" in text
+
+    def test_a_genuinely_separate_session_is_still_startable(self, m):
+        domain, _ = self.ended(m, name="add-widget")
+        second = domain.start(
+            "add-widget", host_session_id="host-bbbb-2222", force=True
+        )
+        assert second.name.startswith("add-widget-")
+
+    def test_a_different_task_name_is_not_the_same_plan(self, m):
+        domain, _ = self.ended(m, name="add-widget")
+        assert domain.start("remove-widget", host_session_id="host-bbbb-2222")
+
+    def test_a_live_session_elsewhere_does_not_block_a_new_name(self, m):
+        """The refusal is about a plan waiting to be picked up, not about a
+        name that happens to be in use by a session nobody has put down."""
+        domain = SessionDomain(m)
+        domain.start("add-widget", host_session_id="host-aaaa-1111")
+        assert domain.start("add-widget", host_session_id="host-bbbb-2222")
+
+
+class TestARecordSurvivesAnOlderBuild:
+    """BUG_061 on the two records the state root holds per session."""
+
+    def test_a_pipeline_field_an_older_build_lacks_is_written_back(self, m):
+        """`Pipeline` carries the identical idiom on the identical store. No
+        field of it was at risk when the defect was found, only because none
+        had been added alongside the session's four — a fact about the calendar
+        rather than about the code."""
+        domain = PipelineDomain(m)
+        SessionDomain(m).start("work")
+        pipeline = domain.start("work")
+        raw = pipeline.to_dict()
+        raw["a_field_from_the_future"] = {"kept": True}
+
+        rewritten = OlderPipeline.from_dict(raw).to_dict()
+
+        assert rewritten["a_field_from_the_future"] == {"kept": True}
+        assert rewritten["session_id"] == pipeline.session_id
+        assert rewritten["methodology"] == pipeline.methodology
+
+    def test_a_preserved_key_does_not_reach_the_registry_projection(self, m):
+        """The registry is a projection of four attributes, rebuilt on every
+        write rather than round-tripped, so preservation has nothing to say to
+        it. Asserted rather than assumed: the projection is the one place a
+        session's document is read for something other than itself."""
+        domain = SessionDomain(m)
+        session = domain.start("work")
+        session._extra = {"a_field_from_the_future": 1}
+        domain._save(session)
+        domain._register(session)
+
+        entry = domain.store.read("registry.json")["sessions"][session.id]
+        assert set(entry) == {"name", "state", "worktree", "branch"}
+        assert domain.get(session.id)._extra == {"a_field_from_the_future": 1}
+
+    def test_the_document_a_new_build_writes_is_unchanged_by_the_contract(self, m):
+        """No migration in either direction: a record with nothing unknown on
+        it serialises exactly as it did before the container existed."""
+        session = SessionDomain(m).start("work")
+        written = session.to_dict()
+        assert UNKNOWN_KEYS not in written
+        assert Session.from_dict(written).to_dict() == written
+
+
+class TestTheBaseIsTheCheckedOutBranch:
+    """`start` used to default the base to a literal `master`.
+
+    On a repository whose default branch is `main` nothing noticed until
+    `isolate --execute`, which failed with git's `invalid reference: master`
+    — a wrong base is discovered at the one step that cannot proceed without
+    it. The base is now the branch the main checkout has checked out, and a
+    checkout that cannot name one refuses rather than guessing.
+    """
+
+    def test_the_base_is_the_branch_the_checkout_is_on(self, m):
+        subprocess.run(["git", "branch", "-m", "master", "main"], cwd=m.root, check=True)
+        session = SessionDomain(m).start("add-widget")
+        assert session.base == "main"
+        # The acceptance case: no flags, a worktree.
+        plan = SessionDomain(m).isolate(session.id, execute=True)
+        assert plan["base"] == "main"
+        assert Path(plan["worktree"]).is_dir()
+
+    def test_an_explicit_base_wins(self, m):
+        subprocess.run(["git", "branch", "release"], cwd=m.root, check=True)
+        session = SessionDomain(m).start("add-widget", base="release")
+        assert session.base == "release"
+
+    def test_a_detached_head_refuses_and_names_the_flag(self, m):
+        from invariant.hosts.claude_code import _STARTED_ID
+
+        subprocess.run(["git", "switch", "-q", "--detach"], cwd=m.root, check=True)
+        domain = SessionDomain(m)
+        with pytest.raises(UsageError, match="--base") as info:
+            domain.start("add-widget")
+        # A refusal must not carry the sequence the host binds a session on
+        # (BUG_060 is the same property, asked of two older refusals).
+        assert _STARTED_ID.search(str(info.value)) is None
+        assert domain.list() == []
+
+    def test_git_reports_a_detached_head_as_no_branch(self, m):
+        """`rev-parse --abbrev-ref HEAD` prints the literal `HEAD` when
+        detached; the helper answers ``None``, as every unanswerable question
+        in `core/git` does, instead of handing a caller a branch named HEAD."""
+        from invariant.core import git
+
+        assert git.current_branch(m.root) == "master"
+        subprocess.run(["git", "switch", "-q", "--detach"], cwd=m.root, check=True)
+        assert git.current_branch(m.root) is None
+
+
+class TestBUG066AStrictExpectedFailureIsARedRun:
+    """BUG_066 — the red-phase recorder reads a strict expected failure as red.
+
+    A bug-reproducer commits its proof wrapped in a strict expected-failure
+    marker, and pytest reports that test failing as ``1 xfailed`` with exit
+    zero. Recorded on exit status alone it read as a pass, so the proof of red
+    was unsatisfiable until the fixer removed the wrapper. In the machine's
+    own red phase, and only there, a run whose only outcome is expected
+    failures the adapter can confirm are strict is recorded as failing, with
+    those failures counted. Every other phase records the exit status as it
+    always did: a strict expected failure in a green run is the tripwire
+    holding, not a failure.
+    """
+
+    STRICT = (
+        "import pytest\n\n"
+        "@pytest.mark.xfail(strict=True, reason='live')\n"
+        "def test_symptom():\n    assert 0\n"
+    )
+    LOOSE = (
+        "import pytest\n\n"
+        "@pytest.mark.xfail(reason='live')\n"
+        "def test_symptom():\n    assert 0\n"
+    )
+
+    def project(self, tmp_path, output="1 xfailed in 0.01s", code=0, body=STRICT):
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                # The output is pytest's; the runner is a stand-in so the
+                # test does not depend on a nested interpreter.
+                "commands": {
+                    "test": f"echo '{output}'; exit {code}",
+                    "test_one": f"echo '{output}' {{selector}}; exit {code}",
+                },
+            },
+        )
+        (m.root / "test_symptom.py").write_text(body, encoding="utf-8")
+        session = SessionDomain(m).start("x")
+        return m, session
+
+    def run(self, m, session, methodology, phase, selectors=("test_symptom.py",)):
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id, methodology=methodology)
+        return pipelines.run_tests(
+            session.id, phase=phase, selectors=list(selectors), cwd=m.root
+        )
+
+    @pytest.mark.parametrize(
+        "methodology,phase", [("bugfix", "reproducing"), ("tdd", "red")]
+    )
+    def test_in_the_red_phase_it_is_a_counted_failure(
+        self, tmp_path, methodology, phase
+    ):
+        m, session = self.project(tmp_path)
+        record = self.run(m, session, methodology, phase)
+        assert record["passed"] is False
+        assert record["failed"] == 1 and record["expected_failures"] == 1
+        assert record["read_as_red"] is True
+        # The exit status is a fact and stays recorded as one.
+        assert record["exit_code"] == 0
+        assert "strict expected failure" in record["note"]
+        assert "read as red" in describe_run(record)
+
+    def test_outside_the_red_phase_it_is_the_exit_status(self, tmp_path):
+        """The GREEN half: a strict expected failure still failing is the
+        tripwire holding, and must not block `test.all_pass`."""
+        m, session = self.project(tmp_path)
+        record = self.run(m, session, "tdd", "green")
+        assert record["passed"] is True and record["failed"] is None
+        assert record["expected_failures"] == 1 and record["read_as_red"] is False
+
+    def test_a_loose_expected_failure_is_not_proof(self, tmp_path):
+        m, session = self.project(tmp_path, body=self.LOOSE)
+        record = self.run(m, session, "bugfix", "reproducing")
+        assert record["passed"] is True and record["read_as_red"] is False
+        assert "not confirm" in record["note"]
+
+    def test_a_whole_suite_run_cannot_say_which_test_it_was(self, tmp_path):
+        m, session = self.project(tmp_path)
+        record = self.run(m, session, "bugfix", "reproducing", selectors=())
+        assert record["passed"] is True and record["read_as_red"] is False
+
+    def test_a_run_that_already_failed_is_left_as_it_failed(self, tmp_path):
+        m, session = self.project(tmp_path, output="1 failed, 1 xfailed", code=1)
+        record = self.run(m, session, "bugfix", "reproducing")
+        assert record["passed"] is False and record["failed"] == 1
+        assert record["read_as_red"] is False
+
+    def test_a_clean_run_with_no_expected_failure_is_a_pass(self, tmp_path):
+        m, session = self.project(tmp_path, output="1 passed")
+        record = self.run(m, session, "bugfix", "reproducing")
+        assert record["passed"] is True and record["read_as_red"] is False
+        assert record["note"] == ""
+
+    def test_the_gate_reads_the_recorded_red(self, tmp_path):
+        """End to end: the recorded run satisfies `test.new_test_fails`, so
+        both the reproducer's `reproducing -> reproduced` and a later fixer's
+        `reproducing -> fixing` can be taken with the wrapper still on."""
+        m, session = self.project(tmp_path)
+        self.run(m, session, "bugfix", "reproducing")
+        pipelines = PipelineDomain(m)
+        for target in ("reproduced", "fixing"):
+            verdicts = pipelines.evaluate_gates(session.id, target=target, cwd=m.root)
+            assert any(
+                v.rule_id == "test.new_test_fails" and v.verdict.ok for v in verdicts
+            ), target
+
+
+    def test_an_unloadable_machine_reads_nothing_into_the_run(self, tmp_path):
+        """Which phase is red is the machine's answer; with no machine there is
+        no red phase, and the run is recorded as it exited."""
+        from invariant.adapters import get_adapter
+        from invariant.adapters.base import TestResult
+
+        m, session = self.project(tmp_path)
+        pipelines = PipelineDomain(m)
+        pipeline = pipelines.start(session.id, methodology="bugfix")
+        pipeline.methodology = "no-such-machine"
+        result = TestResult(passed=True, exit_code=0, expected_failures=1)
+        read, as_red = pipelines._read_red_phase_run(
+            pipeline, "reproducing", get_adapter("python"), result,
+            ["test_symptom.py"], m.root,
+        )
+        assert read is result and as_red is False
+
+
+class TestBUG066AReproOnlyPipelineLands:
+    """BUG_066 — `reproduced` is a terminal the review boundary accepts.
+
+    The reproducer's session ends there with its proof merged and the fix left
+    to a later session; that later session starts its own pipeline and
+    records red against the proof now on the base branch.
+    """
+
+    def test_reproducing_to_reproduced_then_complete(self, tmp_path):
+        m = git_project(
+            tmp_path / "proj",
+            {
+                "version": 1,
+                "project": {"name": "demo", "ecosystems": ["python"]},
+                "commands": {"test_one": "echo '1 failed' {selector}; exit 1"},
+            },
+        )
+        sessions = SessionDomain(m)
+        session = sessions.start("x")
+        # The proof the session lands: declared, so privacy.clean has a
+        # changed set to screen.
+        (m.root / "t.py").write_text("def test_t():\n    assert 0\n", encoding="utf-8")
+        session = sessions.add_files(session.id, ["t.py"])
+        pipelines = PipelineDomain(m)
+        pipelines.start(session.id, methodology="bugfix")
+        pipelines.advance(session.id, "reproducing", force=True, reason="test")
+        pipelines.run_tests(
+            session.id, phase="reproducing", selectors=["t.py"], cwd=m.root
+        )
+        verdicts = pipelines.evaluate_gates(
+            session.id, target="reproduced", session=session.to_dict(), cwd=m.root
+        )
+        assert not [v for v in verdicts if v.blocks], [
+            (v.rule_id, v.verdict.message) for v in verdicts if v.blocks
+        ]
+        pipeline, _ = pipelines.advance(
+            session.id, "reproduced", session=session.to_dict(), cwd=m.root
+        )
+        assert pipeline.state == "reproduced"
+        assert pipeline.state in pipelines.machine_for(pipeline).terminal
+
+        # The fixer's session: a fresh pipeline is permitted once the last
+        # one is terminal, and its own red phase records from scratch.
+        fresh = pipelines.start(session.id, methodology="bugfix")
+        assert fresh.state == "triaging"
+
+
+class TestBUG062TheFirstEditAdvancesAnIsolatedSession:
+    """``isolated --> working: first edit`` is an edge something fires.
+
+    The state model drew it from the start and nothing implemented it, so every
+    session sat in ``isolated`` through all of its commits and ``session
+    review`` refused it until somebody named the edge by hand. The decision
+    (2026-10-20) was to implement the trigger rather than correct the diagram:
+    the domain owns the transition, and a host only reports that an edit
+    landed. These pin the edge AND its narrowness — the path must not advance a
+    session that is anywhere but ``isolated``, must not advance on an edit that
+    landed outside the session's own worktree, and must not raise.
+    """
+
+    HOST = "host-bug-062-domain"
+
+    def isolated(self, m, name="first-edit"):
+        domain = SessionDomain(m)
+        session = domain.start(name)
+        domain.isolate(session.id, execute=True)
+        return domain, domain.get(session.id)
+
+    def test_an_edit_in_its_own_worktree_moves_an_isolated_session_to_working(self, m):
+        domain, session = self.isolated(m)
+        target = Path(session.worktree) / "src" / "thing.py"
+
+        advanced = domain.advance_on_edit(target, cwd=m.root)
+
+        assert advanced is not None and advanced.id == session.id
+        record = domain.get(session.id)
+        assert record.state == "working"
+        row = record.history[-1]
+        assert (row["from"], row["to"]) == ("isolated", "working")
+        assert row["reason"] == "first edit: src/thing.py"
+        assert record.overrides == [], "the edge is legal; nothing was forced"
+
+    def test_the_host_route_advances_the_session_the_host_owns(self, m):
+        domain, session = self.isolated(m)
+        domain.adopt_host_session(session.id, self.HOST)
+        target = Path(session.worktree) / "f.py"
+
+        domain.advance_on_edit(target, cwd=m.root, host_session_id=self.HOST)
+
+        assert domain.get(session.id).state == "working"
+
+    def test_a_relative_target_is_read_against_the_callers_directory(self, m):
+        domain, session = self.isolated(m)
+
+        domain.advance_on_edit(Path("src/thing.py"), cwd=Path(session.worktree))
+
+        assert domain.get(session.id).state == "working"
+
+    def test_the_second_edit_writes_nothing(self, m):
+        """`working --> working` is the COMMIT loop, not an edit counter.
+
+        A row per edit would bury the history the per-state telemetry reads,
+        and stamp the heartbeat that anchors the next transition's `elapsed`.
+        """
+        domain, session = self.isolated(m)
+        target = Path(session.worktree) / "f.py"
+        domain.advance_on_edit(target, cwd=m.root)
+        before = domain.get(session.id).to_dict()
+
+        assert domain.advance_on_edit(target, cwd=m.root) is None
+        assert domain.get(session.id).to_dict() == before
+
+    @pytest.mark.parametrize("state", ["working", "reviewed", "merged", "pushed"])
+    def test_a_session_not_in_isolated_is_never_moved(self, m, state):
+        """In particular an edit after review does not quietly retreat it."""
+        domain, session = self.isolated(m)
+        session.state = state
+        domain._save(session)
+
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == state
+
+    def test_a_registered_session_is_not_moved_by_an_edit_in_the_checkout(self, m):
+        domain = SessionDomain(m)
+        session = domain.start("never-isolated")
+
+        assert domain.advance_on_edit(m.root / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "registered"
+
+    def test_an_edit_in_the_main_checkout_does_not_advance(self, m):
+        """The origin route names the only session left standing — a guess."""
+        domain, session = self.isolated(m)
+
+        assert domain.advance_on_edit(m.root / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_an_edit_into_a_peers_worktree_advances_neither(self, m):
+        """The writer is not the owner, so the edit is nobody's first edit.
+
+        The writer did not edit its own worktree; the owner did not edit at
+        all. Advancing either would record work that did not happen there.
+        """
+        domain, writer = self.isolated(m, "writer")
+        _, owner = self.isolated(m, "owner")
+        domain.adopt_host_session(writer.id, self.HOST)
+        target = Path(owner.worktree) / "f.py"
+
+        assert domain.advance_on_edit(target, cwd=m.root, host_session_id=self.HOST) is None
+        assert domain.get(writer.id).state == "isolated"
+        assert domain.get(owner.id).state == "isolated"
+
+    def test_an_unknown_explicit_session_is_not_an_error(self, m, monkeypatch):
+        domain, session = self.isolated(m)
+        monkeypatch.setenv("INVARIANT_SESSION_ID", "nosuchid")
+
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    @pytest.mark.parametrize(
+        "relative", [".claude/notes.md", "MEMORY.md", "docs/backlog/BUG_001.md"]
+    )
+    def test_an_exempt_path_inside_the_worktree_does_not_advance(self, m, relative):
+        """Data every session touches is not work on the branch.
+
+        `session.exempt_paths` and the work-item store are exempt from
+        isolation for exactly that reason, so writing one is not the session
+        starting its work.
+        """
+        domain, session = self.isolated(m)
+
+        target = Path(session.worktree) / relative
+        assert domain.advance_on_edit(target, cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_blocking_gate_on_the_edge_leaves_the_session_where_it_was(
+        self, m, monkeypatch
+    ):
+        """Never forced. A project whose machine gates the edge keeps it."""
+        domain, session = self.isolated(m)
+
+        def refuse(*args, **kwargs):
+            raise GateFailure("1 gate(s) block 'isolated' -> 'working'")
+
+        monkeypatch.setattr(domain, "_advance", refuse)
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_machine_without_the_edge_is_not_an_error(self, m, monkeypatch):
+        domain, session = self.isolated(m)
+
+        def no_edge(machine, source, target):
+            raise TransitionError(f"{source!r} -> {target!r} is not an edge")
+
+        # The machine is a frozen dataclass, so the edge goes on its type;
+        # monkeypatch puts it back.
+        monkeypatch.setattr(type(domain.machine), "require_edge", no_edge)
+        assert domain.advance_on_edit(Path(session.worktree) / "f.py", cwd=m.root) is None
+        assert domain.get(session.id).state == "isolated"
+
+    def test_a_session_already_sitting_in_isolated_with_commits_needs_no_migration(
+        self, m
+    ):
+        """Existing records advance on their next edit, and not before."""
+        domain, session = self.isolated(m)
+        worktree = Path(session.worktree)
+        (worktree / "done.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "work"], cwd=worktree, check=True)
+        assert domain.get(session.id).state == "isolated"
+
+        domain.advance_on_edit(worktree / "more.py", cwd=m.root)
+
+        assert domain.get(session.id).state == "working"

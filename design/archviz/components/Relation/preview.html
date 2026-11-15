@@ -1,0 +1,23 @@
+<!-- @dsCard group="Relations" height=560 subtitle="Line, colour and arrowhead per relation type" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Relation — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var rows = ["part_of","deployed_on","runs_on","connects","uses","flows_to","provides","requires","realizes","inherits","composes","aggregates","associates","next","satisfies","decides","msg.sync","msg.async","msg.return"];
+var notes = {part_of:"containment (nests in most views)", deployed_on:"software placed on platform / node", runs_on:"platform on hardware / node", connects:"physical link to bus or network", uses:"dependency, C4 uses", flows_to:"data flow, producer → consumer", provides:"offers an interface (lollipop)", requires:"needs an interface (socket)", realizes:"implements an interface class", inherits:"specialises a base class", composes:"whole owns part (lifetime)", aggregates:"whole references part", associates:"plain association", next:"state / step successor", satisfies:"element → requirement", decides:"decision → element", "msg.sync":"synchronous call", "msg.async":"asynchronous message", "msg.return":"return / reply"};
+var s = "";
+rows.forEach(function (r, i) {
+  var y = 18 + i * 28;
+  s += '<text class="av-meta" x="10" y="' + (y + 4) + '" style="fill:var(--ink);font-weight:500">' + r + "</text>";
+  s += A.relation({link: r, points: [[150, y], [300, y]]});
+  s += '<text class="av-cap" x="330" y="' + (y + 4) + '">' + notes[r] + "</text>";
+});
+document.getElementById("root").innerHTML = A.svg(640, 540, s, "Relation notation");
+
+</script>
+</body>
+</html>

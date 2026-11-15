@@ -1,0 +1,145 @@
+# The questionnaire `init` and `invariant configure` ask (ADR-017 D1).
+#
+# Sections of questions, each over one manifest key. A plain question's id is
+# the dotted key it writes. A `step` is asked by code the engine ships
+# (`commands`, `docs`, `store`), because its questions depend on each other's
+# answers and on the tree; it is data here only in where and when it is
+# asked. `core` is always asked, in order; `advanced` is asked behind one
+# question, "configure advanced settings?", default no.
+#
+# `core/questionnaire` loads and checks this file: an unknown kind, a key the
+# manifest does not have, `choices` on a kind that takes none and a section
+# listed twice are refused naming the entry.
+version: 1
+
+core: [ecosystems, profile, lane, coverage, docs]
+advanced: [agents, guidelines, records, privacy, session]
+
+sections:
+  ecosystems:
+    title: Ecosystems and commands
+    questions:
+      - id: project.ecosystems
+        kind: list
+        prompt: Which ecosystems does this project use?
+        choices_from: ecosystems
+      - id: commands
+        kind: step
+        prompt: The commands each ecosystem runs. Change any?
+
+  profile:
+    title: Enforcement profile
+    questions:
+      - id: enforcement.profile
+        kind: choice
+        prompt: Which enforcement profile?
+        choices_from: profiles
+
+  lane:
+    title: Lane
+    questions:
+      - id: methodology.pipeline
+        kind: choice
+        prompt: Which lane does a change run through by default?
+        choices_from: pipeline_machines
+
+  coverage:
+    title: Coverage floor
+    questions:
+      - id: methodology.gates.coverage_min
+        kind: percent
+        prompt: The coverage floor every touched source file is held to, in percent
+
+  docs:
+    title: Architecture docs
+    questions:
+      - id: docs
+        kind: step
+        prompt: Where the architecture docs live, and how their gaps are closed
+
+  agents:
+    title: Agents
+    questions:
+      - id: agents.library
+        kind: list
+        prompt: Which library agents are installed?
+        choices_from: library_agents
+      - id: agents.tiers
+        kind: text
+        prompt: "Tier overrides, agent: tier, as a flow mapping"
+
+  guidelines:
+    title: Guidelines
+    questions:
+      - id: guidelines.ruleset
+        kind: path
+        prompt: The guidelines ruleset, or none
+      - id: guidelines.checklist
+        kind: path
+        prompt: Where the rendered checklist goes, or none for beside the ruleset
+
+  records:
+    title: Records and store
+    questions:
+      - id: records.docs
+        kind: choice
+        prompt: Where the architecture docs live
+        choices_from: record_locations
+      - id: records.backlog
+        kind: choice
+        prompt: Where the backlog lives
+        choices_from: record_locations
+      - id: records.guidelines
+        kind: choice
+        prompt: Where the guidelines live
+        choices_from: record_locations
+      - id: records.memory
+        kind: choice
+        prompt: Where the memory lives
+        choices_from: record_locations
+      - id: records.reports
+        kind: choice
+        prompt: Where the reports live
+        choices_from: record_locations
+      - id: records.sweeps
+        kind: choice
+        prompt: Where the sweep records live
+        choices_from: record_locations
+      - id: records.hooks
+        kind: choice
+        prompt: Where the host hooks are wired
+        choices_from: record_locations
+      - id: records.agents
+        kind: choice
+        prompt: Where the agents are installed
+        choices_from: record_locations
+      - id: store
+        kind: step
+        prompt: The store the records under store live in
+
+  privacy:
+    title: Privacy
+    questions:
+      - id: privacy.scope
+        kind: list
+        prompt: What the privacy gate screens
+      - id: privacy.patterns
+        kind: list
+        prompt: Which patterns it flags
+        choices_from: privacy_patterns
+
+  session:
+    title: Sessions
+    questions:
+      - id: session.push
+        kind: bool
+        prompt: Is publishing to a remote part of a session's lifecycle?
+      - id: session.worktree_dir
+        kind: path
+        prompt: Where session worktrees are created, or none for beside the repository
+      - id: session.worktree_prefix
+        kind: text
+        prompt: A prefix for session worktree names, or none
+      - id: session.plan_stale_days
+        kind: count
+        prompt: Days an open plan may sit unmoved before its branch counts as stranded

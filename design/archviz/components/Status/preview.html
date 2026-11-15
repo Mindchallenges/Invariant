@@ -1,0 +1,22 @@
+<!-- @dsCard group="States" height=150 subtitle="Status changes border and opacity, never the role colour of healthy elements" -->
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Status — preview</title></head>
+<body>
+<div id="root" class="av-sheet"></div>
+<script>
+var A = window.Archviz;
+
+var st = [["", "approved"], ["proposed", "proposed"], ["risk", "risk"], ["deprecated", "deprecated"], ["ghost", "neighbour (ghost)"], ["selected", "selected"]];
+var s = "";
+st.forEach(function (v, i) {
+  var o = {type: "comp", label: "Compressor", tech: "zstd", x: 10 + i * 140, y: 10, w: 124};
+  if (v[0] === "ghost") o.ghost = true; else if (v[0] === "selected") o.selected = true; else if (v[0]) o.status = v[0];
+  s += A.node(o);
+  s += '<text class="av-cap" x="' + (72 + i * 140) + '" y="78" text-anchor="middle">' + v[1] + "</text>";
+});
+document.getElementById("root").innerHTML = A.svg(860, 90, s, "Status overlay");
+
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+id: idea
+kind: item
+description: A proposed piece of work, scored and tiered.
+initial: proposed
+terminal: [done, dropped]
+states:
+  proposed:
+    next: [accepted, dropped]
+  accepted:
+    next: [in_progress, dropped]
+  in_progress:
+    next: [done, accepted]
+  done:
+    # Entry, not exit. `done` is terminal: nothing ever leaves it, so an exit
+    # gate here is never evaluated and an idea could close owing three
+    # unresolved legs with the gate named to prevent that staying silent. The
+    # bug machine guards `closed` on entry for the same reason.
+    entry_gates: [item.residue_matches_status]
+  dropped: {}

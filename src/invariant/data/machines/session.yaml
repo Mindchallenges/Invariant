@@ -1,0 +1,74 @@
+id: session
+kind: session
+description: >
+  A unit of agent work with an identity and an isolated worktree. The edges are
+  ordered the way they are so that nothing irreversible happens before
+  something reviewable has.
+
+  A session ends at the merge: the worktree and its branch are removed and the
+  work lives on the base branch. Publishing that branch is a separate decision
+  with a separate cost, so `pushed` is a detour rather than a step, reachable
+  only where `session.push` is enabled.
+
+initial: registered
+terminal: [torn_down, abandoned]
+
+states:
+  registered:
+    description: The session exists and is named, but owns no worktree yet.
+    next: [isolated, abandoned]
+  isolated:
+    description: >
+      A worktree and branch exist and belong to this session, and nothing has
+      been edited in it yet. Left automatically: the first edit tool call that
+      completes inside this session's own worktree, on a path not exempt from
+      isolation, advances the session to `working` (SessionDomain.advance_on_edit,
+      from the PostToolUse hook). A shell write does not; `session transition
+      working` is the route for a session that edits only through the shell.
+    entry_gates: [session.named_after_isolating]
+    next: [working, abandoned]
+  working:
+    description: >
+      Edits and local commits. Commits are cheap; keep them granular. Entered
+      by the session's first edit (see `isolated`); further edits and commits
+      write nothing to the record — `working -> working` is walked only by an
+      explicit transition.
+    next: [working, reviewed, abandoned]
+  reviewed:
+    description: The review gates have passed against the declared file set.
+    # The methodology must have run to its end. Every gate a pipeline owns is
+    # an EXIT gate on one of its states, so a session that never advanced its
+    # pipeline skipped all of them rather than passing them — which is exactly
+    # how work reached `torn_down` with the pipeline still in `designing`.
+    #
+    # `session.deliverables_complete` is the same shape one question over: not
+    # "did the methodology run" but "did the session finish what it said it was
+    # for". Both are ENTRY gates so the `reviewed -> working` retreat stays
+    # walkable — a session that discovers more deliverables are owed must be
+    # able to go back and do them without first satisfying the gate that says
+    # they are all done (BUG_037).
+    entry_gates: [pipeline.complete, session.deliverables_complete]
+    exit_gates: [privacy.clean]
+    next: [merged, working, abandoned]
+  merged:
+    description: Rebased and fast-forward merged into the base branch.
+    # Repeated here deliberately, both of them. `reviewed` can be re-entered
+    # from `working`, and the merge is the irreversible step; a gate that only
+    # guards the reviewable step guards nothing once the work moves on from it.
+    entry_gates:
+      [session.ff_merge_target, pipeline.complete, session.deliverables_complete]
+    next: [torn_down, pushed, abandoned]
+  pushed:
+    description: >
+      The single push has happened. Only reachable where session.push is on;
+      the gate, not the graph, is what holds that, so turning it on needs no
+      change to the machine.
+    entry_gates: [session.push_enabled, session.push_barrier]
+    next: [torn_down]
+  torn_down:
+    description: Worktree and branch removed, session deregistered.
+  abandoned:
+    description: Ended without merging. The record is kept as evidence.
+    # Reaching it is ungated: the exit gates of the state being left exist to
+    # protect the merge, and this is the edge that does not reach it (BUG_037).
+    roles: [abandon]

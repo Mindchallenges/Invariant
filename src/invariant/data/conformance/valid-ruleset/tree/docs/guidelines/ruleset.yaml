@@ -1,0 +1,73 @@
+version: 1
+sections:
+  - id: style
+    title: Style
+  - id: layers
+    title: Layers
+  - id: tests
+    title: Testing
+rules:
+  - id: tests.suite-green
+    section: tests
+    title: The suite is green
+    statement: Every change lands on a green run.
+    severity: blocker
+    phases: [landing]
+    applies_to: ["**"]
+    check: {kind: engine, rule: test.all_pass}
+  - id: style.no-print
+    section: style
+    title: No print calls in the application
+    statement: The application reports through its return values, never print.
+    severity: warn
+    phases: [review]
+    applies_to: ["*.py"]
+    check: {kind: pattern, engine: regex, in: code, match: '\bprint\('}
+  - id: layers.app-imports-nothing-from-docs
+    section: layers
+    title: The application imports nothing from the docs
+    statement: No module of the application reaches into docs.
+    severity: blocker
+    phases: [review, landing]
+    applies_to: ["*.py"]
+    check: {kind: boundary, engine: imports, forbid: ["docs/**"]}
+  - id: tests.app-change-runs-the-check
+    section: tests
+    title: An application change comes with a change to the check
+    statement: A change to executable application code changes check.sh too.
+    severity: warn
+    phases: [landing]
+    applies_to: ["*.py"]
+    check:
+      kind: cochange
+      form: pair
+      when: {change: executable}
+      then: {any_of: [check.sh]}
+  - id: style.duplication-registry
+    section: style
+    title: A touched file is not left in an open duplication entry
+    statement: A touched file in an open entry is resolved in the same change.
+    severity: blocker
+    phases: [review, landing]
+    applies_to: ["*.py"]
+    check:
+      kind: cochange
+      form: registry
+      registry: docs/guidelines/duplication.yaml
+      outcomes: {contained: blocker, advisory: warn}
+  - id: style.answer-is-documented
+    section: style
+    title: The answer is explained where it is computed
+    statement: Wherever the answer is computed, the reason for its value is stated.
+    severity: warn
+    phases: [review]
+    applies_to: ["*.py"]
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: no-executable-change
+          mechanical: {no_executable_change: true}
+        - id: constant-only
+          claim: The change only returns a constant.
