@@ -308,6 +308,117 @@ class TestTraceability:
         assert report.by_type["comp"] == 1 and report.unmapped == {}
 
 
+# -- BUG_128: each problem names the setting that settles it -----------------
+
+
+def hand_built():
+    """A hand-built project's needs, dang's shape: its own decision status,
+    decisions linked to requirements through ``satisfies``, and directives
+    the baseline does not declare."""
+    items = [need("COMP_CORE", "comp"), need("REQ_ONE", "req", "requirements", 3)]
+    items += [
+        need(f"DEC_{n}", "dec", "decisions", n, "agreed", satisfies=["REQ_ONE"])
+        for n in range(1, 31)
+    ]
+    items += [need("WP_ONE", "wp", "plan", 2), need("WP_TWO", "wp", "plan", 9)]
+    items += [need("INC_ONE", "inc", "plan", 12)]
+    items += [need("CORE", "comp", "x", 1)]
+    items += [need("DEC_NONE", "dec", "decisions", 99, None, implements=["COMP_CORE"])]
+    items += [need("DEC_LOOSE", "dec", "decisions", 98, "accepted")]
+    items += [need("DEC_EXT", "dec", "decisions", 97, "accepted", links=["EXT_1"])]
+    return needs_json(items, link_options=("links", "satisfies", "implements"))
+
+
+class TestSettlingSettings:
+    def problems(self, data, rules=None):
+        read = needs.parse_needs_json(data)
+        parsed = needs.parse_link_rules(needs.DEFAULT_REQUIRE_LINKS if rules is None else rules)
+        found = needs.check(read, needs.default_types(), parsed, needs.DEFAULT_DECISION_STATUSES)
+        return read, parsed, found
+
+    def advice(self, data, rules=None):
+        read, parsed, found = self.problems(data, rules)
+        return needs.advise(
+            found, read, needs.default_types(), parsed, needs.DEFAULT_DECISION_STATUSES
+        )
+
+    def test_each_problem_names_its_setting_kind_and_value(self):
+        _read, _rules, found = self.problems(hand_built())
+        by_need = {(p.need, p.kind): p for p in found}
+        assert by_need[("WP_ONE", "directive")].setting == needs.TYPES_SETTING
+        assert by_need[("WP_ONE", "directive")].value == "wp"
+        assert by_need[("CORE", "prefix")].setting == needs.TYPES_SETTING
+        assert by_need[("CORE", "prefix")].value == "comp"
+        assert by_need[("DEC_1", "status")].setting == needs.STATUSES_SETTING
+        assert by_need[("DEC_1", "status")].value == "agreed"
+        assert by_need[("DEC_NONE", "status")].value == ""
+        assert by_need[("DEC_1", "link")].setting == needs.LINKS_SETTING
+        assert by_need[("DEC_1", "link")].value == "decision -> element"
+
+    def test_counts_by_setting_follow_the_settings_order(self):
+        _read, _rules, found = self.problems(hand_built())
+        counts = needs.by_setting(found)
+        assert list(counts) == list(needs.SETTINGS)
+        assert counts[needs.TYPES_SETTING] == 4
+        assert counts[needs.STATUSES_SETTING] == 31
+        assert counts[needs.LINKS_SETTING] == 32
+
+    def test_a_sample_takes_each_kind_in_turn(self):
+        _read, _rules, found = self.problems(hand_built())
+        shown = needs.sample(found, 6)
+        assert len(shown) == 6
+        assert {p.kind for p in shown[:4]} == {"directive", "prefix", "status", "link"}
+        assert needs.sample(found, 1000) and len(needs.sample(found, 1000)) == len(found)
+        assert needs.sample([], 5) == []
+
+    def test_a_sample_puts_an_unknown_setting_last(self):
+        stray = needs.Problem("X_1", "x:1", "a message", "elsewhere", "other")
+        known = needs.Problem("WP_1", "x:2", "m", needs.TYPES_SETTING, "directive", "wp")
+        assert needs.sample([stray, known], 2) == [known, stray]
+
+    def test_advice_names_every_setting_with_what_the_needs_carry(self):
+        advice = self.advice(hand_built())
+        text = " | ".join(advice)
+        assert len(advice) == 4
+        assert "wp (2), inc (1) in docs.needs.types" in advice[0]
+        assert "comp (1)" in advice[1] and "docs.needs.types" in advice[1]
+        assert "agreed (30), no status (1)" in advice[2]
+        assert "docs.needs.decision_statuses (now proposed, accepted" in advice[2]
+        assert advice[3].startswith("32 decision need(s) link to no element need")
+        assert "requirement via satisfies (30)" in advice[3]
+        assert "another project's need via links (1)" in advice[3]
+        assert "1 link to nothing" in advice[3]
+        assert "docs.needs.require_links" in text
+
+    def test_advice_names_an_extension_target_by_its_directive(self):
+        types = (*needs.default_types(), needs.NeedType("wp", "WP_", None))
+        data = needs_json(
+            [need("WP_ONE", "wp"), need("DEC_A", "dec", "d", 1, "accepted", links=["WP_ONE"])]
+        )
+        read = needs.parse_needs_json(data)
+        rules = needs.parse_link_rules(needs.DEFAULT_REQUIRE_LINKS)
+        found = needs.check(read, types, rules, needs.DEFAULT_DECISION_STATUSES)
+        (line,) = needs.advise(found, read, types, rules, needs.DEFAULT_DECISION_STATUSES)
+        assert "directive wp via links (1)" in line
+
+    def test_advice_under_via_says_nothing_reached_through_its_options(self):
+        rules = [{"from": "decision", "to": "element", "via": ["decided_by"]}]
+        advice = self.advice(toy_needs(), rules=rules)
+        (line,) = advice
+        assert "(decision -> element via decided_by)" in line
+        assert "1 link to nothing through its options" in line
+
+    def test_a_long_tally_names_the_rest_by_count(self):
+        items = [need(f"X{n}_ONE", f"x{n}") for n in range(10)]
+        read = needs.parse_needs_json(needs_json(items))
+        found = needs.check(read, needs.default_types(), (), needs.DEFAULT_DECISION_STATUSES)
+        (line,) = needs.advise(found, read, needs.default_types(), (), ())
+        assert "and 2 more in docs.needs.types" in line
+
+    def test_no_problem_gives_no_advice(self):
+        assert self.advice(toy_needs()) == ()
+
+
 @pytest.mark.skipif(
     not os.environ.get("INVARIANT_TEST_NEEDS_JSON"),
     reason="set INVARIANT_TEST_NEEDS_JSON to a sphinx-needs 8.x needs.json (Heap's) to run",

@@ -262,6 +262,59 @@ def lane_states(manifest=None) -> dict[str, tuple[list[str], list[str]]]:
     return states
 
 
+#: The commands a gate reads a recorded run of, and the gates that read each
+#: (ADR-015 D2). Every ``test.*`` gate reads a ``commands.test`` run and the
+#: floor reads a ``commands.coverage`` run. No gate reads ``commands.build``,
+#: so it has no entry: doctor reports it and never requires it.
+GATED_COMMANDS: tuple[str, ...] = ("test", "coverage")
+
+
+def command_of_gate(gate: str) -> str | None:
+    """The command whose recorded run ``gate`` reads, or ``None``."""
+    if gate.startswith("test."):
+        return "test"
+    if gate == "coverage.meets_floor":
+        return "coverage"
+    return None
+
+
+def command_needs(manifest) -> dict[str, list[tuple[str, list[str]]]]:
+    """For each of :data:`GATED_COMMANDS`, every lane a session may select
+    whose gates read a run of it, with those gates (ADR-015 D2, ruling 5).
+
+    The lanes are ``pipeline_ids``: the shipped machines and the project's
+    ``methodology.extra_machines``, since ``pipeline start --methodology``
+    may start any of them, so a command one of them needs is required. Each
+    lane is assembled as a pipeline runs it (``load_pipeline_machine``), so a
+    gate injected by role counts as one written in the file. The configured
+    lane (``methodology.pipeline``) comes first, then the rest in id order.
+
+    A gate that cannot ask for a run requires nothing: one at level ``off``
+    is never evaluated, and ``coverage.meets_floor`` with no floor
+    (``coverage_min`` 0) answers N/A before it reads any. Whether a declared
+    adapter's coverage applies at all is the caller's to judge, since this
+    module imports no adapter.
+    """
+    configured = str(manifest.get("methodology.pipeline") or "tdd")
+    lanes = pipeline_ids(manifest)
+    ordered = [configured, *(lane for lane in lanes if lane != configured)]
+    floor = float(manifest.get("methodology.gates.coverage_min", 0) or 0)
+    needs: dict[str, list[tuple[str, list[str]]]] = {name: [] for name in GATED_COMMANDS}
+    for lane in ordered:
+        machine = load_pipeline_machine(manifest, lane)
+        by_command: dict[str, list[str]] = {}
+        for gate in sorted(machine.gate_ids()):
+            name = command_of_gate(gate)
+            if name is None or manifest.rule_level(gate) == "off":
+                continue
+            if gate == "coverage.meets_floor" and floor <= 0:
+                continue
+            by_command.setdefault(name, []).append(gate)
+        for name, gates in by_command.items():
+            needs[name].append((lane, gates))
+    return needs
+
+
 def find_machine_file(machine_id: str, manifest=None) -> Path:
     if manifest is not None:
         for candidate in manifest.get("methodology.extra_machines") or []:

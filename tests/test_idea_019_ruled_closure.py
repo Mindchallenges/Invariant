@@ -106,11 +106,14 @@ class TestTheRuledClosure:
             domain.transition(bug.id, "fixed", ruling=RULING, cwd=m.root)
         assert domain.get(bug.id).history == []
 
-    def test_evidence_without_a_ruling_is_refused_and_says_so(self, m):
+    def test_evidence_without_a_ruling_walks_no_ruled_route(self, m):
+        """A commit alone is recorded on an edge that exists (DEC_ADR_022_D1),
+        and buys no route: the refusal still names the ruling it needs."""
         domain = WorkItemDomain(m)
         bug = domain.new("bug", "A defect")
-        with pytest.raises(UsageError, match="--ruling"):
+        with pytest.raises(TransitionError, match="--ruling"):
             domain.transition(bug.id, "fixed", ruling="   ", evidence="HEAD", cwd=m.root)
+        assert domain.get(bug.id).history == []
 
     def test_evidence_that_names_no_commit_is_refused(self, m):
         domain = WorkItemDomain(m)

@@ -42,13 +42,14 @@ import yaml
 
 from ..core import agents as agent_sources
 from ..core import plan as plan_reader
+from ..core import shell
 from ..core.agents import AgentSource, OverlayError, OverlayProblem
 from ..core.errors import InvariantError, UsageError
 from ..core.git import files_under as git_files_under
 from ..core.git import main_checkout as git_main_checkout
 from ..core.guidelines import render_edit, render_turn_index
 from ..core.manifest import Manifest, project_relative
-from ..core.privacy import PrivacyScanner
+from ..core.privacy import AttributionTrailer, PrivacyScanner
 from ..core.rules import (
     AGENT_TOOLS,
     AGENTS_REPAIR,
@@ -402,6 +403,19 @@ def classify_installed(shipped: str, target: Path, *, tier_hints: bool = False) 
 #: reads is a host question, not a library constant.
 INSTRUCTION_FILES = ("CLAUDE.md",)
 
+#: The commit trailers this host asks agents to append (DEC_ADR_024_D1): the
+#: link to the host session a commit was made in. It names a session of this
+#: host's own service and no user content, so ``privacy.clean`` lets it through
+#: in a message's trailer block, under this token and in exactly this shape.
+#: The same link anywhere else, and any other link under this token, is still
+#: a finding. The ``Co-Authored-By`` trailer needs no entry: its no-reply
+#: address is excused by the scanner whoever writes it.
+ATTRIBUTION_TRAILERS = (
+    AttributionTrailer(
+        "Claude-Session", re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9]{1,64}")
+    ),
+)
+
 #: Each neutral capability as this host's tools (ADR-012 D8). ``dispatch`` is
 #: the host's own agent tool, the one :data:`AGENT_TOOLS` names today.
 CAPABILITY_TOOLS = {
@@ -481,6 +495,7 @@ class TierHint:
 
 class ClaudeCodeHost:
     INSTRUCTION_FILES = INSTRUCTION_FILES
+    ATTRIBUTION_TRAILERS = ATTRIBUTION_TRAILERS
 
     def __init__(
         self, root: Path, manifest: Manifest | None = None, *, record: bool = True
@@ -890,6 +905,91 @@ class ClaudeCodeHost:
             if agents_dir.is_dir() and not any(agents_dir.iterdir()):
                 agents_dir.rmdir()
         return sorted(changed), sorted(kept)
+
+    def local_wiring(self) -> dict[str, list[str]]:
+        """The local wiring this clone has installed, by kind, as the
+        repository-relative paths its committed form will have: ``hooks``
+        (each shim, and ``.claude/settings.json``) when ``records.hooks`` is
+        ``local`` and the receipt holds them, ``agents`` (each agent file) when
+        ``records.agents`` is. What ``store migrate --to repo`` makes
+        committed (ADR-020 D3)."""
+        receipt = self.receipt()
+        out: dict[str, list[str]] = {"hooks": [], "agents": []}
+        if receipt is None or receipt.empty:
+            return out
+        if self.hooks_location == wiring.LOCAL and (
+            any(receipt.settings.get("hooks", {}).values())
+            or any(rel.startswith(".claude/hooks/") for rel in receipt.files)
+        ):
+            out["hooks"] = sorted(
+                {".claude/settings.json",
+                 *(rel for rel in receipt.files if rel.startswith(".claude/hooks/"))}
+            )
+        if self.agents_location == wiring.LOCAL:
+            directory = f".claude/{assets.BY_NAME['agent'].directory}/"
+            out["agents"] = sorted(rel for rel in receipt.files if rel.startswith(directory))
+        return out
+
+    def commit_local(self, hooks: bool, agents: bool) -> tuple[list[str], list[str]]:
+        """Write the committed form of the main checkout's local wiring into
+        this tree, a session worktree whose manifest now wires ``repo``:
+        ``(paths to commit, edited)``.
+
+        The same install plan writes it, so it is what ``hooks install`` and
+        ``agents install`` write in an in-repo project. A file the main
+        checkout's copy has been edited in since the local install (its hash
+        no longer the receipt's) is carried as edited, because the merge
+        replaces the main checkout's ignored copy with the committed one:
+        the user's edit is committed, and named, rather than lost.
+        """
+        receipt = self.receipt()
+        paths: list[str] = []
+        if hooks:
+            self.install_hooks()
+            paths.append(".claude/settings.json")
+            paths += [f".claude/hooks/invariant-{event}.sh" for event in EVENTS]
+        if agents:
+            self.install_assets(only="agent")
+            kind = assets.BY_NAME["agent"]
+            for source in self._library(kind):
+                target = self._target_for(kind, kind.identity(source))
+                if target.is_file():
+                    paths.append(target.relative_to(self.root).as_posix())
+        edited: list[str] = []
+        if receipt is not None:
+            for rel, sha in sorted(receipt.files.items()):
+                main_copy = receipt.root / rel
+                if rel not in paths or not main_copy.is_file():
+                    continue
+                if wiring.digest(main_copy) != sha:
+                    (self.root / rel).write_bytes(main_copy.read_bytes())
+                    edited.append(rel)
+        return sorted(set(paths)), edited
+
+    def retire_local(self) -> list[str]:
+        """Take the local install's records back out once its files are
+        committed (ADR-020 D3, after ``store migrate --to repo`` lands):
+        its settings entries and granted directories in
+        ``.claude/settings.local.json``, and its ``.git/info/exclude`` lines,
+        with the receipt. The files stay: git tracks them now. Returns the
+        exclude lines removed."""
+        receipt = self.receipt()
+        if receipt is None or receipt.empty:
+            return []
+        wiring.unwire(receipt)
+        kept: set[str] = set()
+        settings = receipt.settings.get("path")
+        created = settings and receipt.settings.get("before") is None
+        if created and (receipt.root / settings).is_file():
+            kept.add("/" + settings)
+        removed = wiring.remove_exclude(receipt, keep=kept)
+        receipt.settings, receipt.files, receipt.dirs = {}, {}, []
+        if receipt.exclude:
+            receipt.exclude["lines"] = [
+                line for line in receipt.exclude.get("lines", []) if line in kept
+            ]
+        receipt.save()
+        return removed
 
     def _read_settings(self) -> dict:
         return wiring.read_settings(self.claude_dir / "settings.json", ".claude/settings.json")
@@ -2439,6 +2539,8 @@ class ClaudeCodeHost:
         which is the same wedge from the other end. Reading a peer's file
         stays a detectable crossing because that inversion applies only when
         the host names an ACTOR, which a main-loop turn never does.
+
+        Where a call stands is read by :func:`_actor_places`.
         """
         if not resolution.proven:
             return None
@@ -2449,7 +2551,13 @@ class ClaudeCodeHost:
         if not getattr(session, "worktree", None):
             return session
 
-        return ctx.sessions.by_worktree_containing(_edit_target(payload) or ctx.cwd)
+        placed = {}
+        for place in _actor_places(payload, ctx.cwd) or [None]:
+            found = ctx.sessions.by_worktree_containing(place) if place else None
+            if found is None:
+                return None
+            placed[found.id] = found
+        return next(iter(placed.values())) if len(placed) == 1 else None
 
 
 #: Said to the session that made a dispatch nothing could file. Both are the
@@ -2632,6 +2740,43 @@ def _edit_target(payload: dict) -> Path | None:
     tool_input = payload.get("tool_input") or {}
     raw = tool_input.get("file_path") or tool_input.get("notebook_path")
     return Path(str(raw)) if raw else None
+
+
+def _actor_places(payload: dict, cwd: Path) -> list[Path] | None:
+    """Where a subagent's call did its work: its proof of place for an actor row.
+
+    A call naming a destination (:func:`_edit_target`) is placed there. A
+    shell call is placed where its commands RUN, read by
+    :func:`shell.working_directories`: a leading ``cd <dir>`` or a
+    ``git -C <dir>`` moves them, and a path the command only names does not,
+    so ``echo <worktree>`` run from the shared checkout is the shared
+    checkout's. A subagent's shell starts at the host's working directory on
+    every call, so ``cd <worktree> && ...`` is the spelling a subagent working
+    only through the shell makes every call in, and the one the hook's own
+    working directory never shows (BUG_125). Any other call stands where the
+    hook does.
+
+    ``None`` or an empty list place the call nowhere: a command whose
+    directories cannot be told, or one that runs nothing. Every directory a
+    command runs in has to lie in the same session's worktree for the call
+    to be placed, which :meth:`ClaudeCodeHost._actor_session` checks.
+    """
+    target = _edit_target(payload)
+    if target is not None:
+        return [target]
+    if payload.get("tool_name") == "Bash":
+        command = (payload.get("tool_input") or {}).get("command")
+        if isinstance(command, str):
+            places = shell.working_directories(command, Path(cwd))
+            # Read after the call ran. A directory the command moved to that
+            # is not there was never entered: `cd <typo>; cmd` runs `cmd`
+            # where the shell stood. The hook's own directory is where it
+            # stood, and is not asked.
+            start = Path(cwd)
+            if places and any(p != start and not p.is_dir() for p in places):
+                return None
+            return places
+    return [Path(cwd)]
 
 
 def _spend_overrides(stopped, rule_ctx, ctx, *, surface: str):

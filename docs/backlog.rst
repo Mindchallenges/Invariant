@@ -4911,7 +4911,7 @@ is a decision need, linked by id.
    :severity: low
    :priority: medium
    :area: data/agents/compliance-reviewer
-   :residue: DECISION 2026-10-20 (user-approved): Fix directions 1-3 (state that author field / trailer presence does not discriminate\; say 'cannot establish' rather than resolve toward the user\; default commits appearing inside the run window on the session branch to the agent's own). Direction 4 (unconditional trailer) is NOT chosen — it conflicts with privacy.clean blocking the Claude-Session trailer.
+   :residue: DECISION 2026-10-20 (user-approved): Fix directions 1-3 (state that author field / trailer presence does not discriminate\; say 'cannot establish' rather than resolve toward the user\; default commits appearing inside the run window on the session branch to the agent's own). Direction 4 (unconditional trailer) is NOT chosen — it conflicts with privacy.clean blocking the Claude-Session trailer.; 2026-11-16: the privacy conflict named for direction 4 no longer stands. Since BUG_127 (DEC_ADR_024_D3) privacy.clean lets the Claude Code host's Claude-Session trailer through in a repository commit's trailer block (a store commit: BUG_133). Direction 4 stays unchosen\; whether to take it is the user's call.
    :affects: COMP_DATA_AGENTS
 
    **Symptom.** A ``compliance-reviewer`` run's final report asserted a false
@@ -11358,7 +11358,7 @@ is a decision need, linked by id.
 
 .. bug:: docs venv reports in sync over an environment missing Sphinx's dependencies when requirements.txt is not fully pinned
    :id: BUG_124
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: domains/docs (docs venv)
@@ -11380,9 +11380,23 @@ is a decision need, linked by id.
 
    **Batch:** adopted-docs-project (new) — invariant assumes its own starter's shape of a Sphinx-needs project and does not check a hand-built one against it; shared with the ``docs.needs_traceable`` vocabulary entry filed in the same run.
 
+   **Repro proof:** ``tests/test_bug_124_repro.py::test_BUG_124_ranges_only_requirements_never_read_in_sync_without_dependencies``, committed 63b9bf4 (2026-11-17), wrapped in ``xfail(strict=True)`` — ``sync_venv`` over Dang's ranges-only ``requirements.txt``, through a recording ``run`` seam that models uv (``pip sync`` installs exactly the listed packages), returns in sync while the environment holds only ``furo``, ``sphinx``, ``sphinx-needs`` and ``sphinxcontrib-mermaid``. The test asserts the file is refused (and nothing reads in sync) or the environment holds ``docutils``. Discrimination checked ad hoc: an install with dependencies passes, a refusal passes, a refusal after recording the hash fails. Real-world leg (run ad hoc in a scratch directory, not committed): the real ``sync_venv`` with real uv over the same file reported "in sync with requirements.txt" and ``sphinx-build --version`` then exited 1 with ``ModuleNotFoundError: No module named 'docutils'``.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_124_repro.py::test_BUG_124_ranges_only_requirements_never_read_in_sync_without_dependencies, committed 63b9bf4'
+        forced: false
+        evidence: 63b9bf44afb888de6b801d751971e01a5a774eaf
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: d175b232578ed5c1984cb14b5836ad2bbd72c567
+
 .. bug:: A compliance-reviewer's own calls are not recorded as its run, so agents.review_agent_ran reads none while it reviews
    :id: BUG_125
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: hosts/claude_code (actor recording), domains/pipeline
@@ -11404,13 +11418,28 @@ is a decision need, linked by id.
 
    **Batch:** unsatisfiable-gates — a gate the agent it names cannot satisfy while it does the work; same attribution mechanism as BUG_082, filed after it.
 
+   **Repro proof:** ``tests/test_bug_125_repro.py::test_BUG_125_reviewer_shell_calls_into_worktree_satisfy_review_gate``, committed 962a817 (2026-11-17), wrapped in ``xfail(strict=True)`` — a session isolated into a worktree, the parent host bound to it, a pipeline running; three PostToolUse calls carrying ``agent_type: compliance-reviewer``, each a shell call spelled ``cd <session worktree> && ...``, with the hook standing in the main checkout. ``agents.review_agent_ran`` then reads "no review agent ran in this pipeline" and ``agents_run_how`` is absent. The shape is the Dang reviewer's own: its run's transcript shows only shell calls of that spelling, no call naming a file path, and the host working directory at the main checkout throughout; the second reviewer, recorded as ``actor``, made one Read naming a file inside the worktree, and the session's ``feature-architect`` (shell calls only) is ``dispatch`` only as well. Discrimination checked ad hoc: the same test plus one reviewer Read of a worktree path passes. Not pursued, since the first candidate went red: a read by main-checkout path, and a payload without ``agent_type``.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_125_repro.py::test_BUG_125_reviewer_shell_calls_into_worktree_satisfy_review_gate, committed 962a817'
+        forced: false
+        evidence: 962a817d9ea2cc2f7d5a7a3233d9efb623bbcf93
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: 3745d06ff91049f001080a933ee6452b529ce942
+
 .. bug:: The gate receipt fast path rarely fires: the host refuses the agent's write, and an untracked file is left out of its hash
    :id: BUG_126
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: data/agents (feature-architect, compliance-reviewer gate receipt)
    :affects: COMP_DATA_AGENTS
+   :decided_by: DEC_ADR_026
 
    **Symptom:** The gate receipt that lets ``compliance-reviewer`` skip a cold rebuild is almost never usable. Two ways it fails:
 
@@ -11429,13 +11458,30 @@ is a decision need, linked by id.
 
    **Batch:** unbatched — no open batch shares the mechanism (a shipped agent recipe running into host permissions); BUG_105 shares only the untracked-file face.
 
+   **Repro proof:** ``tests/test_bug_126_repro.py``, committed 180c398 (2026-11-17), both wrapped in ``xfail(strict=True)``. The tests run the fenced bash blocks taken from the shipped ``feature-architect.md`` "Gate receipt" and ``compliance-reviewer.md`` "5a" text (only the ``SESSION_FILES=( <placeholder> )`` line filled in) in a throwaway git repository. ``test_BUG_126_receipt_stops_matching_when_an_untracked_session_file_moves``: file set = one modified tracked file + one new untracked file; the architect writes a receipt, the new file is edited, and the reviewer's check still matches (``fast path fires on a moved tree``). This confirms the unverified half of the suspected cause. ``test_BUG_126_an_all_new_change_gets_a_matching_receipt``: file set = one new untracked file; the architect prints ``NOT writing a receipt: the diff over 1 changed file(s) hashed empty``, so there is no fast path. Discrimination: the non-wrapped control ``test_BUG_126_control_the_harness_sees_a_moved_tracked_file`` passes, so an unchanged tree matches and an edit to the modified file is caught.
+
+   **Repro debt (since 2026-11-17):** half (1), the host permission system refusing the architect's write of ``.build/gate/gate-receipt.txt``, cannot be expressed in the test target because it depends on the host's runtime permission set. The live-environment leg was recorded in ``:residue:`` and is cleared as moot since the fix: no agent writes a receipt any more, and the only write is the engine's own coverage record (:need:`DEC_ADR_026_D1`).
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_126_repro.py (two strict xfails: untracked-file edit still matches; all-new change refused), committed 180c398'
+        forced: false
+        evidence: 180c3982c9b9300916fa28ad96087e1045cf49a0
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: 45316a51c6f0c63504a82e6b74f5b1fcb1be8465
+
 .. bug:: privacy.clean refuses the session-link trailer the Claude Code host asks for on every commit
    :id: BUG_127
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: core/privacy (links, commit_messages), hosts/claude_code
    :affects: COMP_CORE_PRIVACY, COMP_HOSTS_CLAUDE_CODE
+   :decided_by: DEC_ADR_024
 
    **Symptom:** With ``commit_messages`` in ``privacy.scope`` (the default) and the ``links`` pattern on, ``privacy.clean`` refuses every commit that carries the session-link trailer (``Claude-Session:`` followed by an https link to the host's session) that Claude Code asks agents to append to every commit. Seen in Dang (2026-11-15) and in this repository, where every commit has carried ``Co-Authored-By`` alone since 2026-09-06 for this reason; BUG_043's residue records the same conflict.
 
@@ -11451,9 +11497,28 @@ is a decision need, linked by id.
 
    **Batch:** unbatched — no open batch shares the mechanism; BUG_055 is another privacy pattern over-match but on a different pattern.
 
+   **Repro proof:** ``tests/test_bug_127_repro.py::test_BUG_127_host_session_trailer_passes_privacy_clean``, committed 95cd9fa (2026-11-16), wrapped in ``xfail(strict=True)`` — under the default manifest, ``privacy.clean`` on ``git commit -F <file>`` whose message ends with the ``Co-Authored-By`` trailer and a ``Claude-Session:`` trailer carrying the host's https session link fails with "1 personal-data match(es) in content being written down", the one finding a ``[links]`` match at the session trailer's line. The guard ``test_BUG_127_same_link_in_the_body_is_still_a_finding`` (unwrapped, green today) asserts the same link in the message body stays a ``links`` finding.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_127_repro.py::test_BUG_127_host_session_trailer_passes_privacy_clean, committed 95cd9fa'
+        forced: false
+        evidence: 95cd9fa06398c67c2f43c88a5606c7229400f8ba
+      - field: decided_by
+        was: null
+        now: DEC_ADR_024
+        reason: feature-architect chose where the allowance lives (DEC_ADR_024)
+        date: '2026-11-16'
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: 85bf23d0ab6b290d5c05ff4ecb65dbd152cb21a9
+
 .. bug:: docs.needs_traceable holds an adopted Sphinx-needs project to invariant's baseline vocabulary, so it reports hundreds of problems on every pipeline
    :id: BUG_128
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: high
    :area: core/needs, core/rules (docs.needs_traceable), docs adoption
@@ -11474,6 +11539,620 @@ is a decision need, linked by id.
    **Fix sketch / next step:** ``bug-reproducer`` first: a ``needs.json`` fixture with a decision of status ``agreed`` linked only to a requirement, against the baseline ``docs.needs``, asserting the verdict names ``docs.needs.decision_statuses`` and ``require_links``; red today. Whether adoption should also derive ``docs.needs`` from ``conf.py`` is a decision for ``feature-architect``. Dang can quiet the gate now in its own manifest (its statuses, a ``types`` list covering its directives, and a ``require_links`` rule matching how its decisions link), which is a Dang session's change, not this fix.
 
    **Batch:** adopted-docs-project (new) — invariant assumes its own starter's shape of a Sphinx-needs project and does not check a hand-built one against it. Shared with the ``docs venv`` entry filed in the same run; BUG_118 (a Sphinx-needs repository detected as Python) is kin but stays unbatched until the user moves it.
+
+   **Repro proof:** ``tests/test_bug_128_repro.py::test_BUG_128_fix_line_names_the_setting_for_each_kind_of_problem``, committed fde6d6d (2026-11-16), wrapped in ``xfail(strict=True)`` — against the baseline ``docs.needs``, a needs.json with an ``agreed`` decision linked only (through ``:satisfies:``) to a requirement and an undeclared ``wp`` directive draws all three problems, and the undeclared directive's problem names ``docs.needs.types``; but the verdict's fix line reads only "link each named need, or map its directive in docs.needs.types, then: invariant docs build", naming neither ``docs.needs.decision_statuses`` nor ``require_links``.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_128_repro.py::test_BUG_128_fix_line_names_the_setting_for_each_kind_of_problem, committed fde6d6d'
+        forced: false
+        evidence: fde6d6d686428030c5be4b27914bea4f0bde7976
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: 080dea0d0d7bab43322af8bec8612cac14b78557
+
+.. bug:: Handoff successor starts in the home directory when a shell startup prompt eats the start of the typed line
+   :id: BUG_129
+   :status: fixed
+   :severity: high
+   :priority: high
+   :area: hosts/claude_code_launch, cli/main
+   :affects: COMP_HOSTS_CLAUDE_CODE_LAUNCH, COMP_CLI_MAIN
+
+   **Symptom:** ``invariant session handoff`` reports success ("successor claude is running as ... (pid ...)"), but the successor Claude starts in the user's home directory instead of the project's main checkout: its first screen asks to trust the home directory. The parent has already been SIGTERMed, so the user is left with no session in the project and loses remote access. Reported by the owner of a consuming project on 2026-11-16, repeatedly over several hours.
+
+   **Expected:** A successor always starts in the main checkout, whatever the user's shell does at startup. If the successor is found running anywhere else, the launch counts as failed: the command says so, prints the by-hand line, exits non-zero, and leaves the parent running.
+
+   **Repro:** Use a login shell whose startup reads one character from the terminal before the first prompt. The case seen is oh-my-zsh in its default update mode ``prompt`` when an update is due: ``tools/check_for_upgrade.sh`` prints "Would you like to update? [Y/n]" and runs ``read -r -k 1``. Run ``invariant session handoff`` from the project. The read consumes the ``c`` of the typed ``cd <main> && exec env -u ... /bin/sh <launch file>``; the shell then runs ``d <main> && ...``. oh-my-zsh defines ``d`` as ``dirs "$@"``, which exits 0 without changing directory, so ``&&`` proceeds and ``claude`` starts in the home directory. Evidence: oh-my-zsh's update-stamp cache file was rewritten at the failed handoff's time; a probe launch through ``plan_launch`` and ``TerminalLauncher`` later the same day, with no update due, started Claude in the project (process cwd, ``PWD`` and banner all agree).
+
+   **Suspected cause:** Two defects in ``hosts/claude_code_launch``.
+
+   * ``plan_launch`` puts the directory change only in the line Terminal's ``do script`` types into the new window's tty, before the shell has started; the launch file written by ``launch_script`` has no ``cd``. Any startup step that reads stdin (an update prompt, a ``read`` in an rc file, a prompt-theme configuration wizard) can eat part of the typed line, and a partial line may silently run something other than intended.
+   * The successor watch (``ProcessTableWatch`` / ``successor_pids``) matches only the ``--name`` / ``--remote-control`` flags and never checks the successor's cwd, though ``process_cwd()`` exists in the same module. A successor in the wrong directory counts as success, so the parent is closed.
+
+   **Affected:** :need:`COMP_HOSTS_CLAUDE_CODE_LAUNCH` (launch file, typed line, successor watch) and :need:`COMP_CLI_MAIN` (``session handoff``). Every caller of ``_open_claude_window`` is exposed: ``session handoff``, the oracle's start-session, and the dashboard terminal step.
+
+   **Fix sketch / next step:**
+
+   1. The launch file does its own ``cd -- <main> || exit`` before running ``claude``, so the directory never depends on the typed line arriving intact.
+   2. The successor watch requires the successor's ``process_cwd`` to equal the main checkout; otherwise the launch fails (by-hand line printed, parent NOT SIGTERMed, ideally the misplaced successor terminated).
+   3. Consider making the typed line fail closed when mangled, e.g. type only ``exec /bin/sh <launch file>`` and move the env handling into the file, so an eaten prefix runs nothing.
+
+   Red-test targets: a launch file that changes directory itself, and a watch that refuses a flag-matching successor whose cwd is not the main checkout. Same family as :need:`BUG_075` (false success, then the parent is SIGTERMed), :need:`BUG_100` and :need:`BUG_068` (all fixed).
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'Repro proof: tests/test_handoff.py::TestBUG129SuccessorStartsInTheMainCheckout (3 tests, strict xfail), committed 7803d0c (2026-11-16) on session 26aae3b9''s branch, not yet merged — asserts the launch file run from another directory starts claude in the main checkout (today: the start directory), the typed line missing its first character (zsh -f, d = dirs) never starts claude elsewhere (today: the start directory), and a handoff whose flag-matching successor is outside the main checkout fails without scheduling SIGTERM (today: exit 0, parent scheduled).'
+        forced: false
+        evidence: 7803d0cea6b708dea6f4523013a98f25d3ce17e4
+      - from: reproduced
+        to: fixed
+        reason: 'Fix 3258a50 (2026-11-16, session 26aae3b9, DEC_ADR_005_D8): the launch file does its own cd -- <main> || exit 1; the typed line starts with exec and carries no cd; ProcessTableWatch.wait_for(cwd=) counts a successor only in the main checkout (same_directory) and raises SuccessorNotPlaced otherwise, so the CLI fails the launch without signalling the parent and leaves the misplaced successor running. The three strict-xfail repro tests now pass unmarked. The repro commit was rebased onto main as 6dc0cf8 (was 7803d0c).'
+        forced: false
+        evidence: 3258a50c0eccaa381728e42b42ad14994ade651a
+
+.. bug:: Nothing stops an agent running the bare full suite without a sweep cadence
+   :id: BUG_130
+   :status: filed
+   :severity: medium
+   :priority: high
+   :area: core/rules (sweep.no_full_run), cli (pipeline test/coverage), data/agents
+   :affects: COMP_CORE_RULES, COMP_CMD_PIPELINE, COMP_CORE_SWEEP, COMP_DATA_AGENTS
+
+   **Symptom:** On a project with no sweep cadence, nothing in the engine refuses or reports a bare whole-suite run made on a change. Seen 2026-11-16 during :need:`BUG_129 <BUG_129>`: the feature-architect ran a bare ``uv run pytest`` (this repository's ``commands.test``, the whole suite) in that session's worktree. It ran for more than 40 minutes, concurrently with another worktree's ``pytest --cov``, and the owner saw the fix "running over 2 hours". The owner's standing rule is that a change never runs the full suite locally. That rule exists only as agent prose: ``feature-architect`` (record evidence with ``invariant pipeline test --selector`` / ``pipeline coverage --selector``, "never the bare forms") and ``compliance-reviewer`` ("affected set, never the full suite locally"). An agent that ignores the prose costs the owner hours, and no gate, hook or warning says so.
+
+   **Expected:** A bare whole-suite or whole-scheme coverage run on a change is refused, or at least reported, by the engine whether or not a sweep cadence is set, and each project can configure this. Possible shapes, to be decided in design: ``pipeline test`` / ``pipeline coverage`` without ``--selector`` refused unless an override grant is held; the ``sweep.no_full_run`` hook surface (configured ``commands.test`` / ``commands.coverage`` template as a token prefix, judged ``"full"`` by the adapter's ``test_scope_of``) armed without a cadence; or a default cadence.
+
+   **Repro:** In this repository (``.claude/invariant.yaml`` sets no ``methodology.gates.schedule.cadence_days``), open a session with a change and, from an agent, run ``uv run pytest`` with no selector, or ``invariant pipeline test`` with no ``--selector``. The run starts and completes with no refusal and no warning; ``invariant check`` reports nothing about it.
+
+   **Suspected cause:** Working as decided, but the decision is narrower than the owner's rule. :need:`DEC_ADR_010_D5 <DEC_ADR_010_D5>` arms ``sweep.no_full_run`` only when a cadence is set (whole-suite detection only when ``test.all_pass`` is scheduled, whole-scheme only when ``coverage.meets_floor`` is). Without a cadence the rule answers N/A on both surfaces, so the only remaining control is agent prose, which is not enforced (:need:`DEC_ADR_001 <DEC_ADR_001>`, scripted state over prose rules).
+
+   **Affected:** :need:`COMP_CORE_RULES <COMP_CORE_RULES>` (``sweep.no_full_run``, its arming condition and hook surface), :need:`COMP_CMD_PIPELINE <COMP_CMD_PIPELINE>` (the CLI surface of ``pipeline test`` / ``pipeline coverage`` without ``--selector``), :need:`COMP_CORE_SWEEP <COMP_CORE_SWEEP>` (the cadence the rule depends on today), :need:`COMP_DATA_AGENTS <COMP_DATA_AGENTS>` (the ``feature-architect`` and ``compliance-reviewer`` prose that carries the rule today). Decision: :need:`DEC_ADR_010 <DEC_ADR_010>`, part D5.
+
+   **Fix sketch / next step:** Needs a design ruling before code: an amendment to ADR-010 D5 (or a new decision) that arms full-run detection without a cadence, with a manifest switch and a default level (``warn`` or ``block``) per project. ``bug-reproducer`` can prove it with a test that, on a manifest with no cadence, runs the CLI surface of ``pipeline test`` with no selector, and the hook surface on a shell call matching ``commands.test`` exactly, and expects a ``sweep.no_full_run`` verdict that today is N/A. The ``python -m pytest`` vs ``uv run pytest`` miss that D5 accepts is still out of scope. Related: :need:`IDEA_032 <IDEA_032>` (built the scoped forms and the cadence-only rule), :need:`BUG_081 <BUG_081>` (a flake seen under full-suite load, which concurrent full runs make worse).
+
+.. bug:: Session worktree .venv built on uv's managed CPython lacking time.tzset fails tests
+   :id: BUG_131
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: domains/session (isolate), cli (session isolate, doctor)
+   :affects: COMP_DOMAINS_SESSION, COMP_CMD_SESSION, COMP_CMD_SETUP
+
+   **Symptom:** A session worktree's ``.venv`` can sit on a different Python interpreter from the main checkout's, and tests that pass on main fail there. Seen 2026-11-16 during :need:`BUG_129 <BUG_129>` (session 26aae3b9) by the feature-architect: the worktree's ``.venv`` had been created on uv's managed CPython 3.13.15, whose build has no ``time.tzset``. ``tests/test_oracle_host_processes.py`` (the non-UTC zone test) and ``tests/test_bug_086_repro.py`` failed there. The failures are unrelated to the change: a scoped gate can misread them as the change's own red, and finding out otherwise costs a whole-suite run (the cost :need:`BUG_130 <BUG_130>` is about). Other existing worktrees may carry the same interpreter.
+
+   **Expected:** A session worktree's environment runs on the interpreter the project pins, or on the main checkout's, so its tests see the same Python the main checkout's do. Possible shapes, to be decided in design: a committed interpreter pin (``.python-version`` / ``uv python pin``, or a tighter ``requires-python``); ``session isolate --execute`` carrying the main checkout's interpreter choice into the new worktree; and/or a ``doctor`` row that flags a worktree environment whose interpreter differs from the main checkout's, or lacks an API the suite needs.
+
+   **Repro:** In this repository (no ``.python-version``; ``pyproject.toml`` says only ``requires-python = ">=3.10"``), on a machine where uv has a managed CPython 3.13 build without ``time.tzset`` and the main checkout's ``.venv`` uses a system Python 3.14: run ``invariant session isolate --execute``, then ``uv run pytest tests/test_oracle_host_processes.py tests/test_bug_086_repro.py`` in the new worktree. uv creates the worktree's ``.venv`` on its managed interpreter and the two files fail; the same command in the main checkout passes. Rebuilding the worktree ``.venv`` on the main checkout's interpreter made them pass.
+
+   **Suspected cause:** Nothing pins the interpreter. A new worktree has no ``.venv`` (it is gitignored), so the first ``uv run`` there creates one by uv's own interpreter discovery, which may pick a uv-managed build, while the main checkout's ``.venv`` was made on a system Python. ``session isolate`` carries the local manifest and install wiring into the worktree, but not the environment's interpreter choice, and ``doctor`` has no row comparing them.
+
+   **Affected:** :need:`COMP_DOMAINS_SESSION` and :need:`COMP_CMD_SESSION` (``session isolate`` worktree creation); :need:`COMP_CMD_SETUP` (``doctor``).
+
+   **Fix sketch / next step:** ``bug-reproducer`` first: decide whether a committed test can prove it (for example, a worktree created by ``isolate --execute`` reaching a different interpreter from the main checkout's when no pin exists), or record it as environment-only. Then decide in design between a repository pin and an isolate-time carry, plus a ``doctor`` row for existing worktrees. As a stop-gap, check each existing worktree's ``.venv/bin/python --version`` against the main checkout's. Not batched: no open batch shares the mechanism (an unpinned interpreter in a per-worktree environment); :need:`BUG_124 <BUG_124>` is a docs environment defect with a different cause (unpinned requirements).
+
+.. bug:: privacy.clean reads only the first -m of a git commit, so a later -m paragraph lands unscanned
+   :id: BUG_132
+   :status: fixed
+   :severity: high
+   :priority: high
+   :area: core/rules (privacy.clean, commit_messages)
+   :affects: COMP_CORE_RULES
+
+   **Symptom:** With ``commit_messages`` in ``privacy.scope``, ``privacy.clean`` scans only the first ``-m`` (or ``--message``) value of a ``git commit``. Git joins every ``-m`` into the message as its own paragraph, so a finding in the second or a later one reaches history unscreened while the verdict reports the message as scanned and clean.
+
+   **Expected:** Every paragraph git writes into the message is scanned, whichever ``-m`` carried it.
+
+   **Repro:** ``git commit -m "subject" -m "<a paragraph with a personal address>"`` from a project with the default scope: ``privacy.clean`` passes. ``_extract_commit_message`` returns ``subject`` alone. Noticed while fixing BUG_127, 2026-11-16; not changed there, because that fix may only let the host trailer through.
+
+   **Affected:** :need:`COMP_CORE_RULES` (``privacy.clean``, the commit-message reader). See ``docs/architecture/manifest.rst``, "Privacy scope".
+
+   **Repro proof:** ``tests/test_bug_132_repro.py::test_BUG_132_a_later_message_paragraph_is_scanned``, committed 2970011 (2026-11-16), wrapped in ``xfail(strict=True)`` — under the default manifest, ``privacy.clean`` on a ``git commit`` whose personal address sits in a later message value passes with "scanned commit message: no matches" in all six spellings tried: a second ``-m``, a second ``--message=<v>``, a second ``--message <v>``, ``--message=<v>`` then ``-m``, ``-am`` then ``-m``, and a third ``-m`` after a clean second. The test asserts a failure naming the ``emails`` finding. Control (run ad hoc, not committed): the same address in the first value is caught and names ``emails``, for ``-m``, ``--message=`` and ``-am``.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_132_repro.py::test_BUG_132_a_later_message_paragraph_is_scanned, committed 2970011'
+        forced: false
+        evidence: 29700118e43d62bcd3acd737bd4d6e3b400f6e07
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: a0e1d619d510f8d5614f918a6f253c4f9c5fef7c
+
+.. bug:: A commit made in a store still refuses the host's session-link trailer
+   :id: BUG_133
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/storescan, core/rules (privacy.clean store route), cli store hook
+   :affects: COMP_CORE_STORESCAN, COMP_CORE_PRIVACY
+
+   **Symptom:** Since BUG_127, ``privacy.clean`` lets the host's declared attribution trailer through in a repository commit's trailer block. A commit made in a store is screened by two other readers, ``privacy.clean``'s store route (the store's own privacy block) and the store's ``commit-msg`` hook, and both still read the same trailer as a ``links`` finding, so an agent that appends it to a store commit is refused.
+
+   **Expected:** A store commit's message is judged as a repository commit's is: the host's declared trailer passes in the trailer block, and the same link anywhere else is still a finding.
+
+   **Repro:** In a project with a store, commit in the store (``git -C <store> commit -F <file>``) with a message ending in the ``Claude-Session:`` trailer carrying the host's session link. The pre-tool-use hook refuses it naming a ``links`` match; so does the store's ``commit-msg`` hook. Left out of BUG_127's fix, 2026-11-16, which covers the repository route.
+
+   **Affected:** :need:`COMP_CORE_STORESCAN`, :need:`COMP_CORE_PRIVACY`. See ``docs/architecture/manifest.rst``, "A store's privacy screen".
+
+.. bug:: Intermittent flake: the oracle TUI Start test finds no #fresh widget
+   :id: BUG_134
+   :status: filed
+   :severity: low
+   :priority: medium
+   :area: tests/oracle tui
+   :affects: COMP_ORACLE_TUI
+
+   **Symptom:** ``tests/test_oracle_tui_start.py::TestStart::test_start_prepares_again_launches_once_and_shows_the_name`` fails now and then with ``textual.css.query.NoMatches: No nodes match '#fresh' on Screen(id='_default')``. It failed one full ``pipeline coverage`` run of the BUG_127 session (2026-11-16, 1 failure in 10152), which changed no oracle code.
+
+   **Expected:** The test passes on every run, or fails only for a real defect.
+
+   **Repro:** Run the single test in a loop. At 582d5bc it failed 1 of 25 isolated runs; with the BUG_127 change, 1 of 10, both with the same ``NoMatches``.
+
+   **Affected:** :need:`COMP_ORACLE_TUI` (its test). Related: :need:`BUG_081 <BUG_081>`, another intermittent TUI test failure, on a different test and error.
+
+.. bug:: The links pattern misses a URI whose host name carries non-ASCII letters, so a lookalike domain is no finding
+   :id: BUG_135
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/privacy (links)
+   :affects: COMP_CORE_PRIVACY
+
+   **Symptom:** The ``links`` pattern's host arm takes ASCII letters, digits and hyphens only, so a URI whose host holds a non-ASCII letter (a Cyrillic letter a, U+0430, in place of the Latin one, or a fullwidth full stop between labels) matches nothing and is no finding, in a document, a memory or a commit message alike. A lookalike domain is the usual form of a phishing or tracking link, and its punycode spelling is caught (IDEA_001), so the same address is a finding or not by how it is spelled.
+
+   **Expected:** A URI naming a network host is a ``links`` finding whatever script its host name is written in.
+
+   **Repro:** Build an https URI whose host is ``example.com`` with its first ``a`` replaced by U+0430 (Cyrillic a) and hand it to ``PrivacyScanner().scan_text``: no finding. The same URI spelled in ASCII is one ``links`` finding. Noticed while reviewing BUG_127, 2026-11-16; that change admits only the host's ASCII session link and does not alter the pattern, so it neither causes nor hides this.
+
+   **Affected:** :need:`COMP_CORE_PRIVACY` (the ``links`` pattern). See ``docs/architecture/manifest.rst``, "Privacy scope".
+
+.. bug:: privacy.clean reads a shell expansion in a git commit message as its literal text
+   :id: BUG_136
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/rules (privacy.clean, commit_messages)
+   :affects: COMP_CORE_RULES
+
+   **Symptom:** With ``commit_messages`` in ``privacy.scope``, a ``git commit`` whose ``-m`` value is a shell expansion (``-m "$MSG"``, ``-m "$(cat msg.txt)"``) is scanned as the literal words ``$MSG`` or ``$(cat msg.txt)``. The verdict reports "scanned commit message: no matches", while the message git writes is whatever the shell expands it to, which the gate never saw.
+
+   **Expected:** A message whose text the gate cannot know before the shell runs is not reported as scanned and clean.
+
+   **Repro:** set ``MSG`` in one call to text holding an address on an example domain, then ``git commit -m "$MSG"``: ``privacy.clean`` passes. Found 2026-11-16 while settling the scope of BUG_132 (DEC_ADR_024_D4, "Out of scope"); not changed there.
+
+   **Affected:** :need:`COMP_CORE_RULES` (``privacy.clean``, the commit-message reader). See ``docs/architecture/manifest.rst``, "Privacy scope".
+
+.. bug:: privacy.clean reads only the first git commit in a command, so a second commit's message lands unscanned
+   :id: BUG_137
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/rules (privacy.clean, commit_messages)
+   :affects: COMP_CORE_RULES
+
+   **Symptom:** With ``commit_messages`` in ``privacy.scope``, a Bash command that runs ``git commit`` twice (``git commit -m "First" && git commit --allow-empty -m "<a personal address>"``) has only the first commit's message scanned. The second commit's message reaches history while the verdict reports the message scanned and clean.
+
+   **Expected:** Every commit message a command writes is scanned.
+
+   **Repro:** the command above from a project with the default scope: ``privacy.clean`` passes. Found 2026-11-16 while settling the scope of BUG_132 (DEC_ADR_024_D4, "Out of scope"); not changed there.
+
+   **Affected:** :need:`COMP_CORE_RULES` (``privacy.clean``, the commit-message reader). See ``docs/architecture/manifest.rst``, "Privacy scope".
+
+.. bug:: session transition --force writes a state the session machine does not know, and the session record is wedged
+   :id: BUG_138
+   :status: filed
+   :severity: high
+   :priority: medium
+   :area: cli session, domains/session (forced transition)
+   :affects: COMP_CMD_SESSION, COMP_DOMAINS_SESSION, COMP_MACHINE_SESSION, COMP_CORE_FSM
+
+   **Symptom:** ``invariant session transition <state> --force --reason "..."`` accepts a target state the session machine does not declare, writes it into the session record, and exits clean. From then on the record names a state the machine has no edges from, so every later ``session`` command against it (transition, merge, teardown, status) is refused or misreads it, and the session is wedged.
+
+   **Expected:** ``--force`` overrides the guard on a legal-looking edge, never the machine's vocabulary: a target state the session machine does not know is refused, with or without ``--force``, and nothing is written.
+
+   **Repro:** in a throwaway project, start a session, then run ``invariant session transition no_such_state --force --reason "probe"``. Observed: the command succeeds and the record holds ``no_such_state``. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** unknown — needs investigation. The forced route appears to skip the check that the target is a declared state, not only the check that the edge is legal.
+
+   **Affected:** :need:`COMP_CMD_SESSION` (``session transition``), :need:`COMP_DOMAINS_SESSION`, :need:`COMP_MACHINE_SESSION` (the session machine's states), :need:`COMP_CORE_FSM`.
+
+   **Next step:** run ``bug-reproducer`` first: a test that forces a transition to an undeclared state and expects a refusal with the record unchanged.
+
+   **Found:** 2026-11-17, in a review of landed work.
+
+.. bug:: A session's span start survives a store sync replay only through the reflog, so it is lost once the reflog expires
+   :id: BUG_139
+   :status: filed
+   :severity: medium
+   :priority: low
+   :area: core/storesync (replay), domains/session
+   :affects: COMP_CORE_STORESYNC, COMP_DOMAINS_SESSION
+   :decided_by: DEC_ADR_014_I5B
+
+   **Symptom:** After a store sync replays a session's store changes (ADR-014 increment 5b, c654250), the session's span start survives only through the git reflog. Once the reflog entry expires (about 30 days by default, at the next ``git gc``) the span start is gone, so a session that lives past that window, or is resumed after it, has no span start to read.
+
+   **Expected:** A session's span start survives a replay for as long as the session exists, independent of reflog expiry and garbage collection: it is pinned.
+
+   **Repro:** in a store project with a store remote, start a session, change a store record and let a sync replay it; then expire the reflog and run ``git gc --prune=now`` in the store; read the session's span start. Observed by the reviewer: it no longer resolves. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** the replay rewrites the commits the span start named, and nothing but the reflog keeps the old start reachable.
+
+   **Affected:** :need:`COMP_CORE_STORESYNC` (the replay), :need:`COMP_DOMAINS_SESSION` (the span the session reads). Decided under :need:`DEC_ADR_014_I5B`.
+
+   **Related:** :need:`IDEA_040 <IDEA_040>` (the store umbrella).
+
+   **Next step:** run ``bug-reproducer`` first: a test that replays, expires the reflog, collects garbage and expects the span start to resolve.
+
+.. bug:: The docs-lock release error says commit them first when the dirty edit belongs to another session
+   :id: BUG_140
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: core/doclock (release message)
+   :affects: COMP_CORE_DOCLOCK, COMP_CORE_STORESYNC
+   :decided_by: DEC_ADR_014_I5B
+
+   **Symptom:** When the docs lock cannot be released because the store holds an uncommitted edit, the error tells the user to "commit them first", even when that dirty edit belongs to another session. The message misnames whose edit blocks the release, so the user is sent to commit work that is not theirs (ADR-014 increment 5b).
+
+   **Expected:** The refusal names whose edit holds the release: the current session's own edit is told to commit, and another session's edit is named as another session's, so the user is not told to commit it.
+
+   **Repro:** in a store project, two sessions; session B leaves an uncommitted edit in the store; session A tries to release the docs lock. Observed: the error says "commit them first". Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** the message is written for the single-session case and does not consult whose edit is dirty.
+
+   **Affected:** :need:`COMP_CORE_DOCLOCK` (the release and its message), :need:`COMP_CORE_STORESYNC`. Decided under :need:`DEC_ADR_014_I5B`.
+
+   **Related:** :need:`IDEA_040 <IDEA_040>` (the store umbrella).
+
+   **Next step:** run ``bug-reproducer`` first: a two-session test asserting the refusal's wording names the other session's edit.
+
+.. bug:: In a store project a user-defaults guidelines.baseline is invisible to the base readers
+   :id: BUG_141
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: domains/guidelines (baseline), core/manifest (levels)
+   :batch: store-project-config-reads
+   :affects: COMP_DOMAINS_GUIDELINES, COMP_CORE_MANIFEST, COMP_CORE_STORES
+   :decided_by: DEC_ADR_014_I4C2
+
+   **Symptom:** In a store project, a ``guidelines.baseline`` set at the user-defaults level is invisible to the readers that judge against the base (the base-copy readers). They read the base without that level, so the baseline the user configured is not the baseline they apply (ADR-014 increment 4c-2, ff7216f).
+
+   **Expected:** A base reader in a store project sees the same ``guidelines.baseline`` as the working configuration resolves, whichever level set it.
+
+   **Repro:** in a store project, set ``guidelines.baseline`` only in the user defaults; start a session and evaluate the guidelines baseline check against the base. Observed by the reviewer: the base reader does not see the configured baseline. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** unknown — needs investigation; the base-copy reader resolves fewer levels than the live manifest load does.
+
+   **Affected:** :need:`COMP_DOMAINS_GUIDELINES` (the baseline check), :need:`COMP_CORE_MANIFEST` (level resolution), :need:`COMP_CORE_STORES`. Decided under :need:`DEC_ADR_014_I4C2`.
+
+   **Batch:** store-project-config-reads (new) — in a store project, a reader or the docs lock looks only where an in-repo project keeps a setting or file, so a store-held setting is missed. Shared diagnosis: the same check in an in-repo project and in a store project. Members: this bug, the guideline that is never selected, and the store manifest outside the docs lock, filed in the same run.
+
+   **Related:** :need:`IDEA_040 <IDEA_040>` (the store umbrella).
+
+   **Next step:** run ``bug-reproducer`` first.
+
+.. bug:: In a store project the guideline docs.items-carry-no-design is never selected
+   :id: BUG_142
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: domains/guidelines (selection)
+   :batch: store-project-config-reads
+   :affects: COMP_DOMAINS_GUIDELINES, COMP_CORE_GUIDELINES
+   :decided_by: DEC_ADR_014_I4C2
+
+   **Symptom:** In a store project, the guideline ``docs.items-carry-no-design`` is never selected, so no change is ever judged against it, and its gate reads the empty result as clean (ADR-014 increment 4c-2, ff7216f).
+
+   **Expected:** In a store project, ``docs.items-carry-no-design`` is selected for a change that touches the work items, the same as it is in an in-repo project.
+
+   **Repro:** in a store project with the guidelines ruleset, make a change to a work item in the store and list the guidelines selected for the change. Observed by the reviewer: the guideline is absent. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** unknown — needs investigation; the guideline's selection appears to match only the in-repo location of the work items.
+
+   **Affected:** :need:`COMP_DOMAINS_GUIDELINES` (selection), :need:`COMP_CORE_GUIDELINES`. Decided under :need:`DEC_ADR_014_I4C2`.
+
+   **Batch:** store-project-config-reads (second member; see the baseline bug's preamble).
+
+   **Related:** :need:`IDEA_040 <IDEA_040>`, :need:`IDEA_031 <IDEA_031>` (guidelines ownership).
+
+   **Next step:** run ``bug-reproducer`` first.
+
+.. bug:: In a store project the store's invariant.yaml is not under the docs lock
+   :id: BUG_143
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/doclock (lock areas)
+   :batch: store-project-config-reads
+   :affects: COMP_CORE_DOCLOCK, COMP_CORE_STORES
+   :decided_by: DEC_ADR_014_I4C2
+
+   **Symptom:** In a store project, the store's ``invariant.yaml`` is not covered by the docs lock, so two sessions can edit the project's configuration in the store at once with nothing holding either back (ADR-014 increment 4c-2, ff7216f).
+
+   **Expected:** The store's ``invariant.yaml`` is under the docs lock like the other store-held records, so a second session's edit to it waits on or is refused by the lock.
+
+   **Repro:** in a store project, session A takes the docs lock; session B edits the store's ``invariant.yaml``. Observed by the reviewer: the edit is not refused. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** unknown — needs investigation; the lock's areas appear not to include the store's manifest.
+
+   **Affected:** :need:`COMP_CORE_DOCLOCK` (the lock's areas), :need:`COMP_CORE_STORES`. Decided under :need:`DEC_ADR_014_I4C2`.
+
+   **Batch:** store-project-config-reads (third member; see the baseline bug's preamble).
+
+   **Related:** :need:`IDEA_040 <IDEA_040>`.
+
+   **Next step:** run ``bug-reproducer`` first.
+
+.. bug:: An owed after-merge step is skipped when the session branch is deleted by hand before teardown
+   :id: BUG_144
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: core/steps (after-merge hold), domains/session (teardown)
+   :affects: COMP_CORE_STEPS, COMP_DOMAINS_SESSION, COMP_CMD_SESSION
+   :decided_by: DEC_ADR_021_I2, DEC_ADR_001_D25
+
+   **Symptom:** If a session's branch is deleted by hand between ``session merge`` and ``session teardown``, git can no longer read the merged commit from it, the after-merge hold finds nothing, and an owed after-merge step is skipped: teardown goes through with the step never run (ADR-021 increment 2, e0b7f67).
+
+   **Expected:** Undecided. :need:`DEC_ADR_021_I2` declares this case fail-open ("a session ... whose branch git cannot read, is never held"), while the same decision rules every other route that runs no step fail-closed under :need:`DEC_ADR_001_D25`. Whether this route should also fail closed needs a ruling from the user; this item records the gap and asks for it.
+
+   **Repro:** in a project with a ``block`` after-merge step that fails, merge a session, delete its branch by hand, then run ``session teardown``. Observed: teardown is not held. Status stays ``filed`` until a committed test shows this; the behaviour is as declared, so the open question is the ruling, not the repro.
+
+   **Suspected cause:** as declared in :need:`DEC_ADR_021_I2`: the hold reads the merged commit from the session branch, and a missing branch is read as "not held".
+
+   **Affected:** :need:`COMP_CORE_STEPS` (the holding run), :need:`COMP_DOMAINS_SESSION` (teardown), :need:`COMP_CMD_SESSION`.
+
+   **Next step:** ask the user for the ruling; if it is fail closed, ``feature-architect`` amends :need:`DEC_ADR_021_I2` and ``bug-reproducer`` proves the red.
+
+.. bug:: item set accepts an affects value naming an unknown COMP id; only the strict docs build catches it
+   :id: BUG_145
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: cli items, domains/workitem (link check)
+   :batch: item-field-checks
+   :affects: COMP_CMD_ITEMS, COMP_DOMAINS_WORKITEM, COMP_ITEMS_SPHINX_NEEDS
+   :decided_by: DEC_ADR_023
+
+   **Symptom:** ``invariant item set <ID> --add affects=COMP_<unknown>`` is accepted and written, although no component of that id exists. Nothing in the command catches it; only the strict docs build does, by which time the entry is written (and, for a backlog commit made on the base branch, already committed there) (IDEA_051, 30681bb).
+
+   **Expected:** ``item set`` refuses an ``affects`` value naming no need, and writes nothing, the same as it refuses an unknown ``decided_by``.
+
+   **Repro:** on this repository's backlog, ``invariant item set <any open id> --add affects=COMP_NO_SUCH --reason probe``: the command succeeds and ``docs build --strict`` then fails on the dangling link. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** the link check ``item set`` runs covers only DEC, REQ, UI and RULE ids, so a COMP id is never checked.
+
+   **Affected:** :need:`COMP_CMD_ITEMS`, :need:`COMP_DOMAINS_WORKITEM`, :need:`COMP_ITEMS_SPHINX_NEEDS`. Decided under :need:`DEC_ADR_023`.
+
+   **Batch:** item-field-checks (new) — ``item new`` and ``item set`` accept a field or value that the backend or the strict build would refuse, so a bad entry is written and caught later or not at all. Shared diagnosis: run the same field through ``item new``, ``item set`` and the strict build. Members: this bug and the ``item new --field tags`` bug, filed in the same run.
+
+   **Related:** :need:`IDEA_051 <IDEA_051>`.
+
+   **Next step:** run ``bug-reproducer`` first.
+
+.. bug:: item new accepts a field the backend refuses, such as tags on sphinx_needs, which item set refuses
+   :id: BUG_146
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: cli items, domains/workitem (field refusal)
+   :batch: item-field-checks
+   :affects: COMP_CMD_ITEMS, COMP_DOMAINS_WORKITEM, COMP_ITEMS_SPHINX_NEEDS
+   :decided_by: DEC_ADR_023
+
+   **Symptom:** On a ``sphinx_needs`` backend, ``invariant item new bug --field tags=x ...`` is accepted and the entry is written with the field, while ``invariant item set <ID> --field tags=x`` refuses the same field as one the backend does not allow. The two commands disagree on which fields an entry may carry (IDEA_051).
+
+   **Expected:** ``item new`` applies the backend's field refusal the same way ``item set`` does: a field the backend refuses is refused at filing, and nothing is written.
+
+   **Repro:** on a ``sphinx_needs`` backlog, ``invariant item new bug --title probe --field tags=x``: accepted. Then ``invariant item set <that id> --field tags=y --reason probe``: refused. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** ``item new`` does not consult the backend's field refusal that ``item set`` consults.
+
+   **Affected:** :need:`COMP_CMD_ITEMS`, :need:`COMP_DOMAINS_WORKITEM`, :need:`COMP_ITEMS_SPHINX_NEEDS`. Decided under :need:`DEC_ADR_023`.
+
+   **Batch:** item-field-checks (second member; see the ``item set`` affects bug's preamble).
+
+   **Related:** :need:`IDEA_051 <IDEA_051>`.
+
+   **Next step:** run ``bug-reproducer`` first.
+
+.. bug:: init --force on an adopted Sphinx-needs project rewrites docs.format to markdown
+   :id: BUG_147
+   :status: fixed
+   :severity: medium
+   :priority: medium
+   :area: cli setup (init), onboarding
+   :batch: adopted-docs-project
+   :affects: COMP_CMD_SETUP, COMP_CLI_ONBOARDING, COMP_CORE_DOCFORMAT
+
+   **Symptom:** Running ``invariant init --force`` on an adopted Sphinx-needs project (one that has its own ``conf.py``) rewrites the manifest's ``docs.format`` to ``markdown``. The project's docs are rST, so every docs reader and gate then reads them with the wrong format. Found in BUG_128's review (374f784).
+
+   **Expected:** ``init --force`` on a project with its own Sphinx-needs ``conf.py`` keeps ``docs.format`` as the format the project's docs are in (rST), the same as a first ``init`` on that project would choose.
+
+   **Repro:** in a throwaway Sphinx-needs project with its own ``conf.py``, adopt it with ``invariant init``, confirm ``docs.format`` is rST, then run ``invariant init --force`` and read ``docs.format`` again. Observed by the reviewer: ``markdown``. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** unknown — needs investigation; the forced path appears to rewrite ``docs.format`` from a default rather than from the project it finds.
+
+   **Affected:** :need:`COMP_CMD_SETUP` (``init``), :need:`COMP_CLI_ONBOARDING`, :need:`COMP_CORE_DOCFORMAT`.
+
+   **Batch:** adopted-docs-project — invariant assumes its own starter's shape of a Sphinx-needs project and does not check a hand-built one against it. Third member, after the ``docs venv`` and ``docs.needs_traceable`` entries.
+
+   **Related:** :need:`BUG_128 <BUG_128>`, :need:`BUG_118 <BUG_118>`.
+
+   **Repro proof:** ``tests/test_bug_147_repro.py::test_BUG_147_init_force_keeps_an_adopted_projects_docs_format``, committed ed4c7c3 (2026-11-17) — in the repository home (``--home repo``), adopts a hand-built sphinx-needs docs project as init's note says (``docs.format: sphinx``, ``docs.needs.state`` migrating), runs ``init --force``, and asserts ``docs.format`` stays ``sphinx``; it reads ``markdown``. The store home did not show the symptom in a manual run: ``--force`` there kept ``docs.format: sphinx`` in the block.
+
+   **Next step:** ``feature-architect`` designs the fix.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_147_repro.py, init --force rewrites docs.format sphinx -> markdown'
+        forced: false
+        evidence: ed4c7c38503dbf0bd2d580c2a6d87207177742d1
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: e51df4ddb42ba6d6cdd9173bd331b72628e39ffa
+
+.. bug:: The ruling writer turns a CRLF manifest into LF and leaves a replaced ruling's trailing # line behind
+   :id: BUG_148
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: core/rulings (writer)
+   :affects: COMP_CORE_RULINGS, COMP_CMD_RULES
+   :decided_by: DEC_ADR_021_I3
+
+   **Symptom:** The ruling writer (ADR-021 increment 3, 582d5bc) damages the manifest it writes in two ways:
+
+   1. A manifest with CRLF line endings is written back with LF line endings throughout, so one ruling turns into a whole-file change.
+   2. Replacing an existing ruling whose old block-scalar value ends in a line starting with ``#`` leaves that line behind as a stray comment after the new ruling.
+
+   **Expected:** Writing a ruling changes only the ruling's own lines: the file's line endings are kept, and a replaced ruling leaves none of its old text behind.
+
+   **Repro:** (1) convert a manifest to CRLF, record a ruling, diff: every line changed. (2) record a ruling whose reason is a block scalar ending in a ``#...`` line, then replace that ruling: the ``#...`` line remains. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** unknown — needs investigation; (2) suggests the writer's end-of-block detection treats a ``#`` line as a comment outside the scalar.
+
+   **Affected:** :need:`COMP_CORE_RULINGS` (the writer), :need:`COMP_CMD_RULES`. Decided under :need:`DEC_ADR_021_I3`.
+
+   **Next step:** run ``bug-reproducer`` first: one test per symptom.
+
+.. bug:: A ruling at a store's top level puts every repository in the store under the rulings refusal
+   :id: BUG_149
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: core/rulings, core/manifest (levels)
+   :affects: COMP_CORE_RULINGS, COMP_CORE_MANIFEST, COMP_CORE_STORES
+   :decided_by: DEC_ADR_021_I3
+
+   **Symptom:** A ruling placed at a store's top level, rather than in one repository's block, puts every repository in that store under the rulings refusal, and is stale for every repository that does not loosen that rule. The rulings commands never write there; only a hand edit does (ADR-021 increment 3).
+
+   **Expected:** A hand-placed ruling at the store's top level does not put a repository that does not loosen the rule under the rulings refusal, and does not read as stale there; the user can tell where the ruling sits and which repositories it concerns.
+
+   **Repro:** in a store holding two repositories, only one of which loosens a built-in rule, hand-place a ruling for that rule at the store's top level, then run ``invariant doctor`` (or ``rules list``) in each repository. Expected red: both are judged against the ruling, and the second reports it stale. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** rulings are judged at every level they resolve from, and the store's top level resolves into every repository's configuration.
+
+   **Affected:** :need:`COMP_CORE_RULINGS`, :need:`COMP_CORE_MANIFEST` (level resolution), :need:`COMP_CORE_STORES`. Decided under :need:`DEC_ADR_021_I3`.
+
+   **Next step:** run ``bug-reproducer`` first.
+
+.. bug:: privacy.clean misses a commit run through sh -c or eval, a git alias, and an in-command cd for staged content
+   :id: BUG_150
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/rules (privacy.clean, commit_messages), core/shell
+   :batch: inert-instruments
+   :affects: COMP_CORE_RULES, COMP_CORE_SHELL
+   :decided_by: DEC_ADR_025
+
+   **Symptom:** ``privacy.clean``'s commit route (BUG_132, a0e1d61) misses three shapes of commit:
+
+   1. A commit wrapped in ``sh -c '...'`` or ``eval "git commit ..."`` is never seen as a commit, so its message is not scanned.
+   2. A git alias for commit, such as ``git ci``, is not recognised as a commit.
+   3. When a command ``cd``s before committing, the message half follows the ``cd`` (and refuses), but the content half does not follow it when choosing which index to read, so it scans the wrong repository's staged content.
+
+   In each case the verdict reads the commit as clean.
+
+   **Expected:** A command that commits is recognised as committing whatever form invokes ``git commit``, and both halves scan the repository the commit lands in; a commit the route cannot read is not reported as scanned and clean.
+
+   **Repro:** with ``commit_messages`` in ``privacy.scope``: ``sh -c 'git commit -m "<an address on an example domain>"'`` passes; with an alias ``ci = commit``, ``git ci -m "<the same>"`` passes; ``cd <another repo> && git commit -m clean`` scans the first repository's index. Status stays ``filed`` until a committed test shows this.
+
+   **Affected:** :need:`COMP_CORE_RULES` (``privacy.clean``, the commit reader), :need:`COMP_CORE_SHELL` (reading a command as bash would).
+
+   **Batch:** inert-instruments — a rule whose input is silently incomplete, returning an empty result that reads as a pass (kin of BUG_027 and BUG_047 in this batch).
+
+   **Related:** siblings :need:`BUG_136 <BUG_136>` (a shell expansion read as literal text) and :need:`BUG_137 <BUG_137>` (only the first commit in a command read); :need:`BUG_132 <BUG_132>` (where the route was built).
+
+   **Next step:** run ``bug-reproducer`` first: one test per shape.
+
+.. bug:: Shell placement does not follow a cd into another project's worktree, Grep and Glob paths, or env -C, make -C and nested bash -c
+   :id: BUG_151
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: hosts/claude_code (placement), core/shell
+   :batch: unsatisfiable-gates
+   :affects: COMP_HOSTS_CLAUDE_CODE, COMP_CORE_SHELL
+   :decided_by: DEC_ADR_025, DEC_ADR_011
+
+   **Symptom:** Shell placement (BUG_125, ADR-025, 3745d06) still attributes some calls to the hook's own directory instead of the tree they act in:
+
+   1. A shell ``cd`` into another project's worktree is not re-rooted to that worktree the way ADR-011 re-roots a ``file_path``.
+   2. The ``path`` argument of a Grep or Glob call still counts as the hook's directory, not the path searched.
+   3. ``env -C <dir>``, ``make -C <dir>`` and a nested ``bash -c '...'`` are not followed.
+
+   So such a call is recorded against the wrong session or none, and a gate that counts a reviewer's calls in the worktree (``agents.review_agent_ran``) can read none.
+
+   **Expected:** Each of these calls is placed in the directory it acts in, and recorded against the session that owns that worktree, as a ``cd`` within the same project and a ``file_path`` already are.
+
+   **Repro:** from a host rooted in one project, run a reviewer whose calls are ``cd <session worktree of another project> && <read>``, a Grep with ``path`` in the worktree, and ``env -C <worktree> <read>``; read which session each call was recorded to. Status stays ``filed`` until a committed test shows this.
+
+   **Affected:** :need:`COMP_HOSTS_CLAUDE_CODE` (actor and placement recording), :need:`COMP_CORE_SHELL`. Decided under :need:`DEC_ADR_025` and :need:`DEC_ADR_011`.
+
+   **Batch:** unsatisfiable-gates — follow-up to BUG_125 in this batch, same owning code and the same gate left unsatisfiable.
+
+   **Related:** :need:`BUG_125 <BUG_125>`, :need:`BUG_040 <BUG_040>`.
+
+   **Next step:** run ``bug-reproducer`` first: one test per shape.
+
+.. bug:: An untracked undeclared source file is invisible to coverage.meets_floor, so the gate receipt reads MATCH
+   :id: BUG_152
+   :status: filed
+   :severity: medium
+   :priority: medium
+   :area: core/rules (coverage.meets_floor), core/git, cli pipeline (receipt)
+   :batch: inert-instruments
+   :affects: COMP_CORE_RULES, COMP_CORE_GIT, COMP_CMD_PIPELINE
+   :decided_by: DEC_ADR_026
+
+   **Symptom:** ``coverage.meets_floor``, and therefore ``invariant pipeline receipt`` (ADR-026), does not see an untracked source file the session has not declared, so that file is never held to the coverage floor. The BUG_126 reviewer confirmed it in a throwaway project: a new ``new.py`` at 10% coverage gave MATCH.
+
+   **Expected:** A new, non-ignored source file in the working tree is held to the coverage floor like a modified tracked file, and the receipt does not MATCH while it is below the floor.
+
+   **Repro:** in a throwaway project with a coverage floor, make a tracked change, then create ``new.py`` by a shell command (not a declared edit), cover it at 10%, run the coverage step and ``invariant pipeline receipt``. Observed by the reviewer: MATCH. Status stays ``filed`` until a committed test shows this.
+
+   **Suspected cause:** the floor reads the changed set, which lists no untracked file unless the session declared it (the same blind spot BUG_105 records for the guidelines gates).
+
+   **Affected:** :need:`COMP_CORE_RULES` (``coverage.meets_floor``), :need:`COMP_CORE_GIT`, :need:`COMP_CMD_PIPELINE` (the receipt). Decided under :need:`DEC_ADR_026`.
+
+   **Batch:** inert-instruments — a rule whose input is silently incomplete, returning an empty result that reads as a pass; same blind spot as BUG_105 in this batch.
+
+   **Related:** :need:`BUG_105 <BUG_105>` (its Expected covers only the guidelines gates, so this is filed separately), :need:`BUG_126 <BUG_126>`.
+
+   **Next step:** run ``bug-reproducer`` first.
+
+.. bug:: The sphinx adapter claims no file under a vars.srcdir outside its known homes, so coverage.meets_floor refuses instead of N/A
+   :id: BUG_153
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: adapters (sphinx)
+   :affects: COMP_ADAPTERS_SPHINX, COMP_CORE_RULES
+
+   **Symptom:** In a project declaring ``sphinx`` whose content sits in a directory that is not one of the adapter's known homes (root, ``docs/``, ``doc/``, ``source/``, each also one ``source/`` deeper), with ``vars.srcdir`` naming that directory by hand, ``coverage.meets_floor`` answers "no coverage was recorded" for a change made only of that directory's documents, not N/A naming the sphinx adapter. Found while writing ADR-015 increment 2's tests (session ad504962): a toy tree under ``manual/`` with ``vars.srcdir: manual`` got the floor's refusal; the same tree under ``source/`` got the N/A.
+
+   **Expected:** A file under the project's declared Sphinx source directory is claimed by the sphinx adapter, so ``coverage.meets_floor`` answers N/A naming the adapter, as :need:`ADR-015 D1 <DEC_ADR_015_D1>` says for "anything under the source directory".
+
+   **Repro:** Not yet a committed test. ``SphinxAdapter.claims`` reads ``source_dirs``, which looks only at the known homes and never at ``vars.srcdir``. Status stays ``filed`` until bug-reproducer commits a red test.
+
+   **Affected:** :need:`COMP_ADAPTERS_SPHINX` (``claims``, ``source_dirs``), and through it ``coverage.meets_floor`` in :need:`COMP_CORE_RULES`.
+
+   **Workaround:** keep the content at a known home, or list its paths in ``methodology.gates.non_source``.
+
+   **Related:** :need:`DEC_ADR_015_I2`, :need:`BUG_118 <BUG_118>` (detection at the homes).
 
 .. idea:: The links pattern's TLD-like suffix rule drops a punycode IDN top-level domain
    :id: IDEA_001
@@ -15110,12 +15789,13 @@ is a decision need, linked by id.
 
 .. idea:: item can change an existing entry's fields, recorded in its history
    :id: IDEA_051
-   :status: proposed
+   :status: done
    :priority: high
    :effort: M
    :tier: 1
    :area: domains/workitem, cli items, items backends
    :affects: COMP_DOMAINS_WORKITEM, COMP_CMD_ITEMS, COMP_ITEMS_SPHINX_NEEDS, COMP_ITEMS_MARKDOWN, COMP_ITEMS_JSON
+   :decided_by: DEC_ADR_023
 
    **Problem:** ``invariant item`` has no way to change a field of an entry that already exists. Its subcommands are ``new``, ``list``, ``show``, ``transition``, ``residue`` and ``migrate``; status moves through ``transition`` and owed work through ``residue``, but ``affects``, ``severity``, ``priority``, ``batch``, ``tier``, ``effort``, ``area`` and ``decided_by`` are fixed at filing. A consuming project (Dang, 2026-11-15) needed to add a newly declared rule need to the ``affects`` of two open bugs. The only route was a hand edit of the backlog ``.rst``, and that project's own instructions allow backlog writes only through ``invariant item``, so the edit was blocked. The same gap hits this repository whenever a bug is re-batched, re-prioritised on a user ruling, or linked to a decision that did not exist when it was filed.
 
@@ -15139,9 +15819,28 @@ is a decision need, linked by id.
 
    **Related:** BUG_065 (transition rewriting a multi-line entry, the same in-place write hazard), BUG_074 (``item new`` on a sectioned sphinx_needs backlog).
 
+   .. invariant-history:
+      - field: decided_by
+        was: null
+        now: DEC_ADR_023
+        reason: the command's shape and the closed-item ruling are ADR-023
+        date: '2026-11-16'
+      - from: proposed
+        to: accepted
+        reason: built in session 02875571 (ADR-023)
+        forced: false
+      - from: accepted
+        to: in_progress
+        reason: built in session 02875571 (ADR-023)
+        forced: false
+      - from: in_progress
+        to: done
+        reason: item set built (ADR-023), compliance-reviewer to land
+        forced: false
+
 .. idea:: A plain transition can carry the commit it rests on, without a ruling
    :id: IDEA_052
-   :status: proposed
+   :status: done
    :priority: high
    :effort: XS
    :tier: 1
@@ -15167,3 +15866,130 @@ is a decision need, linked by id.
    **Why now / why this tier:** Tier 1, high: every bug closure in every managed project gains a checked fix commit, and the change is one guard in ``_provenance``. Effort XS.
 
    **Related:** IDEA_019 (done: the ruled closure this pairing came from), BUG_073 (sphinx_needs history persistence).
+
+   .. invariant-history:
+      - from: proposed
+        to: accepted
+        reason: built in session e3537ff3
+        forced: false
+      - from: accepted
+        to: in_progress
+        reason: built in session e3537ff3
+        forced: false
+      - from: in_progress
+        to: done
+        reason: built in session e3537ff3
+        forced: false
+
+.. idea:: store migrate moves a single record type within a store project with --records
+   :id: IDEA_053
+   :status: proposed
+   :priority: low
+   :effort: M
+   :tier: 6
+   :area: core/storemigrate, cli setup
+   :affects: COMP_CORE_STOREMIGRATE, COMP_CMD_SETUP
+   :decided_by: DEC_ADR_020_D3, DEC_ADR_014_D12
+
+   **Problem:** :need:`ADR-020 D3 <DEC_ADR_020_D3>` keeps ``store migrate --records`` "for moving single records within a store project": a subset of a project's records moves between the repository and the store while the configuration stays where it is. Today ``--records`` is refused in both directions (``--to repo`` and ``--to store``), and no increment of ADR-014 or ADR-020 owns building it, so the decided route does not exist and nothing tracks it.
+
+   **Want:** ``store migrate`` accepts a ``--records`` subset in the directions D3 allows, so a store project can move single records without moving everything. The command's behaviour beyond D3 is a design decision for ``feature-architect``; this item carries none.
+
+   **Acceptance:**
+
+   - In a store project, ``store migrate --to repo --records <one record type>`` moves only that record type into the repository, with its git history, and the configuration stays in the store.
+   - The reverse move with ``--to store --records`` behaves as D3 states for that direction.
+   - A subset D3 does not allow is refused with a message naming why, and nothing moves.
+   - The move runs as its own session lane and lands like any change, as D3 requires for a full move.
+
+   **Risks / open questions:**
+
+   - D3 says ``--to store`` always moves the configuration; how that sits with a ``--records`` subset in that direction is for the design.
+
+   **Why now / why this tier:** Low, tier 6: a decided route with no owner. No user has asked to move a single record yet; filed so the gap has an owner.
+
+   **Related:** :need:`IDEA_040 <IDEA_040>` (the store umbrella), :need:`DEC_ADR_014_D12`.
+
+.. idea:: End the rulings warning period, and init records the loose profile's ruling
+   :id: IDEA_054
+   :status: proposed
+   :priority: medium
+   :effort: S
+   :tier: 5
+   :area: core/rulings, cli rules, cli setup (init)
+   :affects: COMP_CORE_RULINGS, COMP_CMD_RULES, COMP_CMD_SETUP
+   :decided_by: DEC_ADR_021_D8, DEC_ADR_021_D6
+
+   **Problem:** :need:`ADR-021 D8 <DEC_ADR_021_D8>` lets ``validate()`` warn, rather than refuse, a loosening with no ruling for one release, so an upgrade does not break a project mid-session. That warning period has to end, and three places carry the temporary warn branch: ``rulings.judge``, the ``doctor`` warning and the ``rules list`` warning. Separately, ``invariant init`` can choose the ``loose`` profile, which loosens built-in rules, without recording the profile ruling; once the warn branch is gone, a project ``init`` just set up as loose would be refused at its first load.
+
+   **Want:** when the one-release period ends, the warn branch is removed so an unruled loosening is refused as D6 intends, and in the same change ``init`` choosing the ``loose`` profile records the ruling that profile needs. How the ruling is recorded at ``init`` is a design decision for ``feature-architect``; this item carries none.
+
+   **Acceptance:**
+
+   - After the change, a configuration that loosens a built-in rule with no ruling is refused at load, and ``doctor`` and ``rules list`` report it as a refusal, not a warning.
+   - A project initialised with the ``loose`` profile loads without refusal, and its configuration carries a ruling for the loosening, with a reason and date a reader can find.
+   - A project that ran ``rules carry-over`` during the warning period is unaffected.
+
+   **Risks / open questions:**
+
+   - When "one release" ends: the release that starts the clock and the one that removes the branch are the user's call.
+   - Projects that never ran ``rules carry-over`` will be refused after the upgrade; the release notes need to say so.
+
+   **Why now / why this tier:** Medium, tier 5: not urgent until the warning period runs out, but the two halves must land together, or ``init --profile loose`` produces a project that refuses to load. Effort S: removing three warn branches and one recording step in ``init``.
+
+   **Related:** :need:`DEC_ADR_021_D6`, :need:`DEC_ADR_021_D7`, :need:`IDEA_049 <IDEA_049>` (environment loosenings with no record).
+
+.. idea:: rulings.judge costs a small fraction of the manifest load, not half of it
+   :id: IDEA_055
+   :status: proposed
+   :priority: low
+   :effort: S
+   :tier: 6
+   :area: core/rulings, core/manifest
+   :affects: COMP_CORE_RULINGS, COMP_CORE_MANIFEST
+
+   **Problem:** ``rulings.judge`` takes about 10 ms of a 20 ms manifest load, half of it. The manifest is loaded on every hook call, so this cost is paid on every tool call in every session. Measured by the reviewer: ``_load_profile`` reads the profile YAML twice per call, and ``shipped_ids`` globs the shipped rule files on every call.
+
+   **Want:** judging rulings during a manifest load costs a small fraction of the load, so the manifest load time drops by about half. How the work is avoided is a design decision for ``feature-architect``; this item carries none.
+
+   **Acceptance:**
+
+   - A manifest load on this repository's configuration spends well under its current share in ``rulings.judge`` (from about 10 ms of 20 ms), measured the same way the reviewer measured it.
+   - A change to a profile file or to the shipped rule set is still seen by the next invocation, so no stale verdict on a ruling.
+   - ``rulings.judge``'s verdicts are unchanged on the existing tests.
+
+   **Risks / open questions:**
+
+   - Anything cached across calls in a long-lived process (the oracle) must not outlive an upgrade or an edit to a profile.
+
+   **Why now / why this tier:** Low, tier 6: polish; 10 ms per hook is not felt in one call, but it is paid on every call. Effort S: one module.
+
+   **Related:** :need:`DEC_ADR_021_D6`.
+
+.. idea:: An unforced docs-lane switch test runs where a Sphinx build is available
+   :id: IDEA_056
+   :status: proposed
+   :priority: low
+   :effort: S
+   :tier: 6
+   :area: tests (ADR-020 switch)
+   :affects: COMP_CMD_SETUP, COMP_CORE_STOREMIGRATE
+   :decided_by: DEC_ADR_020_I3
+
+   **Problem:** The test for the docs-lane switch in ADR-020 increment 3 (1a15eee) forces its transitions, so it proves the switch with its gates bypassed and nothing proves that the switch lands without ``--force`` when a real Sphinx build is available.
+
+   **Want:** a test that runs the docs-lane switch end to end without forcing any transition, skipped unless ``INVARIANT_TEST_SPHINX_BUILD`` is set, so the switch is proven through its real gates on a machine that can build the docs. The test's shape is for the session that writes it; this item carries none.
+
+   **Acceptance:**
+
+   - With ``INVARIANT_TEST_SPHINX_BUILD`` set, the test drives the switch through every transition with no ``--force`` and passes.
+   - Without it, the test is reported as skipped with the reason, not as passed.
+   - The forced test from 1a15eee keeps running where the new one is skipped.
+
+   **Risks / open questions:**
+
+   - An unforced run may surface a gate the switch cannot pass without force; that is a bug to file, not something for the test to work around.
+
+   **Why now / why this tier:** Low, tier 6: a proof gap, not a defect anyone has hit. Effort S: one test.
+
+   **Related:** :need:`DEC_ADR_020_I3`, :need:`IDEA_040 <IDEA_040>`.

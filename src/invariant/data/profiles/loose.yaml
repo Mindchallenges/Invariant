@@ -79,6 +79,11 @@ rules:
   # Warn in every profile, strict included: validation refuses block or ask.
   sweep.fresh: warn
 
+  # Only the user records a ruling that loosens a built-in rule (ADR-021
+  # ruling 3, D7): an agent's edit adding or changing one is refused. Blocks
+  # in every profile, as the isolation rules do.
+  config.rulings_by_user: block
+
   privacy.clean: block
 
   # The project's guidelines ruleset loads and validates (ADR-012 D12,

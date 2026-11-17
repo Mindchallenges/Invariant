@@ -12,6 +12,7 @@ import re
 import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
 from ..core import mdconvert, needs
@@ -51,6 +52,46 @@ _SET_ELSEWHERE = {
 
 #: An explicit id: one token a file name and a :need: target can both carry.
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+#: The item's own keys that ``item set`` must not change, and why
+#: (DEC_ADR_023_D1). Every other key is a field it may change.
+_NOT_A_FIELD = {
+    "id": (
+        "an item's id is how other needs and links name it, so it never "
+        "changes; file a new item instead"
+    ),
+    "status": (
+        "a status is reached with `invariant item transition`, through the "
+        "gates the target state carries"
+    ),
+    "type": "an item's type fixes its machine and never changes",
+    "title": "the title is set by item new and is not a field",
+    "residue": "residue is recorded with `invariant item residue <id> --add | --clear`",
+    "history": "history is written by the commands that change an item, never by hand",
+}
+
+#: A field name every backend can hold: a YAML and JSON key and an rST option.
+_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+#: The operations ``item set`` applies, as the CLI spells each one.
+_OPERATIONS = {"set": "--field", "add": "--add", "remove": "--remove", "unset": "--unset"}
+
+
+def _listed(value) -> list[str]:
+    """A field's value as the list ``--add`` and ``--remove`` edit: a YAML list
+    as it is, any other value split on commas, the form ``affects`` takes."""
+    if value is None:
+        return []
+    parts = value if isinstance(value, list) else str(value).split(",")
+    return [str(part).strip() for part in parts if str(part).strip()]
+
+
+def _relisted(was, values: list[str]):
+    """``values`` in the shape the field had: a list stays a list, anything
+    else is joined the way ``affects`` is written; empty is no field."""
+    if not values:
+        return None
+    return values if isinstance(was, list) else ", ".join(values)
 
 
 def _shown(store: Path, root: Path) -> str:
@@ -307,12 +348,14 @@ class WorkItemDomain:
     ) -> tuple[Item, list[Evaluated]]:
         """Move an item to ``target``, through its machine's gates.
 
-        ``ruling`` and ``evidence`` are a maintainer's ruling and the commit it
-        rests on. Given together, they are recorded on every history row this
-        call writes, and they buy exactly one thing beyond the record: where
-        the machine has no direct edge, but one state lies between that both
-        edges reach, the call records that state too, on the ruling's
-        authority. That is how bug-reproducer's ALREADY-FIXED verdict closes
+        ``evidence`` is the commit the transition rests on, and ``ruling`` a
+        maintainer's ruling resting on it (DEC_ADR_022_D1). The commit may
+        come alone; a ruling may not. Whatever is given is recorded on every
+        history row this call writes. A ruling buys exactly one thing beyond
+        the record, and a commit alone buys nothing: where the machine has
+        no direct edge, but one state lies between that both edges reach,
+        the call records that state too, on the ruling's authority. That is
+        how bug-reproducer's ALREADY-FIXED verdict closes
         a ``filed`` bug: its test is red with the fix reverted, which is a
         reproduction on the pre-fix tree, so ``filed -> reproduced -> fixed``
         is written as one command and `fixed` is still reached only through
@@ -328,7 +371,7 @@ class WorkItemDomain:
         structural_override = False
         if item.status != target and not machine.can(item.status, target):
             via = _one_step_between(machine, item.status, target)
-            if via and provenance:
+            if via and provenance and "ruling" in provenance:
                 path = [via, target]
             elif force:
                 structural_override = True
@@ -384,16 +427,15 @@ class WorkItemDomain:
         return evaluate(gate_ids, ctx)
 
     def _provenance(self, ruling: str | None, evidence: str | None) -> dict | None:
-        """The ruling and its commit, both or neither; the commit must resolve."""
+        """The commit, and the ruling resting on it if any; the commit must resolve.
+
+        A commit stands alone (DEC_ADR_022_D1); a ruling with no commit is an
+        assertion nothing can check, so it is refused.
+        """
         ruling = (ruling or "").strip()
         evidence = (evidence or "").strip()
         if not ruling and not evidence:
             return None
-        if not ruling:
-            raise UsageError(
-                "--evidence needs --ruling: name who ruled and when, so the "
-                "record says whose judgement the commit stands on"
-            )
         if not evidence:
             raise UsageError(
                 "--ruling needs --evidence: name the commit the ruling rests on; "
@@ -405,7 +447,161 @@ class WorkItemDomain:
                 f"--evidence {evidence!r} names no commit in this repository; "
                 "nothing was recorded"
             )
-        return {"ruling": ruling, "evidence": sha}
+        return {"ruling": ruling, "evidence": sha} if ruling else {"evidence": sha}
+
+    def set_fields(
+        self,
+        item_id: str,
+        changes: list[tuple[str, str, str | None]],
+        reason: str | None,
+        evidence: str | None = None,
+        cwd: Path | None = None,
+        today: date | None = None,
+    ) -> tuple[Item, list[dict]]:
+        """Change an item's fields and record each change in its history.
+
+        ``changes`` are ``(operation, key, value)``: ``set`` replaces the
+        value, ``add`` and ``remove`` edit it as a comma-separated list, and
+        ``unset`` drops the field (DEC_ADR_023_D1). Every change is checked
+        before anything is written, the gates ``item new`` applies included,
+        and the store is saved once. Each field that changed gets one row with
+        no ``from`` and ``to`` — what it was, what it is now, why and when —
+        so nothing that walks the status history reads it as a move
+        (DEC_ADR_023_D2). Any state will do, a terminal one included
+        (DEC_ADR_023_D3). A command that changes nothing writes nothing.
+        """
+        reason = (reason or "").strip()
+        if not reason:
+            raise UsageError(
+                "--reason is required: a field change is recorded in the item's "
+                "history, and the row exists to say why. Nothing was written."
+            )
+        if not changes:
+            raise UsageError(
+                "nothing to change: give --field k=v, --add k=v, --remove k=v or "
+                "--unset k"
+            )
+        item = self.get(item_id)
+        planned = self._planned(changes)
+        provenance = self._provenance(None, evidence)
+        stamp = (today or datetime.now().astimezone().date()).isoformat()
+
+        fields = dict(item.fields)
+        rows: list[dict] = []
+        for key, (operation, values) in planned.items():
+            was = fields.get(key)
+            now = self._changed(item.id, key, operation, values, was)
+            if now == was:
+                continue
+            if now is None:
+                fields.pop(key, None)
+            else:
+                fields[key] = now
+            row = {
+                "field": key,
+                "was": was,
+                "now": now,
+                "reason": reason,
+                "date": stamp,
+            }
+            row.update(provenance or {})
+            rows.append(row)
+        if not rows:
+            return item, rows
+
+        added = [
+            v for operation, values in planned.values() if operation in ("set", "add")
+            for v in values
+        ]
+        self._check_links(item.id, reason, *added, cwd=cwd)
+        item.fields = fields
+        item.history.extend(rows)
+        self.backend.save(item)
+        return item, rows
+
+    def _planned(self, changes) -> dict[str, tuple[str, list[str]]]:
+        """Each key's one operation and its values, refused before any write.
+
+        A key may take several values from one operation (``--add a=x --add
+        a=y``) but not two operations, and ``set`` and ``unset`` once: the
+        order between flags is not something a reader of the command line
+        can see, so it decides nothing.
+        """
+        planned: dict[str, tuple[str, list[str]]] = {}
+        for operation, key, value in changes:
+            if operation not in _OPERATIONS:
+                raise UsageError(f"unknown field operation {operation!r}")
+            flag = _OPERATIONS[operation]
+            key = (key or "").strip()
+            if key in _NOT_A_FIELD:
+                raise UsageError(
+                    f"{flag} {key}: {_NOT_A_FIELD[key]}. Nothing was written."
+                )
+            if not _FIELD_RE.match(key):
+                raise UsageError(
+                    f"{flag} {key!r} is not a field name: use letters, digits, '_' "
+                    "and '-', starting with a letter or '_'. Nothing was written."
+                )
+            why = self.backend.field_refusal(key)
+            if why:
+                raise UsageError(f"{flag} {key}: {why}. Nothing was written.")
+            values = self._operands(flag, key, operation, value)
+            if key in planned:
+                earlier = planned[key][0]
+                if earlier != operation or operation in ("set", "unset"):
+                    raise UsageError(
+                        f"{key} is named by {_OPERATIONS[earlier]} and {flag}; give "
+                        "each field one change per command. Nothing was written."
+                    )
+                planned[key][1].extend(values)
+            else:
+                planned[key] = (operation, values)
+        return planned
+
+    @staticmethod
+    def _operands(flag: str, key: str, operation: str, value: str | None) -> list[str]:
+        if operation == "unset":
+            return []
+        value = value or ""
+        if re.search(r"[\r\n]", value):
+            raise UsageError(
+                f"{flag} {key}: a value holding a line break cannot be stored as one "
+                "field. Nothing was written."
+            )
+        if operation == "set":
+            if not value.strip():
+                raise UsageError(
+                    f"{flag} {key}= is empty; --unset {key} drops a field. "
+                    "Nothing was written."
+                )
+            return [value.strip()]
+        values = _listed(value)
+        if not values:
+            raise UsageError(f"{flag} {key}= names no value. Nothing was written.")
+        return values
+
+    @staticmethod
+    def _changed(item_id: str, key: str, operation: str, values: list[str], was):
+        """What ``key`` holds after ``operation``; refused where it names
+        something the field does not hold, as ``residue --clear`` is."""
+        if operation == "set":
+            return values[0]
+        if operation == "unset":
+            if was is None:
+                raise UsageError(
+                    f"{item_id} has no field {key!r} to unset. Nothing was written."
+                )
+            return None
+        held = _listed(was)
+        if operation == "add":
+            return _relisted(was, held + [v for v in dict.fromkeys(values) if v not in held])
+        missing = [v for v in values if v not in held]
+        if missing:
+            raise UsageError(
+                f"{item_id}'s {key} does not hold {', '.join(missing)}; it holds "
+                f"{', '.join(held) or '(nothing)'}. Nothing was written."
+            )
+        return _relisted(was, [v for v in held if v not in values])
 
     def add_residue(self, item_id: str, text: str) -> Item:
         item = self.get(item_id)

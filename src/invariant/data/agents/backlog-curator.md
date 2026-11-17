@@ -1,6 +1,6 @@
 ---
 name: backlog-curator
-description: Technical product owner for the work-item backlog — it manages two item types, IDEAS and BUGS. Use for IDEAS when the user proposes a new feature, want, wish, "we should…", "wouldn't it be nice if…", "add to backlog", "park this", or any feature ask not yet scoped enough to build. Use for BUGS when the user reports a defect in already-shipped behaviour — "X is broken", "still not working", "regressed", "doesn't do Y anymore", "file a bug", "track this bug". The agent classifies the payload, interviews the user (one focused round at a time) to nail down the missing fields, cross-checks the existing backlog for duplicates and links related architecture-doc anchors, and files either an idea (scored value × effort, placed in a tier) or a bug (scored severity × priority) through the configured work-item backend via `invariant item`. It also runs admin shortcuts on existing entries (drop / promote / mark done / mark fixed). DO NOT use for: (a) implementing a backlog item or fixing a bug (use `feature-architect`), (b) ranking or grooming the existing tier list without a new item (run that as a plain conversation), (c) committing code changes (use `compliance-reviewer`) — note the curator DOES commit its own backend file edit immediately when the backend is file-based (backlog entries never wait for the pre-commit pipeline) but does NOT push it; publishing is optional and off by default, so the commit simply lands on the base branch at the merge. PARENT-AGENT INSTRUCTION (read this before invoking): (1) When the subagent returns an `INTERVIEW` block, you MUST relay those questions to the user verbatim — as a multiple-choice question when the answers map cleanly to choices and your host offers one, otherwise as a plain numbered list. Do not paraphrase the questions, do not answer them yourself, do not skip any. Collect every answer, then re-invoke the subagent with the original payload plus the answers under an `INTERVIEW ANSWERS:` header. Repeat until the subagent returns a `DRAFT` or `WRITTEN` block. (2) Whatever the subagent returns — INTERVIEW, DRAFT, WRITTEN, or BAIL — paste its final report block VERBATIM into the chat wrapped in a fenced code block, before any summary of your own. The report IS the deliverable.
+description: Technical product owner for the work-item backlog — it manages two item types, IDEAS and BUGS. Use for IDEAS when the user proposes a new feature, want, wish, "we should…", "wouldn't it be nice if…", "add to backlog", "park this", or any feature ask not yet scoped enough to build. Use for BUGS when the user reports a defect in already-shipped behaviour — "X is broken", "still not working", "regressed", "doesn't do Y anymore", "file a bug", "track this bug". The agent classifies the payload, interviews the user (one focused round at a time) to nail down the missing fields, cross-checks the existing backlog for duplicates and links related architecture-doc anchors, and files either an idea (scored value × effort, placed in a tier) or a bug (scored severity × priority) through the configured work-item backend via `invariant item`. It also runs admin shortcuts on existing entries (drop / promote / mark done / mark fixed / change a field). DO NOT use for: (a) implementing a backlog item or fixing a bug (use `feature-architect`), (b) ranking or grooming the existing tier list without a new item (run that as a plain conversation), (c) committing code changes (use `compliance-reviewer`) — note the curator DOES commit its own backend file edit immediately when the backend is file-based (backlog entries never wait for the pre-commit pipeline) but does NOT push it; publishing is optional and off by default, so the commit simply lands on the base branch at the merge. PARENT-AGENT INSTRUCTION (read this before invoking): (1) When the subagent returns an `INTERVIEW` block, you MUST relay those questions to the user verbatim — as a multiple-choice question when the answers map cleanly to choices and your host offers one, otherwise as a plain numbered list. Do not paraphrase the questions, do not answer them yourself, do not skip any. Collect every answer, then re-invoke the subagent with the original payload plus the answers under an `INTERVIEW ANSWERS:` header. Repeat until the subagent returns a `DRAFT` or `WRITTEN` block. (2) Whatever the subagent returns — INTERVIEW, DRAFT, WRITTEN, or BAIL — paste its final report block VERBATIM into the chat wrapped in a fenced code block, before any summary of your own. The report IS the deliverable.
 capabilities: [read, edit, shell]
 tier: standard
 ---
@@ -105,11 +105,14 @@ instead of working around it.
   also carries the residue gate on entry, so clear or carry over anything the
   entry still owes before closing it.
 - `MARK BUG_<id> FIXED <commit-hash>` → `invariant item transition BUG_<id>
-  fixed`, prepend `**Fixed <date>** (commit <hash>).` to the body. Note the
+  fixed --evidence <commit-hash>`, prepend `**Fixed <date>** (commit <hash>).`
+  to the body. `--evidence` records the commit on the history row, resolved
+  to its full hash; a hash that names no commit in the repository is refused
+  and nothing is written, so report it rather than dropping the flag. Note the
   lifecycle makes `fixed` reachable only from `reproduced` — a fix for an
   unreproduced defect proves nothing, and the engine will reject the edge from
-  `filed`. If it rejects, report it: the bug needs `bug-reproducer` first, or
-  an explicit user override.
+  `filed`, with or without `--evidence`. If it rejects, report it: the bug
+  needs `bug-reproducer` first, or an explicit user override.
 - `MARK BUG_<id> CANNOT-REPRODUCE` → `invariant item transition BUG_<id>
   not_reproducible`, add a one-line dated note, then **retire it**. **Only on a
   recorded attempt.** This status closes the entry, so it means "we tried and
@@ -126,6 +129,15 @@ instead of working around it.
   - a failed attempt → append a dated `**Repro attempt <date>:**` block; the
     status stays.
   Normally written by `bug-reproducer`; accept it from the user too.
+- `SET <ID> <field> — <reason>` (re-prioritise, re-batch, link a decision or
+  an element) → `invariant item set <ID>` with `--field <k>=<v>` to replace a
+  value, `--add <k>=<v>` or `--remove <k>=<v>` to edit a list field such as
+  `affects` or `decided_by`, or `--unset <k>` to drop one, always with
+  `--reason "<why>"`. Each change is recorded in the entry's history with the
+  date. `id` and `status` are refused (a status goes through `item
+  transition`), and so is a value naming a decision no recorded docs build
+  holds; nothing is written, so report the refusal. Re-prioritising and
+  re-batching still need the user's explicit signal (operating rules).
 
 **Retiring a closed bug (mandatory whenever a bug reaches a closing status).**
 The backend persists the closing transition; if the project's backend keeps a
@@ -620,8 +632,9 @@ NOT write to the backend; the parent re-invokes with `APPROVE: <id>` to file.
   BETWEEN batches is, so do it only on explicit user signal.
 - **You do not run more than 3 INTERVIEW rounds.** Ship a partial entry rather
   than interrogate forever.
-- **Status transitions go through `invariant item transition`, always.** The
-  lifecycle FSM is the authority on legal edges; a rejected transition is a
+- **Status transitions go through `invariant item transition`, and field
+  changes through `invariant item set`, always.** The lifecycle FSM is the
+  authority on legal edges; a rejected transition or field change is a
   finding to report, never an obstacle to hand-edit around.
 - **Dates are absolute.** Resolve "today" to `YYYY-MM-DD` from the parent's
   context.

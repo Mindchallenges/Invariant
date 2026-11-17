@@ -1750,6 +1750,7 @@ class SessionDomain:
                 "to": migrate.get("to"),
                 "store": migrate.get("store"),
                 "identity": migrate.get("identity"),
+                "worktree": session.worktree,
             },
         )
         return session

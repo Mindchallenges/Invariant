@@ -2,7 +2,7 @@
 #
 # Sections of questions, each over one manifest key. A plain question's id is
 # the dotted key it writes. A `step` is asked by code the engine ships
-# (`commands`, `docs`, `store`), because its questions depend on each other's
+# (`home`, `commands`, `docs`, `store`), because its questions depend on each other's
 # answers and on the tree; it is data here only in where and when it is
 # asked. `core` is always asked, in order; `advanced` is asked behind one
 # question, "configure advanced settings?", default no.
@@ -12,10 +12,19 @@
 # listed twice are refused naming the entry.
 version: 1
 
-core: [ecosystems, profile, lane, coverage, docs]
+core: [home, ecosystems, profile, lane, coverage, docs]
 advanced: [agents, guidelines, records, privacy, session]
 
 sections:
+  # Where the configuration lives (ADR-020 D4): a store, the default, or the
+  # repository. A step, not a key: the levels answer where it lives.
+  home:
+    title: Where the configuration lives
+    questions:
+      - id: home
+        kind: step
+        prompt: Where does this project's invariant configuration live?
+
   ecosystems:
     title: Ecosystems and commands
     questions:

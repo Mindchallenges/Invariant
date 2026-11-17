@@ -363,6 +363,8 @@ class TestWording:
         assert panel.lane_text("house-rules") is None
         assert panel.phase_text("bugfix", "reproducing") == "Reproducing the bug"
         assert panel.phase_text("spec-first", "implementing") == "Building"
+        assert panel.lane_text("docs-project") == "docs"
+        assert panel.phase_text("docs-project", "drafting") == "Writing docs"
         assert panel.phase_text("house-rules", "green") is None
         assert panel.phase_text("house-rules", "reviewing") is None
 

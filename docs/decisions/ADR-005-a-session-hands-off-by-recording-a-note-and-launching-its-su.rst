@@ -96,7 +96,8 @@ Decisions recorded
    :affects: COMP_HOSTS_CLAUDE_CODE_LAUNCH
 
    ``hosts/claude_code_launch`` builds a ``LaunchPlan`` — the ``claude`` argv, the
-   ``cd <main checkout> && …`` shell line, and the AppleScript that types it into a
+   ``cd <main checkout> && …`` shell line (amended by D8: the launch file enters
+   the checkout, and the typed line carries no ``cd``), and the AppleScript that types it into a
    new Terminal window — and ``TerminalLauncher`` runs ``osascript`` with the script
    as one argument. The CLI reaches the launcher through one function,
    ``_handoff_launcher``, which the suite replaces for every test, so no test opens
@@ -271,6 +272,65 @@ Decisions recorded
    the tab script finds no tab, or a finished one holding only a shell, which
    it closes. The ``no_tab`` outcome now reads as a window that closed with
    Claude. The by-hand line is never ``exec``-ed.
+
+.. dec:: The launch file enters the main checkout, and a successor counts only there (amendment, BUG_129)
+   :id: DEC_ADR_005_D8
+   :status: accepted
+   :part_of: DEC_ADR_005
+   :affects: COMP_HOSTS_CLAUDE_CODE_LAUNCH, COMP_CLI_MAIN
+
+   *Added after acceptance, from BUG_129. It extends D3 and D7 without
+   reversing either, so it is recorded here rather than in a new ADR, as D6
+   and D7 were.*
+
+   ``do script`` types the line before the window's shell has started, so a
+   start-up step that reads the terminal can eat its first characters.
+   oh-my-zsh's update prompt (``read -r -k 1``) ate the ``c`` of
+   ``cd <main> && exec …``; zsh ran its ``d`` alias (``dirs``), which succeeds
+   without moving, and the successor started in the home directory. The watch
+   matched its flags, so the handoff counted it and ended the parent.
+
+   **The launch file decides the directory.** It runs
+   ``cd -- <main checkout> || { <message>; exit 1; }`` after removing itself
+   and before ``claude``, so where ``claude`` starts never depends on the
+   typed line arriving whole. A checkout it cannot enter ends it with status 1
+   and ``LAUNCH_NO_CHECKOUT``, which a default Terminal profile keeps on
+   screen.
+
+   **The typed line fails closed.** It is ``exec env -u … [INVARIANT_HANDOFF=…]
+   /bin/sh <launch file>``: no ``cd``, starting with ``exec``. A line missing any
+   of ``exec`` names no command and runs nothing; one missing more either
+   fails or runs the launch file, which enters the checkout itself. The
+   ``env -u`` scrub stays on the typed line, where BUG_068 and BUG_069 put it.
+
+   **A successor counts only in the main checkout.** After the grace,
+   ``ProcessTableWatch.wait_for(name, exclude, cwd=…)`` reads each live
+   successor's working directory with ``process_cwd`` (``lsof``) and compares
+   it with the checkout as files (``same_directory``: a link or another
+   spelling of the same directory counts). The first in place is the
+   successor. Otherwise it raises ``SuccessorNotPlaced``, naming the pid and
+   where it runs, and the CLI fails the launch: exit 1, the launch file
+   removed, the by-hand line printed, and, by D7, the parent never signalled.
+
+   **A directory that cannot be read is not proof.** ``lsof`` missing,
+   refused or silent reads as "not shown to be in the checkout", and the
+   launch fails closed. The cost is a parent left open beside a successor that
+   was probably in place, which the person closes; accepting it with a
+   warning would let the defect this record exists for recur silently, and
+   that cost is a lost session and lost remote access.
+
+   *Rejected:* terminating a misplaced successor. After the launch file's
+   ``cd``, a ``claude`` with these flags somewhere else is not one this launch
+   placed, so it is not proven to be this launch's to end, and an unreadable
+   directory may hide one that is exactly where it should be. A wrong SIGTERM
+   ends a working session; a misplaced one left alone waits at its trust
+   prompt for its user. The error names its pid instead.
+
+   *Rejected:* moving the ``env -u`` scrub and the token into the launch file
+   and typing only ``exec /bin/sh <launch file>``. Starting the line with
+   ``exec`` already makes an eaten prefix run nothing, and the scrub has one
+   owner on the typed line that BUG_068 and BUG_069's proofs pin; two copies
+   would be two places to keep in step.
 
 Consequences
 ------------

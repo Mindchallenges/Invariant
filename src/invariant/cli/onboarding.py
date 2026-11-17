@@ -3,13 +3,16 @@
 Offers only (ruling D): every question goes through a
 :class:`~invariant.cli.prompts.Prompter`, and a run that may not ask never
 reaches this module's questions. The existing docs directory is never
-written: reuse leaves it as it is, another repo path points `paths.docs`
-elsewhere, and a store makes the project a store project (ADR-014 D2), with
-`records.docs: store` and a store-relative `paths.docs` in the store's block
-for this repository, or printed to add by hand where that file holds
-comments a rewrite would drop. An in-repo manifest cannot carry a `store` record, since
-an in-repo project does no store lookup (manifest.md, "Records and their
-locations"), so the store choice writes no `.claude/invariant.yaml`.
+written: reuse leaves it as it is, and another path points `paths.docs`
+elsewhere, in the home the configuration lives in (ADR-020 D4): the
+repository, or the store, where the path is store-relative.
+
+The store itself is the home's, placed by :func:`place_store` (ADR-020 D1):
+created or linked, then this repository's block written with every record's
+location and `paths.docs`, or printed to add by hand where that file holds
+comments a rewrite would drop. An in-repo manifest cannot carry a `store`
+record, since an in-repo project does no store lookup (manifest.md, "Records
+and their locations"), so the store home writes no `.claude/invariant.yaml`.
 
 The plan is shared with `invariant docs assess --plan`: one parked
 `docs`-lane session holding one deliverable per undocumented area, recorded
@@ -26,7 +29,7 @@ from typing import Any
 from ..core import plan as plan_reader
 from ..core.manifest import Manifest, manifest_tracking, project_relative
 from ..core.stores import (
-    STORE_MANIFEST,
+    HomeStore,
     StoreWrite,
     by_hand_block,
     init_store,
@@ -46,11 +49,11 @@ from .prompts import Prompter
 #: The task slug of the parked session the all-at-once plan sits on.
 PLAN_TASK = "document-architecture"
 
-#: Where the docs go (D4.1).
+#: Where the docs go (D4.1), within the home: the repository or the store
+#: (ADR-020 D4). The home itself is chosen before, by `home:location`.
 LOCATIONS = (
     ("reuse", "keep it as invariant's architecture docs; nothing is written"),
-    ("path", "point paths.docs at another directory in this repository"),
-    ("store", "keep the docs in a store outside the repository (ADR-014)"),
+    ("path", "point paths.docs at another directory in {within}"),
 )
 
 #: How the gaps are closed (D4.3). `not_now` is the default: it writes nothing.
@@ -68,12 +71,10 @@ _LISTED = 8
 class DocsChoice:
     """Where `init` puts invariant's architecture docs."""
 
-    #: ``reuse``, ``path`` or ``store``.
+    #: ``reuse`` or ``path``.
     kind: str
-    #: ``paths.docs``: repo-relative, or store-relative for ``store``.
+    #: ``paths.docs``: relative to the home, the repository or the store.
     docs: str
-    #: For ``store``, the path given: empty creates one at the default.
-    store: str = ""
 
 
 @dataclass
@@ -90,6 +91,7 @@ class StorePlacement:
     lines: tuple[str, ...]
     held: StoreWrite | None = None
     held_repo: dict[str, Any] = field(default_factory=dict)
+    held_top: dict[str, Any] = field(default_factory=dict)
     #: Keys to take out of the block by hand (ADR-017 ruling 12).
     held_removals: tuple[str, ...] = ()
 
@@ -110,6 +112,18 @@ class StorePlacement:
         self.held_removals += tuple(remove)
         return f"not written, to add by hand: {settings} (see below)"
 
+    def write_top(self, settings: Mapping[str, Any]) -> str:
+        """Write ``settings`` at the store's own level, or hold them with the
+        rest when the file is held; the action line either way."""
+        spelled = ", ".join(setting_lines(settings))
+        if self.held is None:
+            result = write_store_settings(self.root, self.key, top=settings)
+            if result.written:
+                return f"write {spelled} to the store's own level, {result.path}"
+            self.held = result
+        self.held_top = _merge(self.held_top, settings)
+        return f"not written, to add by hand: {spelled} (see below)"
+
     def by_hand(self) -> dict[str, str] | None:
         """The block to add by hand, where it goes and why; ``None`` when
         everything was written."""
@@ -122,7 +136,7 @@ class StorePlacement:
         return {
             "path": str(self.held.path),
             "reason": reason,
-            "yaml": by_hand_block(self.key, None, self.held_repo),
+            "yaml": by_hand_block(self.key, self.held_top or None, self.held_repo),
         }
 
 
@@ -190,75 +204,71 @@ def offer_location(
     prompter: Prompter,
     root: Path,
     docs: str,
-    store_refusal: str | None,
     *,
+    within: str = "the repository",
     new_project: bool = False,
 ) -> DocsChoice:
-    """D4.1: reuse the existing `paths.docs`, another repo path, or a store.
+    """D4.1: reuse the existing `paths.docs`, or another path, both inside
+    ``root``, the home's root: the repository, or the store (ADR-020 D4).
 
-    ``store_refusal`` says why no store can be offered here, and the offer
-    leaves it out, saying so. For a ``new_project``, a path whose docs project
-    would be a content folder is refused and asked again (ADR-020 D8); an
-    existing project keeps the location it has.
+    For a ``new_project``, a path whose docs project would be a content
+    folder is refused and asked again (ADR-020 D8); an existing project
+    keeps the location it has.
     """
     prompter.say(describe(root / docs, docs))
-    options = [option for option in LOCATIONS if option[0] != "store" or not store_refusal]
-    if store_refusal:
-        prompter.say(f"A store is not offered: {store_refusal}")
+    options = [(kind, text.format(within=within)) for kind, text in LOCATIONS]
     kind = prompter.choose("Where should invariant's architecture docs live?", options, "reuse")
     if kind == "path":
         chosen = _relative(
             prompter,
-            "paths.docs, relative to the repository",
+            f"paths.docs, relative to {within.removeprefix('the ')}",
             docs,
-            "the repository",
+            within,
             new_project=new_project,
         )
         return DocsChoice("reuse", docs) if chosen == docs else DocsChoice("path", chosen)
-    if kind == "store":
-        store = prompter.ask(
-            "store path (empty: a new store under the invariant home; a path holding "
-            "a store links it, any other creates one there)",
-            "",
-        )
-        chosen = _relative(
-            prompter, "paths.docs, relative to the store", docs, "the store", new_project=new_project
-        )
-        return DocsChoice("store", chosen, store)
     return DocsChoice("reuse", docs)
 
 
-def place_in_store(
-    top: Path, choice: DocsChoice, project: Mapping[str, Any]
+def place_store(
+    top: Path,
+    home: HomeStore,
+    project: Mapping[str, Any],
+    block: Mapping[str, Any],
+    store_level: Mapping[str, Any] | None = None,
 ) -> StorePlacement:
-    """Create or link the store ``choice`` names, and write this repository's
-    docs location into it (D4.1).
+    """Create or link the store ``home`` names, and write this repository's
+    block into it (ADR-020 D1): every record's location and `paths.docs`.
 
     A store created here is this project's, so ``project`` (what `init` would
-    have written in-repo) goes to its own level; a store that already
-    existed keeps its own policy, and only this repository's block changes.
-    A store file holding comments is not rewritten: the settings are held on
-    the placement, and `init` prints them to add by hand.
+    have written in-repo, the project and its profile) goes to its own level;
+    a store that already existed keeps its own policy, and only this
+    repository's block changes. A store file holding comments is not
+    rewritten: the settings are held on the placement, and `init` prints
+    them to add by hand. ``store_level`` are answers given at the store's
+    own level (ADR-017 D4).
     """
-    given = Path(choice.store).expanduser() if choice.store else None
-    if given is not None and (given / STORE_MANIFEST).is_file():
-        linked = link_repo(top, given)
+    if home.link:
+        linked = link_repo(top, home.root)
         root, key, created = linked.store, linked.key, False
-        lines = [f"link the store {root} as {key}"]
     else:
-        made = init_store(top, given)
+        made = init_store(top, home.root)
         root, key, created = made.store, made.linked.key, True
-        lines = [f"create the store {root} and link it as {key}"]
-        if made.note:
-            lines.append(made.note)
+    lines = [
+        f"link the store {root} as {key}"
+        if home.link
+        else f"create the store {root} and link it as {key}"
+    ]
+    if home.note:
+        lines.append(home.note)
     placement = StorePlacement(root=root, key=key, lines=())
     if created:
         # A store made a moment ago holds no comment of anyone's, so this
         # write always lands.
         write_store_settings(root, key, top=project)
-    lines.append(
-        placement.write({"records": {"docs": "store"}, "paths": {"docs": choice.docs}})
-    )
+    if store_level:
+        lines.append(placement.write_top(store_level))
+    lines.append(placement.write(block))
     placement.lines = tuple(lines)
     return placement
 

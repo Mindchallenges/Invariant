@@ -38,6 +38,7 @@ from invariant.core.errors import ManifestError
 from invariant.core.home import user_config_path
 from invariant.core.manifest import MANIFEST_RELPATH, Manifest
 from invariant.core.store import JsonStore
+from invariant.core.storemigrate import STORE_HOME_RECORDS
 from invariant.core.stores import POINTER, read_pointer, write_store_settings
 from invariant.domains.docs import Area, Assessment, Gap, plan_deliverables
 from invariant.domains.pipeline import PipelineDomain
@@ -198,7 +199,42 @@ def interactive(monkeypatch):
 
 
 def init(capsys, *extra: str) -> tuple[int, str]:
-    return run(capsys, "init", "--host-install", "--ecosystem", "generic", "--name", "toy", *extra)
+    return run(
+        capsys, "init", "--home", "repo", "--host-install", "--ecosystem", "generic",
+        "--name", "toy", *extra,
+    )
+
+
+def init_store(capsys, *extra: str) -> tuple[int, str]:
+    """`init` with the store home, the default (ADR-020 D1)."""
+    return run(
+        capsys, "init", "--host-install", "--ecosystem", "generic", "--name", "toy", *extra
+    )
+
+
+def store_for(repo: Path, store: Path, *, docs: str | None = None, text: str | None = None,
+              project: str = "shared") -> Path:
+    """A store at ``store`` that lists ``repo``, holding ``docs`` (a docs
+    directory, store-relative) when given, so the location offer arises in
+    the store (ADR-020 D4)."""
+    from invariant.core.stores import ensure_local_id
+
+    store.mkdir(parents=True)
+    git(store, "init", "-q", "-b", "main")
+    key = ensure_local_id(repo).key
+    if text is None:
+        text = yaml.safe_dump(
+            {
+                "version": 1,
+                "project": {"name": project, "ecosystems": ["generic"]},
+                "store": {"repos": {key: {}}},
+            }
+        )
+    (store / "invariant.yaml").write_text(text.replace("KEY", key), encoding="utf-8")
+    if docs is not None:
+        (store / docs).mkdir(parents=True)
+        (store / docs / "notes.txt").write_text("the store's own\n", encoding="utf-8")
+    return store
 
 
 def area_gaps(assessment: dict) -> list[str]:
@@ -572,7 +608,7 @@ class TestNonInteractiveInit:
         if shape == "unrelated":
             (toy / SRC / "architecture").mkdir(parents=True)
         code, text = run(
-            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
+            capsys, "--json", "init", "--home", "repo", "--host-install", "--ecosystem", "generic", "--name", "toy"
         )
         assert code == 0, text
         payload = json.loads(text)
@@ -595,7 +631,7 @@ class TestNonInteractiveInit:
         assert tree(toy) == before
         assert "docs assessment:" in text
         code, text = run(
-            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy", "--dry-run"
+            capsys, "--json", "init", "--home", "repo", "--host-install", "--ecosystem", "generic", "--name", "toy", "--dry-run"
         )
         payload = json.loads(text)
         assert "beta" in area_gaps(payload["docs_assessment"])
@@ -609,7 +645,7 @@ class TestNonInteractiveInit:
 
         monkeypatch.setattr("invariant.domains.docs.assess", broken)
         code, text = run(
-            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
+            capsys, "--json", "init", "--home", "repo", "--host-install", "--ecosystem", "generic", "--name", "toy"
         )
         assert code == 0, text
         assert "cannot be read" in json.loads(text)["docs_assessment"]["error"]
@@ -651,7 +687,7 @@ class TestLocationOffer:
         scripted = interactive("reuse", "not_now")
         code, text = init(capsys)
         assert code == 0, text
-        assert scripted.asked[0][1] == ["reuse", "path", "store"]
+        assert scripted.asked[0][1] == ["reuse", "path"]
         assert any("notes.txt" in said for said in scripted.said)
         assert (unrelated / MANIFEST_RELPATH).read_text(encoding="utf-8") == TODAYS_MANIFEST
         assert tree(unrelated / SRC) == before
@@ -688,13 +724,17 @@ class TestLocationOffer:
         assert Manifest.locate(unrelated).get("paths.docs") == "design"
         assert list((unrelated / "design").iterdir()) == [unrelated / "design" / "mine.md"]
 
-    def test_a_new_store_leaves_records_docs_store_and_the_directory_unchanged(
+    def test_the_store_home_leaves_the_repositorys_directory_unchanged(
         self, unrelated, capsys, interactive
     ):
+        """The store is the home's (ADR-020 D4): the repository's own folder
+        of that name is never offered or touched, and the starter goes to the
+        store."""
         before = tree(unrelated / SRC)
-        interactive("store", "", "", "not_now")
-        code, text = init(capsys)
+        scripted = interactive("not_now")
+        code, text = init_store(capsys)
         assert code == 0, text
+        assert not [keys for _q, keys in scripted.asked if "reuse" in keys]
         assert not (unrelated / MANIFEST_RELPATH).exists()
         m = Manifest.locate(unrelated)
         assert m.store is not None
@@ -710,39 +750,26 @@ class TestLocationOffer:
         assert m.get("records.backlog") == "store"
         assert tree(unrelated / SRC) == before
         assert str(m.store.root) in text
-        assert "the manifest lives there" in text
+        assert "the configuration lives there" in text
 
-    def test_an_existing_store_is_linked(self, unrelated, capsys, interactive, tmp_path):
-        store = tmp_path / "shared"
-        store.mkdir()
-        git(store, "init", "-q", "-b", "main")
-        # The store must list the repo; link writes the repo's local ID first,
-        # so list it by the ID it will get.
-        from invariant.core.stores import ensure_local_id
-
-        identity = ensure_local_id(unrelated)
-        (store / "invariant.yaml").write_text(
-            yaml.safe_dump(
-                {
-                    "version": 1,
-                    "project": {"name": "shared", "ecosystems": ["generic"]},
-                    "store": {"repos": {identity.key: {}}},
-                }
-            ),
-            encoding="utf-8",
-        )
+    def test_an_existing_store_is_linked_and_offers_its_own_location(
+        self, unrelated, capsys, interactive, tmp_path
+    ):
+        store = store_for(unrelated, tmp_path / "shared", docs=f"{SRC}/architecture")
         before = tree(unrelated / SRC)
-        interactive("store", str(store), "notes/arch", "not_now")
-        code, text = init(capsys)
+        scripted = interactive("path", "notes/arch", "not_now")
+        code, text = init_store(capsys, "--store", str(store))
         assert code == 0, text
+        assert scripted.asked[0][1] == ["reuse", "path"]
+        assert any("relative to store" in question for question, _k in scripted.asked)
         m = Manifest.locate(unrelated)
         assert m.store.root == store.resolve()
         assert m.get("records.docs") == "store"
         assert m.path_for("docs") == store.resolve() / "notes" / "arch"
         assert m.get("project.name") == "shared"
         body = yaml.safe_load((store / "invariant.yaml").read_text(encoding="utf-8"))
-        assert body["store"]["repos"][identity.key] == {
-            "records": {"docs": "store", "backlog": "store", "guidelines": "store"},
+        assert body["store"]["repos"][m.store.key] == {
+            "records": STORE_HOME_RECORDS,
             "paths": {"docs": "notes/arch"},
             "docs": STARTER_STORE["docs"],
             "items": STARTER_STORE["items"],
@@ -750,29 +777,22 @@ class TestLocationOffer:
         }
         assert tree(unrelated / SRC) == before
 
-    def commented_store(self, repo, tmp_path) -> Path:
-        from invariant.core.stores import ensure_local_id
-
-        store = tmp_path / "shared"
-        store.mkdir()
-        git(store, "init", "-q", "-b", "main")
-        key = ensure_local_id(repo).key
-        (store / "invariant.yaml").write_text(
-            "# The team's store: every key here was reviewed.\n"
-            "version: 1\n"
-            "project:\n  name: shared\n  ecosystems: [generic]\n"
-            f"store:\n  repos:\n    {key}: {{}}  # added by hand\n",
-            encoding="utf-8",
-        )
-        return store
+    COMMENTED = (
+        "# The team's store: every key here was reviewed.\n"
+        "version: 1\n"
+        "project:\n  name: shared\n  ecosystems: [generic]\n"
+        "store:\n  repos:\n    KEY: {}  # added by hand\n"
+    )
 
     def test_a_commented_store_is_left_alone_and_the_block_is_printed(
         self, unrelated, capsys, interactive, tmp_path
     ):
-        store = self.commented_store(unrelated, tmp_path)
+        store = store_for(
+            unrelated, tmp_path / "shared", docs=f"{SRC}/architecture", text=self.COMMENTED
+        )
         before = (store / "invariant.yaml").read_bytes()
-        interactive("store", str(store), "notes/arch", "incremental")
-        code, text = init(capsys)
+        interactive("path", "notes/arch", "incremental")
+        code, text = init_store(capsys, "--store", str(store))
         assert code == 0, text
         assert (store / "invariant.yaml").read_bytes() == before
         assert "comment" in text
@@ -782,7 +802,7 @@ class TestLocationOffer:
             "store": {
                 "repos": {
                     key: {
-                        "records": {"docs": "store", "backlog": "store", "guidelines": "store"},
+                        "records": STORE_HOME_RECORDS,
                         "paths": {"docs": "notes/arch"},
                         "docs": {**STARTER_STORE["docs"], "onboarding": "incremental"},
                         "items": STARTER_STORE["items"],
@@ -794,10 +814,11 @@ class TestLocationOffer:
         assert not (unrelated / MANIFEST_RELPATH).exists()
 
     def test_the_block_is_a_json_field(self, unrelated, capsys, interactive, tmp_path):
-        store = self.commented_store(unrelated, tmp_path)
-        interactive("store", str(store), "", "not_now")
+        store = store_for(unrelated, tmp_path / "shared", text=self.COMMENTED)
+        interactive("not_now")
         code, text = run(
-            capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
+            capsys, "--json", "init", "--host-install", "--ecosystem", "generic",
+            "--name", "toy", "--store", str(store),
         )
         assert code == 0, text
         by_hand = json.loads(text)["store_settings_by_hand"]
@@ -805,7 +826,7 @@ class TestLocationOffer:
         assert "comment" in by_hand["reason"]
         key = Manifest.locate(unrelated).store.key
         assert yaml.safe_load(by_hand["yaml"])["store"]["repos"][key] == {
-            "records": {"docs": "store", "backlog": "store", "guidelines": "store"},
+            "records": STORE_HOME_RECORDS,
             "paths": {"docs": "invariant-docs/architecture"},
             "docs": {"format": "sphinx", "needs": {"state": "enforced", "srcdir": "invariant-docs"}},
             "items": {"backend": "sphinx_needs", "path": "invariant-docs/backlog.rst"},
@@ -815,7 +836,7 @@ class TestLocationOffer:
     def test_an_uncommented_store_carries_no_by_hand_field(
         self, unrelated, capsys, interactive
     ):
-        interactive("store", "", "", "not_now")
+        interactive("not_now")
         code, text = run(
             capsys, "--json", "init", "--host-install", "--ecosystem", "generic", "--name", "toy"
         )
@@ -823,10 +844,11 @@ class TestLocationOffer:
         assert json.loads(text)["store_settings_by_hand"] is None
 
     def test_a_store_relative_path_that_climbs_out_is_asked_again(
-        self, unrelated, capsys, interactive
+        self, unrelated, capsys, interactive, tmp_path
     ):
-        scripted = interactive("store", "", "../up", "arch", "not_now")
-        assert init(capsys)[0] == 0
+        store = store_for(unrelated, tmp_path / "shared", docs=f"{SRC}/architecture")
+        scripted = interactive("path", "../up", "arch", "not_now")
+        assert init_store(capsys, "--store", str(store))[0] == 0
         assert Manifest.locate(unrelated).get("paths.docs").endswith("/arch")
         assert any("../up" in said for said in scripted.said)
 
@@ -837,17 +859,18 @@ class TestLocationOffer:
         (root / SRC / "architecture").mkdir(parents=True)
         monkeypatch.chdir(root)
         scripted = interactive("reuse", "not_now")
-        assert init(capsys)[0] == 0
+        code, text = init(capsys)
+        assert code == 0, text
         assert scripted.asked[0][1] == ["reuse", "path"]
-        assert any("not inside a git repository" in said for said in scripted.said)
 
     def test_no_store_is_offered_to_an_in_repo_project(self, unrelated, capsys, interactive):
         (unrelated / MANIFEST_RELPATH).parent.mkdir(parents=True)
         (unrelated / MANIFEST_RELPATH).write_text(TODAYS_MANIFEST, encoding="utf-8")
         scripted = interactive("reuse", "not_now")
-        assert init(capsys, "--force")[0] == 0
+        assert init_store(capsys, "--force")[0] == 0
         assert scripted.asked[0][1] == ["reuse", "path"]
-        assert any("store migrate" in said for said in scripted.said)
+        # An in-repo project keeps its home (ADR-020 D2): no store is made.
+        assert Manifest.locate(unrelated).store is None
 
     def test_absent_docs_ask_no_location(self, toy, capsys, interactive):
         scripted = interactive("not_now")
@@ -909,23 +932,11 @@ class TestOnboardingOffer:
     ):
         # Docs already in the store with a gap: a starter, written where the
         # docs are absent, would leave none to plan (ADR-018 D11).
-        from invariant.core.stores import ensure_local_id
-
-        store = tmp_path / "shared"
-        (store / "notes" / "arch").mkdir(parents=True)
-        (store / "notes" / "arch" / "overview.md").write_text(HALF, encoding="utf-8")
-        git(store, "init", "-q", "-b", "main")
-        key = ensure_local_id(unrelated).key
-        (store / "invariant.yaml").write_text(
-            yaml.safe_dump({
-                "version": 1,
-                "project": {"name": "shared", "ecosystems": ["generic"]},
-                "store": {"repos": {key: {}}},
-            }),
-            encoding="utf-8",
-        )
-        interactive("store", str(store), "notes/arch", "all_at_once")
-        code, text = init(capsys)
+        store = store_for(unrelated, tmp_path / "shared")
+        (store / SRC / "architecture").mkdir(parents=True)
+        (store / SRC / "architecture" / "overview.md").write_text(HALF, encoding="utf-8")
+        interactive("reuse", "all_at_once")
+        code, text = init_store(capsys, "--store", str(store))
         assert code == 0, text
         m = Manifest.locate(unrelated)
         assert m.get("docs.onboarding") == "all_at_once"

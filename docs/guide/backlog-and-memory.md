@@ -13,12 +13,19 @@ invariant item new idea --title "Bulk export" --body "…"
 invariant item list [--type bug|idea] [--status <s>] [--open]
 invariant item show BUG_003
 invariant item transition BUG_003 reproduced
+invariant item set BUG_003 --field priority=high --add affects=COMP_EXPORT --reason "user ruling"
 invariant item residue BUG_003 --add "device soak still owed"
 ```
 
 Every item carries a type, an id minted from the type and `items.id_strategy`
 (`BUG_003`, or `BUG_EXPORT_DROPS_ROW` with `slug`), a status that is a state
 of that type's machine, and a history of transitions with reasons.
+
+`item set` changes the fields an item was filed with: `--field k=v` replaces a
+value, `--add k=v` and `--remove k=v` edit a comma-separated list such as
+`affects`, and `--unset k` drops a field. `--reason` is required, and each
+change lands in the history with its date, beside the transitions. The id and
+the status are not fields: a status is reached with `item transition`.
 
 ### The bug lifecycle
 

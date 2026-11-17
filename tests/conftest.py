@@ -137,18 +137,21 @@ class InertWatch:
     It answers what a stub launcher makes true: nothing was started, so there
     is no successor, and a handoff that reaches it fails as a real one with no
     successor would. A test whose subject is the launch that worked sets
-    ``pid`` to the successor it pretends was found.
+    ``pid`` to the successor it pretends was found, which it then reports in
+    the directory it was asked about; ``places`` records each one (BUG_129).
     """
 
     def __init__(self, pid: int | None = None) -> None:
         self.pid = pid
         self.watched: list[tuple[str, set[int]]] = []
+        self.places: list[str] = []
 
     def running(self, name: str) -> set[int]:
         return set()
 
-    def wait_for(self, name: str, exclude: set[int]) -> int | None:
+    def wait_for(self, name: str, exclude: set[int], *, cwd: str) -> int | None:
         self.watched.append((name, set(exclude)))
+        self.places.append(cwd)
         return self.pid
 
 

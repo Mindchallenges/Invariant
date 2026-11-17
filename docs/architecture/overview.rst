@@ -25,10 +25,10 @@ Layers
        subgraph cli["cli/ — entrypoint"]
            CLI[invariant CLI]
            CREPLAY["conformance replay"]
-           CONBOARD["onboarding: init's docs offers, the plan (ADR-016 D4, D5)"]
+           CONBOARD["onboarding: init's docs offers, the home's store placed, the plan (ADR-016 D4, D5; ADR-020 D1)"]
            CPROMPTS["prompts (ADR-016 D4)"]
            CCONFIG["configure: asks a questionnaire run (ADR-017 D2, D3)"]
-           CMIGRATE["migrate: store migrate's sequence (ADR-014 D12, inc 7a)"]
+           CMIGRATE["migrate: store migrate's sequence (ADR-014 D12, inc 7a, 7b)"]
        end
 
        subgraph oracle["oracle/ — machine-wide view (ADR-007)"]
@@ -63,6 +63,7 @@ Layers
            PRIVACY[privacy]
            STATS[stats]
            GIT[git]
+           CSHELL["shell (ADR-025 D2): lex, git_options, working_directories"]
            PLAN[plan]
            CSWEEP["sweep (ADR-010)"]
            CONF["conformance (ADR-012 D11)"]
@@ -76,12 +77,13 @@ Layers
            CDOCLOCK["doclock (ADR-014 D5, inc 4a, 4b)"]
            CSYNC["storesync (ADR-014 D7, inc 5a; the push, D8)"]
            CSCAN["storescan (ADR-014 D8, inc 6)"]
-           CSTOREMIG["storemigrate (ADR-014 D12, inc 7a): plan, history, marker"]
+           CSTOREMIG["storemigrate (ADR-014 D12, inc 7a, 7b): plans, history, marker"]
            CDOCFMT["docformat (ADR-016 D1): markdown, rst"]
            CNEEDS["needs (ADR-018 D2, D3, D5, D6)"]
            CMDCONV["mdconvert (ADR-018 D14)"]
            CQUEST["questionnaire (ADR-017 D1, D2)"]
            CSTEPS["steps (ADR-021 D1 to D4): declarations, the record"]
+           CRULINGS["rulings (ADR-021 D6 to D8): loosenings, the in-place write"]
        end
 
        subgraph domains["domains/ — the nine state domains"]
@@ -123,6 +125,7 @@ Layers
        CC -- "wiring_plan(repo or local), the receipt, the exclude lines, drift" --> CCWIRE
        CCWIRE -- "common_dir: the clone's info/exclude" --> GIT
        CC -- "main_checkout: the receipt's root" --> GIT
+       CC -- "working_directories: a shell call's proof of place (ADR-025 D1)" --> CSHELL
        CLI -. "session isolate --execute renders local wiring into the worktree through" .-> CC
        CLI --> SESSION
        CLI --> PIPELINE
@@ -252,6 +255,7 @@ Layers
        RULES --> MANIFEST
        RULES --> adapters
        RULES --> GIT
+       RULES -- "lex, git_options: the commit route of privacy.clean" --> CSHELL
        SESSION --> GIT
        SESSION -- "manifest_tracking: isolate copies a local manifest (ADR-020 D11)" --> MANIFEST
        WORKITEM --> GIT
@@ -287,7 +291,7 @@ Layers
        CC -- reads the sources --> AGENTS
        CC -- "parse, merge, AgentSource: plan_assets renders every agent with its overlay" --> CAGENTS
        CC -- "agents.library, agents.overlays, agents.tiers, host.tier_map; project_relative" --> MANIFEST
-       CC -- "the overlay's privacy scan" --> PRIVACY
+       CC -- "the overlay's privacy scan; AttributionTrailer, which ATTRIBUTION_TRAILERS declares (ADR-024 D1)" --> PRIVACY
        CC -- "is_exempt_path: an overlay is policy (D10); agents_currency, AgentCopy, AGENTS_REPAIR: the library agents current and agent tier hints rows" --> RULES
        CLI -- "AgentSource, for agents show and its section list" --> CAGENTS
        CAGENTS -- the neutral format it parses --> AGENTS
@@ -307,6 +311,7 @@ Layers
        CFIND -- project_relative --> MANIFEST
        CLI --> GDOM
        CLI -. injects INSTRUCTION_FILES and agent_copies into the rule context, PIPELINE and OGATES from .-> CC
+       CLI -. "injects ATTRIBUTION_TRAILERS into the rule context (ADR-024 D1) from" .-> CC
        GDOM -- render_checklist, split_managed, for show; ROLE_PHASES, phases_for, select, render_selected, for show --phase --> CGUIDE
        GDOM -- plan_render, plan_baseline, ruleset_or_refuse, touched_paths, policy_relpath --> RULES
        CLI -. "hands SessionDomain.docs_write in as GDOM's admit (ADR-014 D5, inc 4c-2)" .-> GDOM
@@ -319,17 +324,18 @@ Layers
        CLI -- "docs assess, docs adopt, doctor's docs adoption row" --> DOCSD
        CLI -- "docs venv, docs build; doctor's docs mandate, docs venv and plantuml rows" --> DOCSD
        DOCSD -- "srcdir_of, docs_store_root, tree_digest, BuildRecord, read_record: the record it writes" --> CNEEDS
-       DOCSD -- "diagnostics: one reading of a Sphinx run" --> SPHINX
-       RULES -- "docs.builds_strict, docs.needs_traceable: srcdir_of, tree_digest, read_record, load_needs_json, check" --> CNEEDS
+       DOCSD -- "diagnostics: one reading of a Sphinx run; conf_facts: a conf.py's extensions and needs_types directives" --> SPHINX
+       RULES -- "docs.builds_strict, docs.needs_traceable: srcdir_of, tree_digest, read_record, load_needs_json, check, by_setting, sample, advise" --> CNEEDS
        CLI -- "init: srcdir_of, resolve_srcdir: the docs project the adapters skip" --> CNEEDS
        PIPELINE -- "srcdir_of: the docs project a run's adapter skips" --> CNEEDS
+       PIPELINE -- "tree_signature: the tree a coverage run measured, the gate receipt (ADR-026)" --> GIT
        SWEEPD -- "srcdir_of: the docs project the sweep's adapter skips" --> CNEEDS
        MANIFEST -. "type_problems, link_rule_problems, resolve_srcdir: the docs.needs load check, imported at call time" .-> CNEEDS
        CNEEDS -. "project_relative, DEFAULTS, imported at call time" .-> MANIFEST
        RULES -. "docs.assessment, docs.area_documented, imported at call time" .-> DOCSD
        DOCSD -- "headings, links: the reader for docs.format; detect_format; rst_directives, the element needs" --> CDOCFMT
        DOCSD -- "render_rule_needs, render_checklist: the starter's two generated pages; ruleset_location: where the starter's ruleset goes" --> CGUIDE
-       CLI -- "init: plan_starter, write_starter, sync_venv" --> DOCSD
+       CLI -- "init: plan_starter, write_starter, sync_venv, adoption_note" --> DOCSD
        CLI -- "docs decision new: new_decision" --> DOCSD
        CLI -- "docs migrate adr, prose: migrate_adr, migrate_prose" --> DOCSD
        DOCSD -- "convert_adr, convert_prose: pandoc's tree rewritten, pandoc handed in" --> CMDCONV
@@ -359,26 +365,30 @@ Layers
        CLI -- "_init_prompter: a terminal, or nobody" --> CPROMPTS
        CONBOARD -- "say, choose, ask" --> CPROMPTS
        CONBOARD -- "plan_deliverables, setting_lines" --> DOCSD
-       CONBOARD -- "init_store, link_repo, write_store_settings" --> CSTORES
+       CONBOARD -- "place_store: init_store, link_repo, write_store_settings (ADR-020 D1)" --> CSTORES
+       CLI -- "init: plan_home_store, read_store_manifest, StoreLink, find_store and read_pointer for doctor's two homes (ADR-020 D1, D5)" --> CSTORES
+       CLI -- "init: STORE_HOME_RECORDS; init and doctor's docs folder: conf_readers, confs_above; doctor: marker_note (ADR-020 D1, D5, D8)" --> CSTOREMIG
        CONBOARD -- "start parked, plan_add" --> SESSION
        CONBOARD -- "start the docs pipeline" --> PIPELINE
        CONBOARD -- "exists_at: does the base carry the manifest" --> GIT
-       CLI -- "store migrate --to store: to_store; session merge and resume: finish" --> CMIGRATE
-       CMIGRATE -- "plan_to_store, write_store, transfer, commit_store, remove_from_repo" --> CSTOREMIG
-       CMIGRATE -- "link_repo: the user level's link, at once" --> CSTORES
+       CLI -- "store migrate: refuse_records, to_store, to_repo; session merge and resume: finish" --> CMIGRATE
+       CLI -- "read_marker: session merge and resume run in a main checkout mid-move (inc 7b)" --> CSTOREMIG
+       CMIGRATE -- "plan_to_store, write_store, transfer, commit_store, remove_from_repo; plan_to_repo, lay_repo_leg, commit_repo_leg, remove_from_store (inc 7b)" --> CSTOREMIG
+       CMIGRATE -- "link_repo: the user level's link, at once; unlink_repo after a move back lands (inc 7b)" --> CSTORES
        CMIGRATE -- "start parked, isolate, record_migrate, docs_write, record_store_landed, finish_migrate" --> SESSION
        CMIGRATE -- "start the chore pipeline" --> PIPELINE
-       CMIGRATE -- "committed_wiring, remove_committed; after the merge, install_hooks and install_assets as local" --> CC
-       CSTOREMIG -- "fast_export, fast_import, fast_forward, delete_ref, commit_only, init_repository (WRITES); files_under, changed_under" --> GIT
-       CSTOREMIG -- "plan_store_path, lists, read_store_manifest, repo_name" --> CSTORES
-       CSTOREMIG -- "standing: fetch and compare, moving nothing" --> CSYNC
+       CMIGRATE -- "committed_wiring, remove_committed; after the merge, install_hooks and install_assets as local; local_wiring, commit_local, and after the merge retire_local (inc 7b)" --> CC
+       CMIGRATE -- "HOMES, conf_excludes: a content folder, a conf.py reading the docs project (ADR-020 D8)" --> SPHINX
+       CSTOREMIG -- "fast_export, fast_import, fast_forward, delete_ref, commit_only (force for the wiring), init_repository (WRITES); files_under, changed_under, exists_at, is_ignored" --> GIT
+       CSTOREMIG -- "plan_store_path, lists, read_store_manifest, repo_name, StoreLink, holds_comments" --> CSTORES
+       CSTOREMIG -- "standing: fetch and compare, moving nothing; settings" --> CSYNC
        CSTOREMIG -- "the lease record, read for a held unit" --> CDOCLOCK
        CSTOREMIG -- "repo_identity, new_local_id, write_local_id" --> CIDENT
        CSTOREMIG -- "load_user_config: the link already written" --> CHOME
-       CSTOREMIG -. "RECORD_PATH_KEYS, manifest_tracking, from_raw; srcdir_of, imported at call time" .-> MANIFEST
+       CSTOREMIG -. "RECORD_PATH_KEYS, manifest_tracking, from_raw, _overlaid; srcdir_of, imported at call time" .-> MANIFEST
        MANIFEST -. "marker_note: a store that does not list the repo mid-move, imported at call time" .-> CSTOREMIG
        SESSION -- "write_marker, clear_marker" --> CSTOREMIG
-       CLI -- "init's configuration report: load_catalogue, core_report, render_report" --> CQUEST
+       CLI -- "init's configuration report: load_catalogue, core_report, render_report; the home: HOMES, home_question, home_of (ADR-020 D4)" --> CQUEST
        CLI -- "init's questionnaire: Draft, plan, route; command_problems for doctor" --> CQUEST
        CLI -- "interactive init: the level, the core sections, the user level's writes" --> CCONFIG
        CLI -- "_questionnaire_prompter: a terminal, or nobody" --> CPROMPTS
@@ -404,6 +414,12 @@ Layers
        CLI -- "step run, step list; session.before_handoff" --> STEPSD
        CLI -- "rules_for, open_debts, debts_line" --> CSTEPS
        OSCAN -- "open_debts, debt_summary" --> CSTEPS
+       MANIFEST -. "validate: judge, imported at call time" .-> CRULINGS
+       CRULINGS -- "Level, _load_profile, profile_names, location, configured" --> MANIFEST
+       CRULINGS -- "user_config_path" --> CHOME
+       CRULINGS -- "STORE_MANIFEST, _write_atomic" --> CSTORES
+       RULES -- "config.rulings_by_user: is_config_file, changed_rulings" --> CRULINGS
+       CLI -- "rules loosen, rules carry-over, rules list, doctor's rulings row" --> CRULINGS
 
 **Built (:need:`ADR-021 <DEC_ADR_021>` increment 1,
 :need:`DEC_ADR_021_I1`).** A project's own steps. ``core/steps`` is the
@@ -427,6 +443,25 @@ calls once the session is ``merged``, and ``RULES --> CSTEPS`` gains
 ``holding_run``, the run that decides an after-merge step's hold. ``core/machines`` attaches a step's rule as an entry gate of the
 state its point names, by state id (``core/fsm``'s ``inject_entry``), and
 reads ``core/steps`` to know which.
+
+**Built (ADR-021 increment 3, :need:`DEC_ADR_021_I3`).** Rulings.
+``core/rulings`` is the one answer to what a configuration loosens (D6): a
+registered rule below its ``standard`` level, a profile that sets one there
+(keyed ``profile``) and an ``extra_machines`` entry shadowing a shipped
+machine (keyed ``machine.<name>``), judged on the levels as configured,
+before the environment's escapes. ``MANIFEST -. CRULINGS`` is ``validate``
+asking it at every load, at call time, since ``core/rulings`` imports the
+manifest's ``Level`` and profiles (``CRULINGS --> MANIFEST``).
+``CLI --> CRULINGS`` is ``rules loosen`` and ``rules carry-over`` (D7, D8),
+which plan the entries, ask at a terminal, and write them in place in the
+project's own level through it, and the surfaces that show an unruled
+loosening: ``rules list`` and ``doctor``'s ``rulings`` row.
+A shadowing machine is read through ``core/machines.shipped_ids`` at call
+time; ``core/machines`` is not drawn here. ``RULES --> CRULINGS`` is
+``config.rulings_by_user``, the ``pre-tool-use``
+rule that refuses an agent's edit adding or changing a ruling. The host
+evaluates it as it evaluates every ``pre-tool-use`` rule, so no arrow
+leaves ``hosts/`` for it.
 
 ``MANIFEST --> CHOME`` is the user level of the configuration (ADR-014 D3,
 increment 2): ``core/home`` reads ``~/.invariant/config.yaml``, and the manifest
@@ -505,6 +540,31 @@ the merge stays pure. The host now takes the manifest: ``CC --> MANIFEST`` is
 because an overlay is policy and may not be exempt (ADR-012 D10).
 ``CC --> PRIVACY`` is the scan of the merged text, which refuses only what
 the overlay brings.
+
+``CC --> CSHELL`` and ``RULES --> CSHELL`` are one shell reader with two
+callers (ADR-025 D2, BUG_125). ``core/shell`` is the lexer BUG_132 built for
+the commit route of ``privacy.clean``, lifted out of ``core/rules`` with the
+reading of git's own options, and ``working_directories``, the directories a
+command's commands run in. The host reads that to place a subagent's shell
+call for an actor row (ADR-025 D1; ``state_model.rst``, "Attribution"), and
+the rule reads the same lexer for which ``git commit`` a command runs and
+where, so the two cannot disagree about how bash splits a line.
+``core/shell`` imports nothing of the library.
+
+``CC --> PRIVACY`` carries a second name since BUG_127, ``AttributionTrailer``
+(ADR-024 D1). Claude Code asks an agent to end each commit with a
+``Claude-Session`` trailer linking the host session, and ``links`` read it as a
+leak on every commit. Which trailer a host writes is the host's answer, so
+``hosts/claude_code`` declares it (``ATTRIBUTION_TRAILERS``: the token and the
+whole shape of its value), and ``core/privacy`` reads a commit message's
+trailer block without knowing any host's token (``scan_message``). Nothing
+below the CLI imports a host, so the CLI supplies the declarations as
+``RuleContext.host_attribution_trailers`` on the rule context it builds, the one
+the commit hook and ``invariant check`` evaluate (``CLI -. injects
+ATTRIBUTION_TRAILERS into the rule context .-> CC``). ``PipelineDomain`` and the
+oracle's gate cache are not handed them: a transition gives ``privacy.clean`` no
+commit message. A ``host.kind`` with no adapter declares none, and then every
+line of a message is read alike.
 
 A6 increment 4 adds the drift rule, ``agents.rendered_current`` (ADR-012 D8,
 the A6 ruling 10). Its answer has to be the install plan, so "current" means
@@ -673,6 +733,31 @@ of the session's worktree for the repository leg, and installs it again as
 ``local`` once that leg has landed (``finish``, from ``session merge`` and
 ``session resume``), never before, so nothing fires twice.
 
+**Built (ADR-014 D12, increment 7b; :need:`DEC_ADR_014_I7B`).** ``store
+migrate --to repo`` runs over the same arrows the other way.
+``CMIGRATE --> CSTOREMIG`` gains ``plan_to_repo`` (the plan, the
+materialised ``.claude/invariant.yaml`` and every refusal of that
+direction, the placement checks shared with ``--to store``),
+``lay_repo_leg`` and ``commit_repo_leg`` (the records' history carried from
+the store onto the session's branch, the manifest, the committed wiring)
+and ``remove_from_store`` (this repository's block and records out of the
+store, its own level untouched). ``CMIGRATE --> CC`` gains the local
+wiring's paths (``local_wiring``), its committed form written in the
+session's worktree with each file edited since the local install carried
+as edited (``commit_local``), and, once the merge lands, its settings
+entries and exclude lines retired, the files now tracked
+(``retire_local``). ``CMIGRATE --> CSTORES`` gains ``unlink_repo``, ``store
+link``'s inverse, after the merge. ``CMIGRATE --> SPHINX`` is the content
+folders and ``conf_excludes``, which reads a ``conf.py``'s literal
+``exclude_patterns``: a ``conf.py`` at or above the docs project's folder
+that does not exclude it refuses the move (ADR-020 D8), and the adapter is
+handed in rather than imported by ``core/storemigrate``. ``CLI -->
+CSTOREMIG`` is ``read_marker``: mid-move the main checkout finds neither
+home, so ``session merge`` and ``session resume`` read the session's
+worktree from the marker and resolve the project there, the merge still
+run from the main checkout; every other command there refuses, naming the
+session.
+
 ``CONBOARD`` is ``cli/onboarding`` (ADR-016 D4, D5, increment 2): ``init``'s
 docs offers and the all-at-once plan, in the CLI layer because it joins
 three domains and a store write, as ``cli/conformance`` sits there to drive
@@ -681,8 +766,11 @@ the CLI. It asks every question through ``CPROMPTS``, ``cli/prompts``, whose
 ``_init_prompter``, and since ADR-017 increment 2 ``_questionnaire_prompter``
 beside it, are the places a ``TerminalPrompter`` is made, and only
 when ``prompts.interactive`` allows (no ``--dry-run``, no ``--json``, a terminal
-on both sides). The store choice reaches ``core/stores`` (``init_store`` or
-``link_repo``, then ``write_store_settings`` into the repository's block), the
+on both sides). Since ADR-020's switch the docs step offers a location
+within the home and no store of its own; the store is the home's, which
+``place_store`` creates or links and writes the repository's block into
+(``core/stores``' ``init_store`` or ``link_repo``, then
+``write_store_settings``). The
 plan reaches ``domains/docs.plan_deliverables`` for its lines and the session
 and pipeline domains, through the CLI's context, for a session started
 parked with a ``docs`` pipeline. ``CONBOARD --> GIT`` asks whether the base
@@ -691,8 +779,9 @@ carries the manifest (ruling 9).
 **Built (:need:`ADR-017 <DEC_ADR_017>`, increment 1).** ``CQUEST`` is
 ``core/questionnaire``'s reading half (D1, D2). ``CQUEST --> QCAT`` is the
 shipped catalogue, ``data/questionnaire/catalogue.yaml``: sections of
-questions, each over one manifest key, and the three steps the engine asks by
-code (``commands``, ``docs``, ``store``), checked as it loads (``load_catalogue``).
+questions, each over one manifest key, and the four steps the engine asks by
+code (``home``, ``commands``, ``docs``, ``store``; ``home`` since ADR-020's switch),
+checked as it loads (``load_catalogue``).
 ``resolve`` answers each question with its default, the value the
 configuration resolves to now, and that value's provenance label, both read
 from the ``Manifest`` exactly as ``config show --provenance`` reads them, so the
@@ -736,11 +825,27 @@ while asking; ``write_user`` applies the user level's share of the plan through
 ``core/home.write_user_defaults`` (``CCONFIG --> CHOME``), which keeps the
 comment rule the store and repo writers keep and reaches ``core/stores``' write
 pieces at call time (``CHOME -.-> CSTORES``, dotted: ``core/stores`` imports
-``core/home`` at load). ``init`` (``CLI --> CCONFIG``) drives it, asks the docs
-step through ``CONBOARD`` at its place among the core sections, places a
-chosen store first, and writes the rest after the last answer: the user
-level, the store's block for this repository, then the manifest, whose body
-carries the repo level's answers. The questionnaire's prompter comes from its
+``core/home`` at load). ``init`` (``CLI --> CCONFIG``) drives it, asks the home first (ADR-020
+D4: ``home:location`` and the store step, in ``cli/main``), then the level,
+offered as the home has them (``ask_level``'s ``exclude``: under the store
+home, no ``repo``), then the docs step through ``CONBOARD`` at its place
+among the core sections, and writes everything after the last answer: the
+home's store first (``CONBOARD``'s ``place_store``, from the store as
+planned, ``_PlannedStore``, which every question was asked over), the user
+level, then the manifest under the ``repo`` home, whose body carries the repo
+level's answers.
+
+**Built (:need:`ADR-020 <DEC_ADR_020>` increment 3, the switch;
+:need:`DEC_ADR_020_I3`).** ``init`` plans the store home before it writes:
+``CLI --> CSTORES`` is ``plan_home_store``, which names the store it would
+create or link, writing nothing, so a dry run names it and a refusal comes
+first; ``CLI --> CSTOREMIG`` reads ``STORE_HOME_RECORDS``, the store
+project's ``records`` that ``store migrate --to store`` makes too, and
+``conf_readers``, the one reading of a root ``conf.py`` that would read
+``invariant-docs/``, for the repository home not offered and for
+``doctor``'s ``docs folder`` row. ``doctor``'s ``config home`` row reads
+``find_store`` and ``read_pointer`` for a second home and ``marker_note``
+for a half-landed move. The questionnaire's prompter comes from its
 own seam, ``_questionnaire_prompter``, beside ``_init_prompter``, which answers
 the docs step; both answer by ``prompts.interactive``.
 
@@ -1352,7 +1457,8 @@ branch, no tracked change) and the module's one write, ``commit_only``.
 
 ``WORKITEM --> GIT`` is the newest arrow into ``git`` and carries one call,
 ``resolve_commit``. A ruled closure (``item transition --ruling --evidence``)
-records the commit a maintainer's ruling rests on, and the domain resolves it
+records the commit a maintainer's ruling rests on, and a plain transition
+(``--evidence`` alone, IDEA_052) the commit it rests on; the domain resolves it
 to a full hash before anything is written: a name that is no commit here is
 refused, because evidence nothing can check is an assertion with a field name
 (IDEA_019). Like every other reader of the module it treats "git could not
@@ -1771,7 +1877,11 @@ Component responsibilities
    ``step.<name>`` id known once its step is declared, a step's level from
    its declaration below ``enforcement.rules`` (``rule_level``,
    ``rule_source``), and a step's command filled from ``vars`` and
-   ``discover`` as a command is (``step_command``, ADR-021 D1, increment 1)
+   ``discover`` as a command is (``step_command``, ADR-021 D1, increment 1);
+   the profile, levels and provenance as configured, before the
+   environment's escapes (``configured``, ADR-021 D6, increment 3), the
+   loosenings that carry no ruling (``unruled``), and the refusal of a
+   ruling on a floored rule, asked of ``core/rulings`` at load
 
    **Never does:** Read state; run commands; interpret a ``host.tier_map``
    value, or hold a list of model names
@@ -1835,6 +1945,10 @@ Component responsibilities
    scanning the store leg from the store's main checkout; and
    ``store.docs_lock_released``, the design state's exit gate in a store
    project, failing while the session's lease holds or waits for a unit;
+   ``config.rulings_by_user`` (ADR-021 D7, increment 3), the ``pre-tool-use``
+   rule refusing an edit tool call whose result adds or changes an
+   ``enforcement.rulings`` entry in a file a config level is read from,
+   asked of ``core/rulings``;
    the guidelines' two trees (ADR-014 D9, increment 4c-2,
    :need:`DEC_ADR_014_I4C2`): the policy tree a ruleset, baseline, checklist
    and registry are read from and rendered into (``guidelines_tree``,
@@ -1849,7 +1963,11 @@ Component responsibilities
    run recorded over the tree the step judges, and runs nothing; an
    after-merge step's verdict is the hold on a merged session
    (``_after_merge_verdict``, ADR-021 D5, increment 2), judged at the
-   session's merged commit
+   session's merged commit; ``privacy.clean``'s reading of a ``git commit``
+   message (``_extract_commit_message``): every source git writes it from,
+   each ``-m`` joined as git joins them, read, or the commit refused where
+   the message cannot be read or git itself refuses the combination
+   (:need:`DEC_ADR_024_D4`)
 
    **Never does:** Decide policy — levels come from the manifest; write a
    generated file (``domains/guidelines`` does); evaluate a guideline itself
@@ -1863,7 +1981,9 @@ Component responsibilities
    the ids a backend has spent across its open and declared closed store
    (``items.closed_path``), and minting from them; where a new entry is placed;
    the markup each backend writes a body in (``body_format``: Markdown, or rST
-   for ``sphinx_needs``, ADR-018 ruling 20)
+   for ``sphinx_needs``, ADR-018 ruling 20); which field names a backend
+   cannot hold (``field_refusal``: on ``sphinx_needs``, the need directive's own
+   options, :need:`DEC_ADR_023_D1`)
 
    **Never does:** Know an item's lifecycle, or which of its keys ``item new``
    may set — that is ``domains/workitem``
@@ -1888,11 +2008,15 @@ Component responsibilities
    to a value its scoped entries declare (BUG_110); reading ``privacy.allow``
    into plain values and path-scoped entries (``parse_allow``,
    ``ScopedAllow``), and deciding whether an entry reaches a match at the path
-   it was handed
+   it was handed; the shape of a host's attribution trailer
+   (``AttributionTrailer``), what a commit message's trailer block is
+   (``trailer_block``), and skipping there, in ``scan_message`` alone, a line a
+   declaration handed in admits (ADR-024 D1, D2)
 
    **Never does:** Know which files matter: which paths are scanned is
    ``privacy.scope``, decided by the caller, and a path reaches the scanner
-   only to be compared with an allow entry
+   only to be compared with an allow entry; know any host's trailer, which
+   reaches it only as an argument
 
 .. comp:: ``core/git``
    :id: COMP_CORE_GIT
@@ -1931,11 +2055,35 @@ Component responsibilities
    tracked, untracked or ignored (``files_under``), every path ``git status``
    reports under them (``changed_under``), the history of those paths alone
    (``fast_export``), and two writes named as such, ``fast_import`` and
-   ``delete_ref``
+   ``delete_ref``; and, for ``--to repo`` (increment 7b), ``commit_only``'s
+   ``force``, which adds a path ``.git/info/exclude`` lists, the local
+   wiring committed. The signature of a tree by content (``tree_signature``,
+   ADR-021 D3, hardened by ADR-026 D1): the commit, ``git diff HEAD``, every
+   untracked file git does not ignore by path, content and executable bit, an
+   untracked symlink by its target, a submodule or an embedded repository by
+   its own signature, and a tracked file git is told not to look at
+   (``--assume-unchanged``, ``--skip-worktree``) hashed from disk
 
    **Never does:** Decide what an answer means; a question it cannot answer
    returns ``None`` and relaxes nothing; push anything a caller has not
    screened (``storesync`` screens first)
+
+.. comp:: ``core/shell``
+   :id: COMP_CORE_SHELL
+
+   **Owns:** Reading a shell command as bash would, without running it
+   (ADR-025 D2): ``lex``, the words and operators of a command with quotes
+   removed and expansions kept literal (BUG_132, BUG_136); ``git_options``,
+   git's own options for one invocation, ``-C`` cumulative, the subcommand
+   where they stop and a ``--git-dir`` or ``--work-tree`` held; and
+   ``working_directories``, the directory each command of a line runs in,
+   moved only by a top-level ``cd`` or ``pushd`` in sequence and by
+   ``git -C`` (ADR-025 D1)
+
+   **Never does:** Run, expand or read anything; guess where bash's reading
+   cannot be told from the text, which is answered as ``None``; decide what
+   a directory means (placing a call is the host's, the commit route the
+   rule's)
 
 .. comp:: ``core/home``
    :id: COMP_CORE_HOME
@@ -1961,7 +2109,8 @@ Component responsibilities
    level by identity, then by local ID, ``StoreLink``), the store's levels
    (``store_levels``, ``read_store_manifest``), refused unless ``store.repos``
    lists the repo; naming under ruling 14 with its collision fallback
-   (``plan_store_path``); and the link's writes, the user level's ``repos:``
+   (``plan_store_path``); the store ``init``'s store home creates or links,
+   planned without a write (``plan_home_store``, ``HomeStore``, ADR-020 D1); and the link's writes, the user level's ``repos:``
    entry, ``invariant.id`` and the linked-identity index (``link_repo``,
    ``update_link``, ``init_store``); merging settings into a store's own level
    or one repository's block (``write_store_settings``, ADR-016 D4), refused
@@ -1980,7 +2129,8 @@ Component responsibilities
    from this machine refused naming the ``store clone`` command (ADR-014 D7,
    increment 5a); ``store clone``'s registration of every repository a store
    serves (``register_repos``), all or nothing, refused naming an identity
-   linked to another store
+   linked to another store; the link's inverse (``unlink_repo``, ADR-014
+   D12, increment 7b), removing only an entry that names the given store
 
    ``store.docs_lock`` is checked here at load through
    ``core/doclock.parse_docs_lock``, so an overlapping area is refused before
@@ -2048,7 +2198,7 @@ Component responsibilities
    :id: COMP_CORE_STOREMIGRATE
 
    **Owns:** Moving a project's records between its repository and a store
-   (ADR-014 D12, increment 7a; ADR-020 D3): which records move and the paths
+   (ADR-014 D12, increments 7a and 7b; ADR-020 D3): which records move and the paths
    they cover, the docs project's folder moved whole and a record whose path
    is absolute or outside the repository kept ``repo`` and named
    (``records_to_move``, ``docs_project``); the plan of ``--to store`` with
@@ -2065,12 +2215,28 @@ Component responsibilities
    at a temporary ref with every ``data`` length honoured (``retarget``,
    ``transfer``); the store leg's configuration (``write_store``,
    ``commit_store``) and the repository leg's commit (``remove_from_repo``);
-   the marker in the state root naming the migrating session
-   (``read_marker``, ``write_marker``, ``clear_marker``, ``marker_note``)
+   the marker in the state root naming the migrating session and its
+   worktree (``read_marker``, ``write_marker``, ``clear_marker``,
+   ``marker_note``). Increment 7b, ``--to repo``: the placement checks
+   shared by both directions (``_placed``); the records kept in the store
+   and their store-relative roots (``records_to_repo``); the in-repo
+   manifest that resolves what the store resolves, the store's own level
+   overlaid by this repository's block less ``store``, ``records`` and the
+   keys only a store project may set (``materialise``, ``STORE_ONLY``); the
+   plan and its refusals (``plan_to_repo``, ``ToRepoPlan``): an in-repo
+   project, the docs project a content folder or read by a ``conf.py`` at
+   or above it that does not exclude it, uncommitted changes in the store's
+   paths or its ``invariant.yaml``, comments there, a target path already in
+   the repository, a wiring path git would not overwrite, an uncommitted
+   pointer, a record another repository of the store shares, a docs-lock
+   unit another session holds, and a store behind or diverged; the
+   repository leg (``lay_repo_leg``, ``commit_repo_leg``, the pointer
+   removed) and the store leg (``remove_from_store``)
 
    **Never does:** Know a host or a session (the CLI sequences both); pull,
    push or replay a store (``storesync`` does); rewrite a path, merge a
-   folder or write over a file; rewrite the repository's existing history
+   folder or write over a file; rewrite the repository's existing history;
+   change a store's own level, which other repositories read
 
 .. comp:: ``core/doclock``
    :id: COMP_CORE_DOCLOCK
@@ -2324,7 +2490,11 @@ Component responsibilities
    ``field_type: links``, or the keys with a ``_back`` twin), each need's file
    and line; the check against the types, the required-link rules and
    ``docs.needs.decision_statuses`` (``check``, ``Problem``), an external need
-   held to nothing and a role with no needs no failure; counts by role and type
+   held to nothing and a role with no needs no failure, each problem tagged
+   with the setting that settles it (``SETTINGS``), counted by it
+   (``by_setting``), sampled in turn from each kind (``sample``) and turned
+   into one fix line per kind naming the setting and what the needs carry
+   (``advise``, BUG_128); counts by role and type
    (``classify``); the strict build's record (``BuildRecord``,
    ``record_relpath``, ``read_record``) keyed by the source tree's digest
    (``tree_digest``: every file's path and bytes, hidden directories and
@@ -2384,7 +2554,9 @@ Component responsibilities
    provenance as ``config show`` reads them, its current value at the target
    level, the levels allowed to hold its key (``allowed_levels``, ``targets``,
    ``default_target``) and its choices; the commands and docs steps expanded
-   into the questions they ask; the non-interactive ``init`` report
+   into the questions they ask, and the home step into ``home:location``
+   (ADR-020 D4: ``HOMES``, ``HOME_DESCRIPTIONS``, ``home_question``,
+   ``home_of``, the report's first row); the non-interactive ``init`` report
    (``core_report``, ``render_report``, D9); judging an answer (increment 2):
    its kind read (``parse_answer``, ``Refused``), its choices, path rule and
    command shape checked (``command_problem``, ``command_problems``, the one
@@ -2416,7 +2588,14 @@ Component responsibilities
    none where no step is declared; and every state of every lane a pipeline
    may start in (``lane_states``), each with the lanes that have an edge
    into it and the lanes that start in it, what a ``pipeline.enter`` point
-   is checked against at load.
+   is checked against at load; and which command each such lane's gates
+   read a run of (``command_needs``, :need:`ADR-015 <DEC_ADR_015>` D2,
+   increment 2): ``commands.test`` for a ``test.*`` gate and
+   ``commands.coverage`` for ``coverage.meets_floor``, by lane and gate, a
+   gate at level ``off`` or a floor of 0 requiring nothing. ``doctor``'s
+   command rows read it, and judge the adapters' coverage themselves, since
+   this module imports no adapter (``core/machines`` is not drawn, as for its
+   other readers).
 
    **Never does:** import ``core/rules``: it names rule ids, and the registry
    resolves them.
@@ -2440,6 +2619,32 @@ Component responsibilities
 
    **Never does:** run a step's command or write the record
    (``domains/steps`` does); judge a step (``core/rules`` does)
+
+.. comp:: ``core/rulings``
+   :id: COMP_CORE_RULINGS
+
+   **Owns:** what a configuration loosens and the rulings that allow it
+   (:need:`ADR-021 <DEC_ADR_021>` D6 to D8, increment 3): the loosenings
+   (``loosenings``, ``Loosening``, ``profile_loosens``, ``shadows``) judged on
+   the configured levels against the shipped ``standard`` profile; the
+   load's judgement (``judge``): a ruling's ``by``, ``date`` and ``reason``,
+   a stale ruling, a ruling at the user level, and a loosening with no
+   ruling refused once a level carries ``enforcement.rulings``
+   (``in_force``), collected for one release before that (``unruled``,
+   ``warning``) and while ``collecting``; where a ruling is written
+   (``own_level``: the in-repo manifest, or the repository's block in the
+   store's ``invariant.yaml``), what ``rules loosen`` and ``rules
+   carry-over`` would write (``plan_loosen``, ``plan_carry_over``, ``Plan``),
+   the comment above an entry as a carried-over reason (``comment_for``), the
+   line edit that keeps every other line of the file and is refused unless
+   it reads back as exactly the settings meant (``edit_text``), and the write
+   that puts the file back when the configuration would not load
+   (``write``); which files a config level is read from
+   (``is_config_file``), and which rulings an edit adds or changes
+   (``changed_rulings``)
+
+   **Never does:** ask for the confirmation (the CLI does, at a terminal);
+   decide that an edit is refused (``core/rules`` does, from its answer)
 
 .. comp:: ``core/errors``
    :id: COMP_CORE_ERRORS
@@ -2576,7 +2781,11 @@ advance it. They are the only place where "what a session is" is encoded.
    leads its own process group, which is killed whole when it runs past.
    ``advance`` runs the project's ``pipeline.enter.<target>`` steps first,
    unless forced (``run_steps``, ADR-021 increment 1), and a ``warn`` step's
-   rule can be acknowledged like any rule (``rule_spec``).
+   rule can be acknowledged like any rule (``rule_spec``). The gate receipt
+   (:need:`ADR-026 <DEC_ADR_026>`): ``run_coverage`` signs the tree it
+   measured before and after the run (``core/git.tree_signature``) into
+   ``coverage_run.tree``, and ``gate_receipt`` reads that record against the
+   tree now, the run's suite and ``coverage.meets_floor``, writing nothing.
 
 .. comp:: ``domains/steps``
    :id: COMP_DOMAINS_STEPS
@@ -2611,8 +2820,14 @@ advance it. They are the only place where "what a session is" is encoded.
 
    ideas and bugs, their statuses, and the transitions between
    them, including a ruled transition whose rows record who ruled and on which
-   commit; and what ``item new`` may set — an explicit id it checks is unspent,
-   and the item's own keys it refuses (BUG_074). Persisted through
+   commit, and a plain one whose rows record the commit it rests on
+   (:need:`DEC_ADR_022_D1`); and what ``item new`` may set — an explicit id it checks is unspent,
+   and the item's own keys it refuses (BUG_074). It changes an existing
+   item's fields (``set_fields``, ``item set``; IDEA_051, :need:`DEC_ADR_023`):
+   sets, adds to and removes from them in any state, refuses the item's own
+   keys and any key the backend's ``field_refusal`` names, and records one
+   field row per field changed, which names no ``from`` and ``to`` so the
+   status walk never reads it as a move. Persisted through
    ``core/items`` into whichever backend the project uses. Before any write
    saves, it asks ``items.decisions_linked`` of the text the write adds (ADR-018
    D8, increment 5): a blocking verdict refuses the write, a warning is kept
@@ -2715,10 +2930,26 @@ advance it. They are the only place where "what a session is" is encoded.
    project has none, parsing it against the rule registry through ``core/rules``,
    imported at call time. It writes it inside the docs project it starts,
    ``ruleset_location(<srcdir>)`` (ADR-020 D10), and names it in the
-   starter's settings as ``guidelines.ruleset``. A new project's docs project is ``STARTER_SRCDIR``,
+   starter's settings as ``guidelines.ruleset``. Over a ``conf.py`` already
+   there it writes nothing, and where that ``conf.py`` loads
+   ``sphinx_needs`` its refusal is the adoption note of a hand-built docs
+   project (BUG_128, :need:`DEC_ADR_018_B128`): adopted as it stands with
+   ``docs.format: sphinx``, its vocabulary described in
+   ``docs.needs.types``, ``decision_statuses`` and ``require_links``, never
+   derived, with the directives its ``needs_types`` declares beyond the
+   configured types; ``adoption_note`` gives the same where ``paths.docs``
+   already exists inside such a project and the configuration is not
+   ``docs.format: sphinx``. A new project's docs project is ``STARTER_SRCDIR``,
    ``invariant-docs/``, with ``STARTER_DOCS`` its ``paths.docs`` (ADR-020 D8),
    and ``refused_srcdir`` names the content folder, one of the ``sphinx``
    adapter's ``HOMES``, a ``paths.docs`` would make its source directory.
+   The docs environment (ADR-018 D4) is another write: ``sync_venv`` fills
+   ``<srcdir>/.venv`` through uv, syncing a file ``fully_pinned`` reads as
+   every package pinned with ``==`` as written and resolving any other into
+   the environment's lock first, then refuses an environment ``uv pip check``
+   or ``sphinx-build --version`` fails, and only then records the
+   requirements hash ``venv_state`` reads (BUG_124,
+   :need:`DEC_ADR_018_B124`).
 
 .. comp:: ``domains/stats``
    :id: COMP_DOMAINS_STATS
@@ -3214,8 +3445,15 @@ Elements
    resolved it and handed it in (``docs_srcdir``, ADR-020 D8), never a fixed
    ``docs/``; the content folders it looks in (``HOMES``), which ``init``
    refuses for a new project's docs project; its strict linkcheck test, the
-   reading of a Sphinx run (``diagnostics``), and coverage declared not
-   applicable by name.
+   reading of a Sphinx run (``diagnostics``), coverage declared not
+   applicable by name, and what a ``conf.py`` says as literals
+   (``conf_facts``: its extensions, the settings that narrow a strict build,
+   and each ``directive`` of a literal ``needs_types``, which ``init`` names
+   to a hand-built sphinx-needs project, BUG_128); whether a ``conf.py``'s
+   literal ``exclude_patterns`` keep a folder out of its build
+   (``conf_excludes``, ADR-020 D8), which ``store migrate --to repo`` asks
+   of a content ``conf.py`` above the docs project, ``None`` when it cannot
+   be told.
 
    **Never does:** run ``conf.py``; it reads it through ``ast``.
 
@@ -3393,8 +3631,9 @@ here, and everything about the format stays on this side of it.
 relationship: ``claude_code`` drives a running host, the telemetry reader reads
 back what one wrote, and this one STARTS one. It turns a handoff into a
 ``LaunchPlan`` — the ``claude --name <slug> --remote-control <slug> "<note>"``
-argv, a *launch file* holding that whole command, the
-``cd <main checkout> && exec env -u <marker> … INVARIANT_HANDOFF=<token> /bin/sh <launch file>``
+argv, a *launch file* that enters the main checkout and holds that whole
+command, the
+``exec env -u <marker> … INVARIANT_HANDOFF=<token> /bin/sh <launch file>``
 line quoted with ``shlex`` (the token is set only once the note is recorded), and
 the AppleScript that types that line into a new macOS Terminal window — and
 ``TerminalLauncher`` runs ``osascript`` on it. Claude Code has no flag for a
@@ -3406,20 +3645,34 @@ from opening a window (ADR-005).
 into the new window's tty before its shell has started line editing, and a tty
 in canonical mode keeps at most ``MAX_CANON`` bytes of a line — 1024 on macOS.
 A note over about 540 bytes was cut mid-quote and no ``claude`` ran. The note now
-goes into the launch file: a three-line ``/bin/sh`` script, written by
+goes into the launch file: a short ``/bin/sh`` script, written by
 ``plan_launch`` with ``mkstemp`` (mode 0600) into ``launch_dir()`` — a directory
 under the user's temporary directory, mode 0700 and proved to be the user's
 own, never under the project, so the file cannot be committed. The script
-removes itself and then runs ``claude``, so the note leaves the disk the
-moment the successor holds it, and it stays ONE positional argument — the
-initial prompt — quoted by ``shlex`` as before. The typed line ``exec``\ s the
+removes itself, changes into the main checkout and then runs ``claude``, so
+the note leaves the disk the moment the successor holds it, and it stays ONE
+positional argument — the initial prompt — quoted by ``shlex`` as before.
+The typed line ``exec``\ s the
 launch shell, so the window's own shell is replaced and the window ends
 with Claude (IDEA_035); the launch file runs ``claude`` as its child so that a
 failed Claude (a non-zero exit up to 128) can pause for Return at the
-terminal before the window goes, and always exits 0. A program reads the file, not the window's shell, so the line means the
+terminal before the window goes, and exits 0 on every path that ran it. A program reads the file, not the window's shell, so the line means the
 same in zsh, bash or fish. The typed line no longer grows with the note, and
 ``plan_launch`` refuses one that would still exceed ``MAX_CANON`` (only a very
-long checkout path can) rather than let the tty cut it. A launch file nobody
+long launch-directory path can) rather than let the tty cut it.
+
+**The launch file enters the checkout, not the typed line (BUG_129, ADR-005
+D8).** ``do script`` types the line before the window's shell has started,
+so a start-up step that reads the terminal — oh-my-zsh's update prompt
+runs ``read -r -k 1`` — can eat its first characters. The line once began
+``cd <main> &&``: with the ``c`` eaten, zsh ran oh-my-zsh's ``d`` (``dirs``),
+which succeeds without moving, and ``claude`` started in the home
+directory. The typed line now begins with ``exec`` and carries no ``cd``, so
+a line missing any of ``exec`` names no command and runs nothing, and one
+missing more either fails or runs the launch file, whose
+``cd -- <main> || { …; exit 1; }`` decides the directory alone. A checkout
+the file cannot enter prints ``LAUNCH_NO_CHECKOUT`` and exits 1 without
+running ``claude``. A launch file nobody
 ran is removed by the CLI when the launch fails, and any older than
 ``LAUNCH_FILE_TTL_SECONDS`` is swept the next time one is staged. A preview plan
 (``stage=False``, for ``--dry-run`` and refusals) writes nothing, and ``by_hand``
@@ -3427,14 +3680,21 @@ carries the self-contained line, note inline, for a person to paste into a
 shell that is already up. ``LaunchPlan`` itself refuses an argv without
 ``--remote-control <name>``: Remote Control is not optional.
 
-**A launch counts only once a successor is seen alive.** Terminal accepting
-the script proves nothing about what the window then runs. ``SuccessorWatch`` is
+**A launch counts only once a successor is seen alive, in the main
+checkout.** Terminal accepting the script proves nothing about what the
+window then runs. ``SuccessorWatch`` is
 a third seam, reached through ``_handoff_successor``, and the real
 ``ProcessTableWatch`` reads ``ps -axo pid=,command=``: before the launch, for the
 sessions of that name already running, which are never counted; after it, for
 a NEW process whose argv runs ``claude`` with both ``--name <slug>`` and
 ``--remote-control <slug>``, within ``SUCCESSOR_TIMEOUT_SECONDS``, and still there
-``SUCCESSOR_GRACE_SECONDS`` later. Without one the handoff exits non-zero, the
+``SUCCESSOR_GRACE_SECONDS`` later. It then counts only where the plan asked
+it to start (BUG_129): ``process_cwd`` reads its working directory, and
+``same_directory`` compares it with the main checkout as files, so a link or
+another spelling of the same directory still counts. One elsewhere, or one
+whose directory cannot be read, raises ``SuccessorNotPlaced``, naming its
+pid and place; the process is left running for its user to close
+(ADR-005 D8). Without a placed successor the handoff exits non-zero, the
 launch file is removed, and the closer is never reached. The suite replaces
 the watch everywhere with one that finds nothing, matching a stub launcher
 that starts nothing; a test about the launch that worked says so.
@@ -3449,13 +3709,13 @@ that starts nothing; a test about the launch that worked says so.
        CLI->>L: plan_launch(stage) writes the 0600 launch file
        CLI->>L: watch.running(slug) before the launch
        CLI->>L: launcher.launch(plan)
-       L->>T: osascript do script "cd … && exec env -u … /bin/sh <file>"
-       T->>C: /bin/sh <file> (in place of the tab's shell): rm the file, run claude --name --remote-control "<note>"
+       L->>T: osascript do script "exec env -u … /bin/sh <file>"
+       T->>C: /bin/sh <file> (in place of the tab's shell): rm the file, cd -- <main> or exit 1, run claude --name --remote-control "<note>"
        C-->>T: claude exits: a failure (1 to 128) at a terminal waits for Return; then exit 0 and the window ends
-       CLI->>L: watch.wait_for(slug) — new pid, alive after the grace
-       alt successor alive
+       CLI->>L: watch.wait_for(slug, cwd=main) — new pid, alive after the grace, in the main checkout
+       alt successor alive in the main checkout
            CLI->>L: closer.close(CLAUDE_PID) unless --keep-open
-       else none
+       else none, or one elsewhere or unreadable (SuccessorNotPlaced, left running)
            CLI->>L: plan.discard(), exit 1, nothing signalled
        end
 
@@ -3567,7 +3827,17 @@ Elements
    was recorded nowhere, and the turn context's docs-lock lines. For a move
    between homes (ADR-014 D12, increment 7a): the committed wiring a project
    carries (``committed_wiring``), and taking it out of a tree for a commit,
-   an agent edited since kept and named (``remove_committed``).
+   an agent edited since kept and named (``remove_committed``); and back
+   (increment 7b): the local wiring's paths in their committed form
+   (``local_wiring``), that form written in a session worktree with each
+   file edited since the local install carried as edited
+   (``commit_local``), and the local install's settings entries, exclude
+   lines and receipt retired once its files are committed, the files kept
+   (``retire_local``). The commit trailers it asks agents to append, as
+   ``core/privacy`` declarations (``ATTRIBUTION_TRAILERS``, ADR-024 D1).
+   Where a subagent's call did its work, for an actor row
+   (``_actor_places``): the path it names, else for a shell call the
+   directories ``core/shell`` reads its commands running in (ADR-025 D1).
 
    **Never does:** decide a rule, or grant a unit; it asks the engine through
    the CLI and its helpers.
@@ -3600,8 +3870,10 @@ Elements
    :id: COMP_HOSTS_CLAUDE_CODE_LAUNCH
 
    **Owns:** starting a new Claude Code session, the one place the library
-   spawns a host (ADR-005): the launch file, the claim token, the Terminal
-   window, and the probe and seams the CLI injects into the oracle.
+   spawns a host (ADR-005): the launch file, which enters the main checkout
+   itself (ADR-005 D8), the claim token, the Terminal window, the successor
+   watch, which counts a successor only in the main checkout, and the probe
+   and seams the CLI injects into the oracle.
 
    **Never does:** decide whether a session may hand off; ``domains/session``
    does.
@@ -3643,9 +3915,12 @@ agent is told to call it.
 .. comp:: ``cli/onboarding``
    :id: COMP_CLI_ONBOARDING
 
-   **Owns:** ``init``'s docs offers and the all-at-once plan (ADR-016 D4, D5);
-   for a new project, asking again a location whose docs project would be a
-   content folder (ADR-020 D8, ``domains/docs.refused_srcdir``).
+   **Owns:** ``init``'s docs offers, within the home (ADR-016 D4, ADR-020
+   D4), and the all-at-once plan (ADR-016 D5); for a new project, asking
+   again a location whose docs project would be a content folder (ADR-020
+   D8, ``domains/docs.refused_srcdir``); the store home placed, created or
+   linked and this repository's block written, or held to add by hand
+   (``place_store``, ``StorePlacement``, ADR-020 D1).
 
    **Never does:** write over an existing docs directory.
 
@@ -3659,7 +3934,12 @@ agent is told to call it.
    session's docs-lock grants and released, which lands the store leg; and,
    once ``session merge`` or ``session resume`` lands the repository leg, the
    committed wiring installed again as ``local`` and the move recorded
-   complete (``finish``).
+   complete (``finish``). ``--to repo``'s (increment 7b, ``to_repo``): the
+   session started and isolated, the repository leg laid and committed with
+   the local wiring in its committed form, the store leg removed under the
+   session's docs-lock grants and released; after the merge the local
+   wiring retired and the user level's link removed (``finish``).
+   ``--records`` refused in either direction (``refuse_records``).
 
    **Never does:** roll a move back (ADR-014 ruling 8); install local wiring
    before the repository leg lands; print the binding sequence ``session
@@ -3707,6 +3987,12 @@ The state machines under ``data/machines`` are the elements of :doc:`state_model
    **Owns:** the host-neutral agent sources (``feature-architect``,
    ``compliance-reviewer``, ``backlog-curator``, ``bug-reproducer``) that
    ``core/agents`` parses and a host renders.
+
+   **Never does:** compute or write the gate receipt
+   (:need:`ADR-026 <DEC_ADR_026>` D3). ``feature-architect`` makes its recorded
+   coverage run its last act on the tree and ``compliance-reviewer``'s fast
+   path asks ``invariant pipeline receipt``; neither agent hashes a tree or
+   writes a file for it.
 
 .. comp:: ``data/scaffold``
    :id: COMP_DATA_SCAFFOLD
@@ -3970,8 +4256,8 @@ user level of the configuration, when written: its ``defaults`` apply below
 every project's own settings, in-repo projects included, and are named by
 ``config show`` and ``doctor``; its ``repos`` map takes a repo's identity to its
 store. ``invariant store init`` and ``store link`` write it. The state root does not move: runtime state
-stays in the repo's git common directory. In-repo stays ``init``'s default
-until ADR-020's switch lands (below), and an in-repo project resolves as
+stays in the repo's git common directory. Since ADR-020's switch the store
+is ``init``'s default home (below), and an in-repo project resolves as
 before. ``core/home`` resolves the home for the manifest and the oracle
 alike.
 
@@ -3987,18 +4273,21 @@ path listed in the clone's ``.git/info/exclude`` and a receipt at
 the shared ``.gitignore`` is untouched and uninstall is exact. ``session
 isolate`` renders that wiring into each new worktree.
 
-**Accepted, not yet built (:need:`ADR-020 <DEC_ADR_020>`).** The store
-becomes ``init``'s default home for a project's configuration and records
-(:need:`DEC_ADR_020_D1`): a fresh ``init`` in a git repository makes a store
-project with every record in the store, commits nothing and edits no
-``.gitignore``; its hooks and agents exist only if the user chose to install
-them, locally (:need:`DEC_ADR_020_D9`). The ``<project>/`` tree above is then
-the in-repo layout a project opts into to share its configuration through
-the repository (teammates, CI, pull-request review). The two homes are
-exclusive, and ``store migrate`` moves everything between them
-(:need:`DEC_ADR_020_D3`). Existing projects,
-invariant and Heap among them, are unchanged (:need:`DEC_ADR_020_D2`). The
-switch lands after ADR-014's increments 3 to 7 (:need:`DEC_ADR_020_D7`).
+**Built (:need:`ADR-020 <DEC_ADR_020>` increment 3, the switch;
+:need:`DEC_ADR_020_I3`).** The store is ``init``'s default home for a
+project's configuration and records (:need:`DEC_ADR_020_D1`), in every mode:
+a fresh ``init`` in a git repository makes a store project at
+``~/.invariant/stores/<name>/`` (or the store ``--store`` names), with every
+record in the store and the docs project at ``invariant-docs/`` there, and
+writes nothing to the repository's working tree: no ``.claude/``, no
+``.gitignore`` line. Its hooks and agents exist only if the user chose to
+install them, locally (:need:`DEC_ADR_020_D9`). The ``<project>/`` tree
+above is the in-repo layout a project opts into with ``init --home repo``
+to share its configuration through the repository (teammates, CI,
+pull-request review), and the one outside a git repository. The two homes
+are exclusive, and ``store migrate`` moves everything between them
+(:need:`DEC_ADR_020_D3`). Existing projects, invariant and Heap among them,
+are unchanged (:need:`DEC_ADR_020_D2`).
 
 **Built (:need:`ADR-020 <DEC_ADR_020>` increment 1, :need:`DEC_ADR_020_D8`,
 :need:`DEC_ADR_020_I1`).** A new project's docs project is ``invariant-docs/``,

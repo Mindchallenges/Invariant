@@ -1595,6 +1595,227 @@ class TestIDEA020AGatedDispatchIsWarnedBeforeItRuns:
         assert "NOT recorded as evidence" in said and "no pipeline running" in said
 
 
+class TestBUG125AShellCallIsPlacedWhereItRuns:
+    """BUG_125 — a subagent's shell call is placed by the directory it runs in.
+
+    A subagent's shell starts at the host's working directory on every call,
+    which is the shared checkout, so one working only through the shell
+    spells every call ``cd <worktree> && ...``. The hook stands in the shared
+    checkout throughout. Proof of place for such a call is where its commands
+    run, and never a path it only names. Borrows the BUG_028 world and driver.
+    """
+
+    HOST_ID = TestBUG028TheAgentThatCreatedThePipelineIsInIt.HOST_ID
+    world = TestBUG028TheAgentThatCreatedThePipelineIsInIt.world
+    post = TestBUG028TheAgentThatCreatedThePipelineIsInIt.post
+
+    def isolated(self, ctx, name="isolated"):
+        session = ctx.sessions.start(name)
+        ctx.sessions.adopt_host_session(session.id, self.HOST_ID)
+        ctx.sessions.isolate(session.id, execute=True)
+        ctx.pipelines.start(session.id, task="t")
+        return session, Path(ctx.sessions.get(session.id).worktree)
+
+    def shell(self, world, command, agent="compliance-reviewer"):
+        self.post(
+            world,
+            {
+                "tool_name": "Bash",
+                "agent_type": agent,
+                "tool_input": {"command": command},
+            },
+        )
+
+    @staticmethod
+    def how(ctx, session):
+        return ctx.pipelines.current(session.id).evidence.get("agents_run_how")
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "cd {wt} && invariant pipeline gates",
+            "cd {wt}; git diff HEAD | head -50",
+            "cd {wt}/src && ls",
+            "git -C {wt} status --short",
+            "cd {root} && git -C {rel} log -1",
+            "cd {rel} && invariant check",
+            "cd {wt} &&\n  invariant check",
+        ],
+    )
+    def test_a_shell_call_running_in_the_worktree_is_an_actor(self, world, spelling):
+        root, ctx = world
+        session, worktree = self.isolated(ctx)
+        (worktree / "src").mkdir(exist_ok=True)
+
+        self.shell(
+            world,
+            spelling.format(
+                wt=worktree, root=root, rel=worktree.relative_to(root)
+            ),
+        )
+
+        assert self.how(ctx, session) == {"compliance-reviewer": "actor"}
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "echo {wt}",
+            "grep -rn actor {wt}/src",
+            "ls {wt} && cat {wt}/README",
+            "git diff --stat -- {wt}",
+            "bash -c 'cd {wt} && invariant check'",
+        ],
+    )
+    def test_a_worktree_path_only_named_is_not_place(self, world, spelling):
+        """The command runs in the shared checkout and only names the worktree,
+        as an argument or inside a string another shell would run. Mention is
+        not place."""
+        _root, ctx = world
+        session, worktree = self.isolated(ctx)
+
+        self.shell(world, spelling.format(wt=worktree), agent="backlog-curator")
+
+        assert "agents_run" not in ctx.pipelines.current(session.id).evidence
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "cd {wt} && invariant check && cd {root} && invariant item new",
+            "cd {wt} && git -C {root} status",
+            "cd {wt} | true && invariant check",
+            "(cd {wt}) && invariant check",
+            "cd {wt}",
+            "cd {wt}; cd {root} && invariant item new",
+            "cd {wt} || exit 1; invariant check",
+            "cd {wt}/.. && invariant check",
+            "cd {wt}/../../.. && invariant item new",
+            "cd {wt}/not-there; invariant check",
+            "cd {wt} && invariant check\ncd {root} && invariant item new",
+        ],
+    )
+    def test_a_call_not_wholly_in_the_worktree_is_not_placed(self, world, spelling):
+        """A command whose commands run in the shared checkout too, whose
+        directory change bash would not keep, or which runs nothing, places
+        nothing: an actor row claims the agent worked HERE."""
+        root, ctx = world
+        session, worktree = self.isolated(ctx)
+
+        self.shell(world, spelling.format(wt=worktree, root=root), agent="backlog-curator")
+
+        assert "agents_run" not in ctx.pipelines.current(session.id).evidence
+
+    def test_a_relative_cd_is_read_against_the_hooks_own_directory(self, world):
+        """The worktree's path relative to the shared checkout, spelled from
+        somewhere else, names a directory that is not the worktree."""
+        root, ctx = world
+        session, worktree = self.isolated(ctx)
+        elsewhere = root / "docs"
+
+        self.post(
+            world,
+            {
+                "tool_name": "Bash",
+                "agent_type": "backlog-curator",
+                "tool_input": {
+                    "command": f"cd {worktree.relative_to(root)} && invariant check"
+                },
+            },
+            cwd=elsewhere,
+        )
+
+        assert "agents_run" not in ctx.pipelines.current(session.id).evidence
+
+    def test_a_symlink_into_the_worktree_is_where_the_commands_run(self, world):
+        """The commands run in the worktree, which is what an actor row
+        claims; every other route resolves a symlink the same way."""
+        root, ctx = world
+        session, worktree = self.isolated(ctx)
+        (root / "into").symlink_to(worktree)
+
+        self.shell(world, f"cd {root}/into && invariant check")
+
+        assert self.how(ctx, session) == {"compliance-reviewer": "actor"}
+
+    def test_git_C_through_a_symlink_and_up_is_read_physically(self, world):
+        """``git -C`` is a chdir: ``<wt>/out/..`` with ``out`` a link to a
+        directory in the shared checkout runs git in the shared checkout,
+        though the path as written lies in the worktree."""
+        root, ctx = world
+        session, worktree = self.isolated(ctx)
+        (root / "docs" / "inner").mkdir()
+        (worktree / "out").symlink_to(root / "docs" / "inner")
+
+        self.shell(world, f"git -C {worktree}/out/.. status", agent="backlog-curator")
+
+        assert "agents_run" not in ctx.pipelines.current(session.id).evidence
+
+    def test_the_curator_moving_into_the_shared_checkout_is_not_banked(self, world):
+        """The BUG_028 curator, standing in the worktree this time and moving
+        out of it to file its bug. The hook's own directory said "worktree";
+        where the command ran says otherwise, and that wins."""
+        root, ctx = world
+        session, worktree = self.isolated(ctx)
+
+        self.post(
+            world,
+            {
+                "tool_name": "Bash",
+                "agent_type": "backlog-curator",
+                "tool_input": {"command": f"cd {root} && invariant item new"},
+            },
+            cwd=worktree,
+        )
+
+        assert "agents_run" not in ctx.pipelines.current(session.id).evidence
+
+    def test_a_shell_call_into_a_second_tracks_worktree_is_recorded_there(
+        self, world
+    ):
+        _root, ctx = world
+        owned, _ = self.isolated(ctx, "track-a")
+        other = ctx.sessions.start("track-b")
+        ctx.sessions.isolate(other.id, execute=True)
+        ctx.pipelines.start(other.id, task="the second track")
+
+        self.shell(world, f"cd {ctx.sessions.get(other.id).worktree} && invariant check")
+
+        assert self.how(ctx, other) == {"compliance-reviewer": "actor"}
+        assert "agents_run" not in ctx.pipelines.current(owned.id).evidence
+
+    def test_a_read_in_the_worktree_is_still_placed_by_its_path(self, world):
+        _root, ctx = world
+        session, worktree = self.isolated(ctx)
+
+        self.post(
+            world,
+            {
+                "tool_name": "Read",
+                "agent_type": "compliance-reviewer",
+                "tool_input": {"file_path": str(worktree / "README")},
+            },
+        )
+
+        assert self.how(ctx, session) == {"compliance-reviewer": "actor"}
+
+    def test_a_pathless_call_other_than_the_shell_stands_where_the_hook_does(
+        self, world
+    ):
+        _root, ctx = world
+        session, worktree = self.isolated(ctx)
+
+        self.post(
+            world,
+            {
+                "tool_name": "Grep",
+                "agent_type": "compliance-reviewer",
+                "tool_input": {"pattern": "x"},
+            },
+            cwd=worktree,
+        )
+
+        assert self.how(ctx, session) == {"compliance-reviewer": "actor"}
+
+
 class TestAutomaticBinding:
     """`session start` runs through Bash, which carries no hook payload.
 
@@ -2519,3 +2740,31 @@ class TestTheEditTimeGuidelinesAdvisory:
         assert run("hook", "post-tool-use") == 0
         context = payload(capsys)["hookSpecificOutput"]["additionalContext"]
         assert "- style.no-print (blocker) app/m.py:1: print(x)" in context
+
+
+class TestAttributionTrailers:
+    """DEC_ADR_024_D1: the session-link trailer this host asks agents to
+    append, declared here so the engine names no host's."""
+
+    (TRAILER,) = ClaudeCodeHost.ATTRIBUTION_TRAILERS
+
+    def test_the_token_is_the_one_the_host_asks_for(self):
+        assert self.TRAILER.key == "Claude-Session"
+
+    def test_the_hosts_session_link_is_admitted(self):
+        link = "https://claude.ai/code/session_01J6ymUQEkcJq6gUgJ8RMADw"
+        assert self.TRAILER.admits("Claude-Session", link)
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "https://evil.example/code/session_01J6ymUQEkcJq6gUgJ8RMADw",
+            "http://claude.ai/code/session_01J6ymUQEkcJq6gUgJ8RMADw",
+            "https://claude.ai/code/session_01J6ymUQEkcJq6gUgJ8RMADw/more",
+            "https://claude.ai.evil.example/code/session_01J6ymUQEkcJq6gUgJ8RMADw",
+            "https://claude.ai/code/session_",
+            "https://claude.ai/project/abc",
+        ],
+    )
+    def test_any_other_value_is_not(self, value):
+        assert not self.TRAILER.admits("Claude-Session", value)

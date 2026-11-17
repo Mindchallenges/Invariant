@@ -29,3 +29,8 @@ renumbered, and a superseded one stays, linked through ``supersedes``.
    ADR-019-dart-and-flutter-get-an-adapter
    ADR-020-the-store-is-init-s-default-home-committing-the-configuratio
    ADR-021-projects-declare-their-own-steps-at-lifecycle-points
+   ADR-022-a-transition-names-the-commit-it-rests-on-without-a-ruling
+   ADR-023-an-item-s-fields-change-through-item-set-recorded-as-a-field
+   ADR-024-a-host-declares-its-own-commit-attribution-trailer-which-pri
+   ADR-025-a-subagent-s-shell-call-is-placed-where-its-commands-run
+   ADR-026-the-gate-receipt-is-the-pipeline-s-coverage-record

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters import get_adapter
-from ..core import needs
+from ..core import git, needs
 from ..core import steps as steps_reader
 from ..core.errors import (
     GateFailure,
@@ -386,6 +386,30 @@ def fresh_bundle(bundle: Path) -> Path:
     if bundle.exists():
         shutil.rmtree(bundle, ignore_errors=True)
     return bundle
+
+
+#: The gate the receipt asks again at the check (ADR-026 D2): a receipt is
+#: "the architect's coverage gate passed", not only "a run happened".
+RECEIPT_FLOOR_RULE = "coverage.meets_floor"
+
+
+def _signed_tree(
+    root: Path, before: tuple[str, str] | None, after: tuple[str, str] | None
+) -> dict | None:
+    """The tree a coverage run measured, as its record keeps it (ADR-026 D1).
+
+    ``None`` when git could not name the tree before the run, which the
+    receipt reads as a record that vouches for nothing.
+    """
+    if before is None:
+        return None
+    return {
+        "root": str(root),
+        "commit": before[0],
+        "before": before[1],
+        "commit_after": after[0] if after else None,
+        "after": after[1] if after else None,
+    }
 
 
 def _scope(selectors: Sequence[str]) -> str:
@@ -1258,10 +1282,15 @@ class PipelineDomain:
             result_bundle=str(bundle),
             **extra,
         )
+        # The tree the run measured, signed on both sides of it (ADR-026 D1).
+        # The record is the gate receipt: `pipeline receipt` compares it with
+        # the tree as it is later, so nobody has to write one.
+        before = git.tree_signature(root)
         run = measure_coverage(
             self.manifest, adapter, command, bundle, root,
             selectors=selectors, ecosystem=ecosystem,
         )
+        after = git.tree_signature(root)
         outcome = run.outcome
 
         self.record_coverage(session_id, run.measured)
@@ -1324,6 +1353,7 @@ class PipelineDomain:
                 "overstating_hazards": [
                     h.id for h in outcome.hazards if h.may_overstate
                 ],
+                "tree": _signed_tree(root, before, after),
             }
             self._save(session_id, pipeline)
 
@@ -1349,6 +1379,112 @@ class PipelineDomain:
             "note": outcome.note,
             "suite_passed": outcome.passed,
         }
+
+    def gate_receipt(
+        self,
+        session_id: str,
+        *,
+        session: dict | None = None,
+        cwd: Path | None = None,
+    ) -> dict:
+        """Whether the coverage run on record still vouches for the tree (ADR-026 D2).
+
+        The receipt is the record ``run_coverage`` wrote, so this is a read:
+        nothing is written, in the tree or in the record. It matches when every
+        one of these holds, and each one that does not is named in ``reasons``:
+
+        - a coverage run is on record, and it signed the tree it measured;
+        - the tree held still for the whole run (the signature before it is
+          the signature after it);
+        - the tree now is that tree: the same commit, and the same digest of
+          every uncommitted change and every untracked file git does not
+          ignore, so a new file is hashed by its content like any other;
+        - the run's suite passed;
+        - ``coverage.meets_floor`` passes now, as the transition would ask it.
+
+        The tree compared is the one the run measured, named in the record, so
+        a check from another directory still reads it, and the floor rule is
+        asked from there too. ``cwd`` stands in only for a record that names
+        no tree.
+        """
+        reasons: list[str] = []
+        doc: dict[str, Any] = {"match": False, "reasons": reasons}
+        where = Path(cwd or Path.cwd())
+        pipeline = self.current(session_id)
+        if pipeline is None:
+            reasons.append("no pipeline is running for this session")
+            return doc
+        run = pipeline.evidence.get("coverage_run")
+        if not isinstance(run, Mapping) or not run:
+            reasons.append(
+                "no coverage run is recorded in this pipeline: "
+                "run invariant pipeline coverage after the last edit"
+            )
+            return doc
+        doc.update(
+            command=run.get("command"),
+            scope=run.get("scope"),
+            executed=run.get("executed"),
+            failed=run.get("failed"),
+            coverage=dict(pipeline.evidence.get("coverage") or {}),
+        )
+        tree = run.get("tree")
+        if not isinstance(tree, Mapping) or not tree.get("before"):
+            reasons.append(
+                "the coverage run on record carries no tree signature (recorded "
+                "outside a git repository, or before ADR-026), so it vouches for "
+                "no tree"
+            )
+        else:
+            root = where = Path(str(tree.get("root") or where))
+            doc.update(root=str(root), commit=tree.get("commit"), tree=tree.get("before"))
+            held = (tree.get("commit"), tree.get("before")) == (
+                tree.get("commit_after"), tree.get("after")
+            )
+            if not held:
+                reasons.append(
+                    "the tree moved during the coverage run (an edit, a commit, or "
+                    "an output the run wrote that git does not ignore), so the run "
+                    "may not have measured the tree it left"
+                )
+            now = git.tree_signature(root)
+            if now is None:
+                reasons.append(f"git cannot say which tree {root} holds now")
+            elif now[0] != tree.get("commit"):
+                reasons.append(
+                    f"the tree has moved since the coverage run: commit "
+                    f"{str(tree.get('commit'))[:12]} is now {now[0][:12]}"
+                )
+            elif now[1] != tree.get("before"):
+                reasons.append(
+                    "the tree has moved since the coverage run: an uncommitted or "
+                    "untracked file was added, edited or deleted after it"
+                )
+        if not run.get("suite_passed"):
+            reasons.append(
+                f"the coverage run's suite did not pass "
+                f"({run.get('failed')} failed, exit {run.get('exit_code')})"
+            )
+        ctx = RuleContext(
+            manifest=self.manifest,
+            cwd=where,
+            session=session,
+            pipeline=pipeline.to_dict(),
+            host_instruction_files=self.host_instruction_files,
+            host_agent_plan=self.host_agent_plan,
+        )
+        (floor,) = apply_acknowledgements(
+            pipeline.to_dict(), evaluate([RECEIPT_FLOOR_RULE], ctx)
+        )
+        doc["floor"] = {
+            "ok": floor.verdict.ok,
+            "skipped": floor.verdict.skipped,
+            "message": floor.verdict.message,
+        }
+        if not floor.verdict.ok:
+            reasons.append(f"{RECEIPT_FLOOR_RULE}: {floor.verdict.message}")
+        doc["match"] = not reasons
+        return doc
 
     def record_coverage(self, session_id: str, coverage: dict[str, float]) -> None:
         with self._record_lock(session_id):

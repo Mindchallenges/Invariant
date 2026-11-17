@@ -251,7 +251,7 @@ class TestLocalInstall:
         assert "invariant hook session-start" in shim.read_text().replace('"$candidate"', "invariant")
 
     def test_repo_wiring_in_an_in_repo_project_is_unchanged(self, repo, capsys):
-        code, text = run(capsys, "init", "--ecosystem", "python", "--host-install")
+        code, text = run(capsys, "init", "--home", "repo", "--ecosystem", "python", "--host-install")
         assert code == 0, text
         assert ours(json.loads((repo / ".claude" / "settings.json").read_text())) == len(EVENTS)
         assert not (repo / ".claude" / "settings.local.json").exists()
@@ -521,7 +521,7 @@ class TestInitAsks:
         self, repo, capsys, home
     ):
         before = tree(home)
-        code, text = run(capsys, "init", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--home", "repo", "--ecosystem", "python")
         assert code == 0, text
         assert not (repo / ".claude" / "hooks").exists()
         assert not (repo / ".claude" / "settings.json").exists()
@@ -531,7 +531,7 @@ class TestInitAsks:
         assert tree(home) == before
 
     def test_json_says_nothing_was_installed(self, repo, capsys):
-        code, text = run(capsys, "init", "--ecosystem", "python", "--json")
+        code, text = run(capsys, "init", "--home", "repo", "--ecosystem", "python", "--json")
         assert code == 0, text
         payload = json.loads(text)
         assert payload["host_install"] == {
@@ -540,18 +540,18 @@ class TestInitAsks:
         }
 
     def test_host_install_flag_installs(self, repo, capsys):
-        code, text = run(capsys, "init", "--ecosystem", "python", "--host-install")
+        code, text = run(capsys, "init", "--home", "repo", "--ecosystem", "python", "--host-install")
         assert code == 0, text
         assert (repo / ".claude" / "hooks" / "invariant-stop.sh").is_file()
         assert (repo / ".claude" / "agents" / "feature-architect.md").is_file()
 
     def test_the_dry_run_lists_no_install_unless_asked(self, repo, capsys):
-        code, text = run(capsys, "init", "--ecosystem", "python", "--dry-run")
+        code, text = run(capsys, "init", "--home", "repo", "--ecosystem", "python", "--dry-run")
         assert code == 0, text
         assert "install 7 hook shims" not in text
         assert "invariant hooks install" in text
         code, text = run(
-            capsys, "init", "--ecosystem", "python", "--dry-run", "--host-install"
+            capsys, "init", "--home", "repo", "--ecosystem", "python", "--dry-run", "--host-install"
         )
         assert "install 7 hook shims" in text
 
@@ -573,7 +573,7 @@ class TestInitAsks:
                 return default
 
         monkeypatch.setattr(cli_main, "_host_install_prompter", lambda args: Prompter())
-        code, text = run(capsys, "init", "--ecosystem", "python")
+        code, text = run(capsys, "init", "--home", "repo", "--ecosystem", "python")
         assert code == 0, text
         assert asked == [("Install invariant's hooks and agents in this project?", "no")]
         assert (repo / ".claude" / "hooks").exists() is installed

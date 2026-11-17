@@ -17,30 +17,59 @@ invariant init
 `pubspec.yaml` → `flutter` when it depends on the Flutter SDK, else `dart`;
 a Sphinx `conf.py` at the root or under `docs/`, `doc/` or `source/` that is
 not the architecture docs project → `sphinx`, with `vars.srcdir` written;
-anything else → `generic`) and writes:
+anything else → `generic`) and makes the project's configuration home.
 
-| Path | What it is |
+**By default the home is a store**, a separate git repository outside your
+project, at `~/.invariant/stores/<name>/`, and nothing is written into your
+repository's working tree:
+
+| Where | What it is |
 |---|---|
-| `.claude/invariant.yaml` | the manifest — three lines, everything else defaulted |
-| `.claude/hooks/invariant-*.sh` | seven shims, one per Claude Code hook event, each a few lines that `exec invariant hook <event>` |
-| `.claude/settings.json` | hook wiring, merged into whatever is already there |
-| `.claude/agents/*.md` | four library agents (design, review, backlog, bug repro) |
-| `docs/architecture/overview.md` | a starter architecture doc — only when that directory does not already exist |
-| `.gitignore` | one line for the machine-local state root |
+| `~/.invariant/stores/<name>/invariant.yaml` | the configuration: the project, its profile, and this repository's block, with every record's location |
+| `~/.invariant/stores/<name>/invariant-docs/` | the Sphinx-needs docs project: `conf.py`, `index.rst`, `architecture/overview.rst`, the backlog and the guidelines ruleset |
+| `~/.invariant/config.yaml` | the link from your repository to its store |
+| `.git/config` (local) and `.git/invariant/state/` | your repository's identity and its runtime state, neither tracked |
 
-Pass `--ecosystem`, `--name` or `--profile strict|standard|loose` to override
-the detection; `--dry-run` prints the list and writes nothing.
+`git status` stays empty. Review and commit the store's files in the store.
+The report ends with the configuration and where each value comes from,
+opening with the home. Outside a git repository, or below its top level,
+there is no store, and `init` uses the repository and says why.
 
-Then commit, and check:
+**To share the configuration** with teammates, CI and pull-request review,
+commit it into the repository instead:
 
 ```bash
+invariant init --home repo
 git add -A && git commit -m "adopt invariant"
+```
+
+That writes `.claude/invariant.yaml`, the docs project at `invariant-docs/`
+and one `.gitignore` line for the state root. A project can move between
+the two homes later with `invariant store migrate --to repo` or `--to store`.
+
+**Hooks and agents are installed only when you say so.** `init` asks
+(default no); without a terminal it installs nothing and names the two
+commands, `invariant hooks install` and `invariant agents install`.
+`--host-install` says yes from a script. In a store project they go in your
+repository's own `.claude/`, kept out of git through `.git/info/exclude`:
+the hook entries in `.claude/settings.local.json`, the seven shims in
+`.claude/hooks/` and the four library agents in `.claude/agents/`. Under
+`--home repo` they are committed (`.claude/settings.json`).
+
+Pass `--ecosystem`, `--name`, `--profile strict|standard|loose`, `--home
+store|repo` or `--store <path>` to override; `--dry-run` prints what would be
+written, the store it would create included, and writes nothing.
+
+Then check:
+
+```bash
 invariant doctor
 ```
 
-Committing is not ceremony: a session works in a linked worktree, a worktree
-checks out a commit, and an uncommitted manifest is invisible from inside one.
-`doctor` prints one line per check and exits 1 if anything is wrong; the
+With `--home repo`, commit first: a session works in a linked worktree, a
+worktree checks out a commit, and an uncommitted manifest is invisible from
+inside one. `doctor` prints one line per check and exits 1 if anything is
+wrong; its `config home` row says where the configuration lives. The
 [Troubleshooting](troubleshooting.md) page is organised by its output.
 
 Start a **new** Claude Code session in the project. Hooks are read when a

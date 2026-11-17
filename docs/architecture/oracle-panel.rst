@@ -855,6 +855,9 @@ Lanes and phases
 | ``docs``       | docs    | drafting: Writing docs; reviewing: In     |
 |                |         | review                                    |
 +----------------+---------+-------------------------------------------+
+| ``docs-``      | docs    | drafting: Writing docs; reviewing: In     |
+| ``project``    |         | review                                    |
++----------------+---------+-------------------------------------------+
 | ``none``       | (none)  | working: Working                          |
 +----------------+---------+-------------------------------------------+
 | any other      | (none)  | (none)                                    |

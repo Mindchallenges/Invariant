@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -63,12 +63,25 @@ PATH_RECORDS = ("docs", "backlog", "guidelines", "memory", "reports", "sweeps")
 #: Where the host wiring goes in a store project (ADR-020 D1, D9).
 WIRING_RECORDS = {"hooks": "local", "agents": "local"}
 
+#: A store project's ``records``, as ``init`` writes them for the store home
+#: and a move into a store makes them (ADR-020 D1): every data and policy
+#: record in the store, the host wiring local to the clone.
+STORE_HOME_RECORDS = {**dict.fromkeys(PATH_RECORDS, "store"), **WIRING_RECORDS}
+
 #: Path keys that are no root of their own: ``paths.memory_index`` is a file
 #: name inside ``paths.memory`` (``domains/memorystore``).
 NOT_A_ROOT = ("paths.memory_index",)
 
 #: The in-repo manifest, as git spells it.
 MANIFEST_REL = ".claude/invariant.yaml"
+
+#: The repository's pointer (ADR-014 D3), which only names a store.
+POINTER_REL = ".invariant.yaml"
+
+#: Keys a store project alone may set, which an in-repo manifest refuses at
+#: load: ``sync`` (ADR-014 D7) and ``privacy.store`` (D8). ``--to repo``
+#: leaves them behind, named, rather than write a manifest that cannot load.
+STORE_ONLY = ("sync", "privacy.store")
 
 #: How many paths one reason lists before it says how many more there are.
 _LISTED = 12
@@ -123,12 +136,15 @@ def marker_note(state_root: Path) -> str | None:
     if marker is None:
         return None
     session = marker["session"]
+    worktree = marker.get("worktree")
     return (
         f"store migrate --to {marker.get('to', '?')} is moving this project, in "
         f"session {session}: neither home is complete until its repository leg "
-        f"lands. Finish it with 'invariant session merge --id {session}' or "
-        f"'invariant session resume --id {session}', run from its worktree "
-        f"(ADR-014 D6, ADR-020 D3)."
+        f"lands. Review it in its worktree"
+        + (f", {worktree}" if worktree else "")
+        + f"; finish it with 'invariant session merge --id {session}' or "
+        f"'invariant session resume --id {session}', which run here while the move "
+        f"is under way (ADR-014 D6, ADR-020 D3)."
     )
 
 
@@ -299,13 +315,27 @@ def _values(value: Any) -> list[Any]:
     return [value]
 
 
-def docs_project(manifest: Any) -> str | None:
-    """The docs project's folder, repository-relative: the resolved
+def _under(value: Any, base: Path) -> str | None:
+    """``value`` spelled from ``base``: a relative path as written, an absolute
+    one when it lies under ``base``; ``None`` when it climbs out."""
+    text = str(value).strip()
+    if text and (os.path.isabs(text) or PurePosixPath(text).is_absolute()):
+        try:
+            rel = Path(text).resolve().relative_to(Path(base).resolve()).as_posix()
+        except (OSError, ValueError):
+            return None
+        return None if rel in ("", ".") else rel
+    return _relative(text)
+
+
+def docs_project(manifest: Any, base: Path | None = None) -> str | None:
+    """The docs project's folder, spelled from ``base`` (the repository, or
+    the store for a docs project kept there): the resolved
     ``docs.needs.srcdir``, else the folder above ``paths.docs``; ``None``
-    where ``paths.docs`` is at the root or outside the repository."""
+    where ``paths.docs`` is at the root or outside ``base``."""
     from .needs import srcdir_of  # local: needs imports manifest
 
-    root = Path(manifest.root)
+    root = Path(base if base is not None else manifest.root)
     srcdir = srcdir_of(manifest)
     if srcdir is not None:
         try:
@@ -314,11 +344,25 @@ def docs_project(manifest: Any) -> str | None:
             rel = None
         if rel not in (None, "", "."):
             return rel
-    docs = _relative(manifest.get("paths.docs") or "")
+    docs = _under(manifest.get("paths.docs") or "", root)
     if docs is None:
         return None
     parent = PurePosixPath(docs).parent.as_posix()
     return None if parent in ("", ".") else parent
+
+
+def _content_folder(
+    folder: str | None, content_folders: Collection[str], reasons: list[str]
+) -> None:
+    """A reason when the docs project is a documentation repository's content
+    folder (ADR-020 D8), in either direction."""
+    if folder is not None and folder in content_folders:
+        reasons.append(
+            f"the docs project is {folder}/, a folder a documentation repository's "
+            f"content lives in (ADR-020 D8): invariant's docs project takes "
+            f"invariant-docs/, the same name in both homes. Move it to "
+            f"invariant-docs/ and set docs.needs.srcdir and paths.docs, then migrate."
+        )
 
 
 def records_to_move(manifest: Any) -> tuple[dict[str, str], dict[str, str], list[str]]:
@@ -400,25 +444,11 @@ def _held_units(target: Path, rels: Sequence[str]) -> list[str]:
     return found
 
 
-def plan_to_store(
-    manifest: Any,
-    cwd: Path,
-    *,
-    store: Path | None = None,
-    content_folders: Collection[str] = (),
-    wiring: Sequence[str] = (),
-    env: Mapping[str, str] | None = None,
-) -> ToStorePlan:
-    """Decide ``store migrate --to store``, or refuse naming every reason.
-
-    ``manifest`` is the project ``cwd`` resolves; ``content_folders`` the
-    folders a documentation repository's content lives in, which the docs
-    project may not be (ADR-020 D8); ``wiring`` the repository-relative files
-    of the committed host wiring the repository leg will change. Nothing is
-    written: a refusal leaves the repository, the user level and every store
-    as they were.
-    """
-    direction = "store"
+def _placed(manifest: Any, cwd: Path, direction: str) -> Path:
+    """The repository's top level, or a refusal: the checks that hold in
+    either direction about where the command runs (ADR-020 D3). A move runs
+    in a project's main checkout, at its top level, since it starts its own
+    session and worktree."""
     cwd = Path(cwd).resolve()
     top = git.toplevel(cwd)
     if not getattr(manifest, "located", True) or top is None:
@@ -427,7 +457,7 @@ def plan_to_store(
             [
                 (
                     f"there is no project at {cwd}: no .claude/invariant.yaml and no "
-                    f"store link. Run it in an in-repo project's main checkout."
+                    f"store link. Run it in the project's main checkout."
                 )
             ],
         )
@@ -448,6 +478,38 @@ def plan_to_store(
                 )
             ],
         )
+    return top
+
+
+def _branch(top: Path, reasons: list[str]) -> tuple[str, str]:
+    """``(branch, HEAD)`` of the main checkout, or a reason."""
+    base = git.current_branch(top)
+    head = git.resolve_commit(top, "HEAD")
+    if not base or head is None:
+        reasons.append(f"{top} has no branch checked out (detached HEAD, or no commit)")
+    return base or "", head or ""
+
+
+def plan_to_store(
+    manifest: Any,
+    cwd: Path,
+    *,
+    store: Path | None = None,
+    content_folders: Collection[str] = (),
+    wiring: Sequence[str] = (),
+    env: Mapping[str, str] | None = None,
+) -> ToStorePlan:
+    """Decide ``store migrate --to store``, or refuse naming every reason.
+
+    ``manifest`` is the project ``cwd`` resolves; ``content_folders`` the
+    folders a documentation repository's content lives in, which the docs
+    project may not be (ADR-020 D8); ``wiring`` the repository-relative files
+    of the committed host wiring the repository leg will change. Nothing is
+    written: a refusal leaves the repository, the user level and every store
+    as they were.
+    """
+    direction = "store"
+    top = _placed(manifest, cwd, direction)
     if manifest.store is not None or manifest.location.kind != "repo":
         name = manifest.store.name if manifest.store is not None else "(a pointer)"
         raise MigrateRefused(
@@ -470,21 +532,11 @@ def plan_to_store(
             f"{MANIFEST_REL} has uncommitted changes: the move takes the committed "
             f"configuration. Commit or discard them first."
         )
-    base = git.current_branch(top)
-    head = git.resolve_commit(top, "HEAD")
-    if not base or head is None:
-        reasons.append(f"{top} has no branch checked out (detached HEAD, or no commit)")
+    base, head = _branch(top, reasons)
 
     records, kept, candidates = records_to_move(manifest)
     if records.get("docs") == "store":
-        folder = docs_project(manifest)
-        if folder is not None and folder in content_folders:
-            reasons.append(
-                f"the docs project is {folder}/, a folder a documentation repository's "
-                f"content lives in (ADR-020 D8): invariant's docs project takes "
-                f"invariant-docs/, the same name in both homes. Move it to "
-                f"invariant-docs/ and set docs.needs.srcdir and paths.docs, then migrate."
-            )
+        _content_folder(docs_project(manifest), content_folders, reasons)
     roots = _fold(
         [r for r in candidates if git.files_under(top, [r]) or (top / r).is_file()]
     )
@@ -538,8 +590,8 @@ def plan_to_store(
         top=top,
         identity=identity,
         new_local_id=local_id,
-        base=base or "",
-        head=head or "",
+        base=base,
+        head=head,
         store=target,
         new_store=new_store,
         note=note,
@@ -678,6 +730,383 @@ def _check_loads(
         reasons.append(f"the configuration would not load from the store: {exc}")
 
 
+# -- the plan back to the repository (ADR-020 D3) --------------------------------
+
+
+@dataclass
+class ToRepoPlan:
+    """Everything ``store migrate --to repo`` will write, decided up front."""
+
+    top: Path
+    store: Path
+    #: The key the store lists this repository under.
+    key: str
+    base: str
+    head: str
+    #: The store's HEAD, whose history the repository leg carries.
+    store_head: str
+    #: Store-relative files and folders that move back, nested ones folded.
+    roots: list[str]
+    #: Every tracked file under ``roots`` in the store.
+    moved: list[str]
+    #: Each record's location in the store project, before the move.
+    records: dict[str, str]
+    #: ``.claude/invariant.yaml`` as it will be written.
+    body: dict[str, Any]
+    #: The dotted keys copied from the store's own level, not its block.
+    from_store_level: list[str]
+    #: The dotted keys left behind: a store project's alone (``STORE_ONLY``).
+    dropped: list[str]
+    #: The committed pointer the repository leg removes, if any.
+    pointer: str | None = None
+    #: Ignored files under ``roots`` in the store, left in its working tree.
+    left: list[str] = field(default_factory=list)
+    #: The store lists no other repository once this one leaves.
+    serves_none: bool = False
+
+
+def _leaves(mapping: Mapping[str, Any], prefix: str = "") -> list[str]:
+    """Every leaf of ``mapping`` as a dotted key."""
+    out: list[str] = []
+    for key, value in mapping.items():
+        dotted = f"{prefix}{key}"
+        if isinstance(value, Mapping) and value:
+            out += _leaves(value, f"{dotted}.")
+        else:
+            out.append(dotted)
+    return out
+
+
+def _without_dotted(mapping: Mapping[str, Any], dotted: str) -> dict[str, Any]:
+    """``mapping`` without ``dotted``, a parent left empty removed too."""
+    head, _, rest = dotted.partition(".")
+    out = dict(mapping)
+    if head not in out:
+        return out
+    if not rest:
+        del out[head]
+    elif isinstance(out[head], Mapping):
+        inner = _without_dotted(out[head], rest)
+        if inner:
+            out[head] = inner
+        else:
+            del out[head]
+    return out
+
+
+def materialise(manifest: Any) -> tuple[dict[str, Any], list[str], list[str]]:
+    """``(body, from the store's level, dropped)``: the in-repo manifest that
+    resolves what the store resolves now (ADR-020 D3).
+
+    Every key the store's own level and this repository's block set, the
+    block winning, less ``store`` and ``records`` (an in-repo manifest's
+    records are all ``repo``, the load-time default) and the keys only a
+    store project may set (:data:`STORE_ONLY`), which are named. The user
+    level is the operator's and is not copied.
+    """
+    from .manifest import _overlaid  # local: manifest imports this module lazily
+
+    link = manifest.store
+    levels = dict(manifest.levels)
+    top = {k: v for k, v in (levels.get(link.label) or {}).items() if k != "store"}
+    block = dict(levels.get(link.repo_label) or {})
+    merged = _overlaid(top, block)
+    for key in ("version", "store", "records"):
+        merged.pop(key, None)
+    dropped: list[str] = []
+    for dotted in STORE_ONLY:
+        node: Any = merged
+        for part in dotted.split("."):
+            node = node.get(part) if isinstance(node, Mapping) else None
+        if node is None:
+            continue
+        if isinstance(node, Mapping) and node:
+            dropped += [f"{dotted}.{leaf}" for leaf in _leaves(node)]
+        else:
+            dropped.append(dotted)
+        merged = _without_dotted(merged, dotted)
+    theirs, own = set(_leaves(top)), set(_leaves(block))
+    from_top = sorted(k for k in _leaves(merged) if k in theirs and k not in own)
+    return {"version": 1, **merged}, from_top, sorted(dropped)
+
+
+def records_to_repo(manifest: Any) -> tuple[dict[str, str], list[str]]:
+    """``(records, candidate roots)`` for a move out of the store.
+
+    Every record kept in the store moves back with its files, at the same
+    relative path: its path keys, read against the store, and for the docs
+    record its docs project's folder whole. A record already in the
+    repository stays where it is.
+    """
+    from .manifest import RECORD_PATH_KEYS  # local: manifest imports this module lazily
+
+    store_root = Path(manifest.store.root)
+    records: dict[str, str] = {}
+    roots: list[str] = []
+    for record in PATH_RECORDS:
+        where = manifest.get(f"records.{record}") or "repo"
+        records[record] = where
+        if where != "store":
+            continue
+        found: list[str] = []
+        for key in RECORD_PATH_KEYS.get(record, ()):
+            if key in NOT_A_ROOT:
+                continue
+            found += [
+                rel for value in _values(manifest.get(key))
+                if (rel := _under(value, store_root)) is not None
+            ]
+        if record == "docs":
+            folder = docs_project(manifest, store_root)
+            if folder is not None:
+                found.insert(0, folder)
+        roots.extend(found)
+    return records, roots
+
+
+def _shared(manifest: Any, store: Path, key: str, roots: Sequence[str],
+            env: Mapping[str, str] | None) -> list[str]:
+    """Each other repository of the store whose records name a path under
+    one of ``roots``, or one above it, with the path: moving it out would
+    take that repository's records too."""
+    from .manifest import Manifest  # local: manifest imports this module lazily
+
+    try:
+        top_level, repos = read_store_manifest(store)
+    except ManifestError:
+        return []
+    user = load_user_config(env)
+    below = [(user.label, user.defaults)] if user.defaults else []
+    found: list[str] = []
+    for other, block in sorted(repos.items()):
+        if other == key:
+            continue
+        link = StoreLink(store, store.name, None, other, "user")
+        try:
+            theirs = Manifest.from_raw(
+                {}, root=Path(manifest.root), path=store / STORE_MANIFEST, env=env,
+                below=[*below, (link.label, dict(top_level)), (link.repo_label, dict(block))],
+                store=link, label="repo:.invariant.yaml",
+            )
+        except ManifestError:
+            continue
+        for rel in records_to_repo(theirs)[1]:
+            for root in roots:
+                if rel == root or rel.startswith(root + "/") or root.startswith(rel + "/"):
+                    found.append(f"{rel} is also a record of {other}")
+    return sorted(set(found))
+
+
+def confs_above(top: Path, folder: str) -> list[tuple[Path, str, str]]:
+    """Each ``conf.py`` at or above the docs project's folder, strictly
+    above the folder itself, in the tree at ``top``: ``(path, the folder
+    spelled from it, the conf.py spelled from top)``. A content ``conf.py``
+    reads every folder below it (ADR-020 D8)."""
+    parts = PurePosixPath(folder).parts
+    found = []
+    for depth in range(len(parts)):
+        here = PurePosixPath(*parts[:depth]).as_posix() if depth else ""
+        conf = top / here / "conf.py" if here else top / "conf.py"
+        if conf.is_file():
+            below = PurePosixPath(*parts[depth:]).as_posix()
+            found.append((conf, below, f"{here}/conf.py" if here else "conf.py"))
+    return found
+
+
+def conf_readers(
+    top: Path, folder: str, conf_excludes: Callable[[Path, str], bool | None] | None,
+    reasons: list[str],
+) -> None:
+    """A reason for each ``conf.py`` at or above the docs project's folder
+    that would read it (ADR-020 D8): a content ``conf.py`` reads every
+    folder below it, so it must exclude invariant's docs project. The one
+    reading of the rule: ``store migrate --to repo`` refuses on it, ``init``
+    does not offer the repository home on it, and ``doctor``'s ``docs
+    folder`` row names it."""
+    for conf, below, spelled in confs_above(top, folder):
+        said = conf_excludes(conf, below) if conf_excludes is not None else None
+        if said:
+            continue
+        how = "does not exclude it" if said is False else "cannot be read to tell"
+        reasons.append(
+            f"{spelled} would read {folder}/, the docs project, and {how} (ADR-020 "
+            f"D8): add '{below}' to its exclude_patterns, e.g. exclude_patterns = "
+            f"[..., \"{below}\"]. invariant never edits it."
+        )
+
+
+def plan_to_repo(
+    manifest: Any,
+    cwd: Path,
+    *,
+    content_folders: Collection[str] = (),
+    conf_excludes: Callable[[Path, str], bool | None] | None = None,
+    wiring: Sequence[str] = (),
+    env: Mapping[str, str] | None = None,
+) -> ToRepoPlan:
+    """Decide ``store migrate --to repo``, or refuse naming every reason.
+
+    ``manifest`` is the store project ``cwd`` resolves; ``content_folders``
+    the folders a documentation repository's content lives in;
+    ``conf_excludes`` answers whether a ``conf.py`` keeps a folder out of
+    its build (the ``sphinx`` adapter's, handed in by the CLI); ``wiring`` the
+    repository-relative files the committed host wiring will add. Nothing
+    is written: a refusal leaves the repository, the store and the user
+    level as they were.
+    """
+    direction = "repo"
+    top = _placed(manifest, cwd, direction)
+    if manifest.store is None:
+        raise MigrateRefused(
+            direction,
+            [
+                "the configuration is already in the repository: this is an in-repo "
+                "project"
+                if manifest.location.kind == "repo"
+                else "this project names no store: its pointer alone defines it, so "
+                "there is nothing to move back"
+            ],
+        )
+    store = Path(manifest.store.root).resolve()
+    key = manifest.store.key
+    reasons: list[str] = []
+    base, head = _branch(top, reasons)
+    store_head = git.resolve_commit(store, "HEAD")
+    if store_head is None:
+        reasons.append(f"the store {store} has no commit to carry the history from")
+
+    records, candidates = records_to_repo(manifest)
+    folder = docs_project(manifest, store) if records.get("docs") == "store" else None
+    _content_folder(folder, content_folders, reasons)
+    if folder is not None:
+        conf_readers(top, folder, conf_excludes, reasons)
+    roots = _fold(
+        [r for r in candidates if git.files_under(store, [r]) or (store / r).is_file()]
+    )
+    moved = git.files_under(store, roots) or []
+    if roots and not moved:
+        reasons.append("git could not list the files the move would carry")
+    dirty = git.changed_under(store, [*roots, STORE_MANIFEST])
+    if dirty is None:
+        reasons.append("git could not say whether the store's paths the move changes are clean")
+    elif dirty:
+        reasons.append(
+            f"these paths in store {store.name} carry uncommitted changes: "
+            f"{_listed(sorted(dirty))}. Commit or discard them in the store first."
+        )
+    path = store / STORE_MANIFEST
+    if holds_comments(path) and not holds_only_init_comment(path):
+        reasons.append(
+            f"{path} holds comments that removing this repository's block would drop: "
+            f"remove the block by hand, or move the comments out, then migrate"
+        )
+    left = git.files_under(store, roots, kind="ignored") or []
+
+    present = sorted(
+        {rel for rel in (MANIFEST_REL, *moved) if (top / rel).exists()}
+        | set(git.files_under(top, list(roots)) or [])
+        | set(git.files_under(top, list(roots), kind="untracked") or [])
+        | set(git.files_under(top, list(roots), kind="ignored") or [])
+    )
+    if present:
+        reasons.append(
+            f"already in the repository, and store migrate never writes over a file "
+            f"or merges a folder: {_listed(present)}"
+        )
+    in_way = sorted(
+        rel for rel in wiring
+        if (top / rel).exists() and git.exists_at(top, "HEAD", rel) is not True
+        and git.is_ignored(top, rel) is False
+    )
+    if in_way:
+        reasons.append(
+            f"these files the committed wiring adds are in the main checkout, neither "
+            f"tracked nor ignored, so the merge would stop on them: {_listed(in_way)}. "
+            f"Move them out first."
+        )
+    pointer = None
+    if (top / POINTER_REL).is_file():
+        if git.exists_at(top, "HEAD", POINTER_REL) is True:
+            pointer = POINTER_REL
+            if git.changed_under(top, [POINTER_REL]):
+                reasons.append(
+                    f"{POINTER_REL} has uncommitted changes; the move removes it. "
+                    f"Commit or discard them first."
+                )
+        else:
+            reasons.append(
+                f"{POINTER_REL} is not committed; the in-repo manifest will be found "
+                f"first, so remove it, or commit it for the move to remove"
+            )
+
+    shared = _shared(manifest, store, key, roots, env)
+    if shared:
+        reasons.append(
+            "the store's records are shared with another repository, so moving them "
+            "out would take theirs too: " + "; ".join(shared)
+        )
+    try:
+        held = _held_units(store, list(moved))
+    except (ManifestError, StateError, UsageError) as exc:
+        held = [f"the store's docs lock cannot be read: {exc}"]
+    if held:
+        reasons.append(
+            "another session holds the docs lock on a path the move would remove: "
+            + "; ".join(held)
+            + ". Wait for its release (ADR-014 D5)."
+        )
+    from .storesync import settings, standing  # local: storesync imports stores
+
+    out = standing(store, settings(manifest))
+    if out.stops:
+        reasons.append(
+            " ".join(out.lines())
+            + ("" if "invariant store pull" in " ".join(out.lines()) else
+               " Run 'invariant store pull' first.")
+        )
+
+    body, from_top, dropped = materialise(manifest)
+    if not reasons:
+        _check_loads_in_repo(top, body, env, reasons)
+    if reasons:
+        raise MigrateRefused(direction, reasons)
+    try:
+        _top_level, repos = read_store_manifest(store)
+    except ManifestError:  # pragma: no cover - the manifest loaded it a moment ago
+        repos = {}
+    return ToRepoPlan(
+        top=top,
+        store=store,
+        key=key,
+        base=base,
+        head=head,
+        store_head=store_head or "",
+        roots=roots,
+        moved=sorted(moved),
+        records=records,
+        body=body,
+        from_store_level=from_top,
+        dropped=dropped,
+        pointer=pointer,
+        left=sorted(left),
+        serves_none=not [k for k in repos if k != key],
+    )
+
+
+def _check_loads_in_repo(
+    top: Path, body: Mapping[str, Any], env: Mapping[str, str] | None, reasons: list[str]
+) -> None:
+    """The materialised manifest loads in the repository, or a reason."""
+    from .manifest import Manifest  # local: manifest imports this module lazily
+
+    user = load_user_config(env)
+    below = [(user.label, user.defaults)] if user.defaults else []
+    try:
+        Manifest.from_raw(dict(body), root=top, path=top / MANIFEST_REL, env=env, below=below)
+    except ManifestError as exc:
+        reasons.append(f"the configuration would not load from the repository: {exc}")
+
+
 # -- the writes -------------------------------------------------------------------
 
 
@@ -757,3 +1186,70 @@ def _write_yaml(path: Path, body: Mapping[str, Any]) -> None:
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(yaml.safe_dump(dict(body), sort_keys=False), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def lay_repo_leg(plan: ToRepoPlan, worktree: Path) -> int:
+    """The repository leg's files, in the session's worktree, not yet
+    committed: the records' history carried from the store onto its branch
+    (each original commit, the same relative paths), the materialised
+    ``.claude/invariant.yaml`` written and the pointer removed. A WRITE.
+    Returns the commits carried."""
+    worktree = Path(worktree)
+    commits = transfer(plan.store, plan.store_head, plan.roots, worktree)
+    target = worktree / MANIFEST_REL
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _write_yaml(target, plan.body)
+    if plan.pointer is not None:
+        (worktree / plan.pointer).unlink(missing_ok=True)
+    return commits
+
+
+def commit_repo_leg(plan: ToRepoPlan, worktree: Path, wiring: Sequence[str]) -> str:
+    """Commit the repository leg on the session's branch: the manifest, the
+    pointer's removal and ``wiring``, the committed host wiring, which the
+    main checkout's ``.git/info/exclude`` still lists, so it is added with
+    force. A WRITE. Returns the sha."""
+    paths = sorted({MANIFEST_REL, *([plan.pointer] if plan.pointer else []), *wiring})
+    message = (
+        f"invariant store migrate --to repo: the configuration and records move "
+        f"back from store {plan.store.name}"
+    )
+    done, said = git.commit_only(Path(worktree), paths, message, force=True)
+    if not done:
+        raise StateError(f"could not commit the repository leg in {worktree}: {said}")
+    sha = git.resolve_commit(Path(worktree), "HEAD")
+    if sha is None:  # pragma: no cover - a commit git made and cannot name
+        raise StateError(f"the commit in {worktree} cannot be read back")
+    return sha
+
+
+def remove_from_store(plan: ToRepoPlan) -> str:
+    """The store leg: this repository's block and its records removed from
+    the store, its own level left as it is (ADR-020 D3). A WRITE in the
+    store's main checkout. Only tracked files go; an ignored one stays,
+    named by the plan. Returns the commit's sha."""
+    store = plan.store
+    for rel in plan.moved:
+        (store / rel).unlink(missing_ok=True)
+    for rel in sorted({str(PurePosixPath(m).parent) for m in plan.moved},
+                      key=lambda d: d.count("/"), reverse=True):
+        current = store / rel
+        while current != store and current.is_dir() and not any(current.iterdir()):
+            current.rmdir()
+            current = current.parent
+    body = _store_body(store)
+    store_block = dict(body.get("store") or {})
+    repos = dict(store_block.get("repos") or {})
+    repos.pop(plan.key, None)
+    store_block["repos"] = repos
+    body["store"] = store_block
+    _write_yaml(store / STORE_MANIFEST, body)
+    message = f"invariant store migrate --to repo: {plan.key} takes its records back"
+    done, said = git.commit_only(store, [STORE_MANIFEST, *plan.moved], message)
+    if not done:
+        raise StateError(f"could not commit the store leg in {store}: {said}")
+    sha = git.resolve_commit(store, "HEAD")
+    if sha is None:  # pragma: no cover - a commit git made and cannot name
+        raise StateError(f"the commit in {store} cannot be read back")
+    return sha
+

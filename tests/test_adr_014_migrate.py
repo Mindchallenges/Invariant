@@ -94,7 +94,7 @@ def toy(tmp_path, monkeypatch, capsys) -> Path:
     history with a side branch merged into it."""
     repo = new_repo(tmp_path / "toy")
     monkeypatch.chdir(repo)
-    code, text = run(capsys, "init", "--host-install")
+    code, text = run(capsys, "init", "--home", "repo", "--host-install")
     assert code == 0, text
     commit_all(repo, "invariant init")
     git(repo, "switch", "-qc", "side")
@@ -340,7 +340,7 @@ def test_a_failed_repo_merge_is_recorded_and_resume_finishes_the_move(toy, capsy
 def test_a_project_with_no_wiring_installed_gets_none(tmp_path, monkeypatch, capsys):
     repo = new_repo(tmp_path / "bare")
     monkeypatch.chdir(repo)
-    code, text = run(capsys, "init")
+    code, text = run(capsys, "init", "--home", "repo")
     assert code == 0, text
     commit_all(repo, "invariant init")
     code, out = migrate(capsys)
@@ -427,7 +427,7 @@ def test_refused_with_the_manifest_changed_or_not_committed(toy, tmp_path, monke
 
     fresh = new_repo(tmp_path / "fresh", "https://host.example/team/fresh.git")
     monkeypatch.chdir(fresh)
-    code, out = run(capsys, "init")
+    code, out = run(capsys, "init", "--home", "repo")
     assert code == 0, out
     text = refused(capsys, fresh)
     assert "not committed" in text
@@ -586,11 +586,13 @@ def test_refused_while_another_session_holds_a_unit_it_would_write(
     assert "area:arch" in text and "w0000001" in text
 
 
-def test_to_repo_and_a_records_subset_are_not_built_here(toy, capsys):
+def test_to_repo_in_an_in_repo_project_and_a_records_subset_are_refused(toy, capsys):
+    """``--to repo`` is increment 7b's (``tests/test_adr_014_migrate_to_repo.py``):
+    here, in an in-repo project, it refuses; ``--records`` is in no increment."""
     before = snapshot(toy)
     code, text = run(capsys, "store", "migrate", "--to", "repo")
     assert code == 2, text
-    assert "7b" in text
+    assert "already in the repository" in text
     code, text = run(capsys, "store", "migrate", "--to", "store", "--records", "docs")
     assert code == 2, text
     assert "--to store moves everything" in text
@@ -718,7 +720,7 @@ def test_an_abandoned_migration_clears_its_marker(toy, capsys):
 def test_the_identity_is_the_local_id_without_an_origin(tmp_path, monkeypatch, capsys):
     repo = new_repo(tmp_path / "solo", None)
     monkeypatch.chdir(repo)
-    code, text = run(capsys, "init")
+    code, text = run(capsys, "init", "--home", "repo")
     assert code == 0, text
     commit_all(repo, "invariant init")
     code, out = migrate(capsys)

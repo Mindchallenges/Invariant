@@ -17,7 +17,7 @@ import shlex
 import sys
 import time
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -710,6 +710,7 @@ class Context:
             ambiguous=ambiguous,
             host_instruction_files=host_instruction_files(self.manifest),
             host_agent_plan=host_agent_plan(self.manifest),
+            host_attribution_trailers=host_attribution_trailers(self.manifest),
         )
 
 
@@ -834,27 +835,34 @@ def _init_settings(base: Mapping[str, Any], docs: _InitDocs) -> dict[str, Any]:
     settings = copy.deepcopy(dict(base))
     if _docs_written(docs.choice):
         _merge_setting(settings, "paths.docs", docs.choice.docs)
-    if docs.store is None and docs.mode in ("incremental", "all_at_once"):
+    if docs.mode in ONBOARDING_WRITTEN:
         _merge_setting(settings, "docs.onboarding", docs.mode)
     return settings
 
 
+#: The onboarding answers that write `docs.onboarding` (ADR-016 D4.3).
+ONBOARDING_WRITTEN = ("incremental", "all_at_once")
+
+
 def _docs_written(choice) -> bool:
-    """Whether `init` writes ``choice``'s `paths.docs` into the manifest: an
-    in-repo location other than the load-time default. A store's goes into
-    its block (``onboarding.place_in_store``)."""
-    return choice.kind != "store" and choice.docs != DEFAULTS["paths"]["docs"]
+    """Whether `init` writes ``choice``'s `paths.docs` into the in-repo
+    manifest: a location other than the load-time default. The store home's
+    goes into its block (:class:`_PlannedStore`)."""
+    return choice.docs != DEFAULTS["paths"]["docs"]
 
 
 def _init_docs_home(root: Path, new: bool) -> tuple[str, Path | None]:
-    """``(paths.docs, srcdir)``: where `init` puts the docs, and the docs
-    project's source directory as it resolves, which the adapters skip as
-    never the project's content (ADR-020 D8).
+    """``(paths.docs, srcdir)``: where `init` puts the docs, relative to the
+    home that holds them, and the docs project's source directory as it
+    resolves, which the adapters skip as never the project's content
+    (ADR-020 D8).
 
     A new project's are the starter's, ``invariant-docs/architecture`` in
     ``invariant-docs/``. An existing project's are what its manifest resolves,
-    so `init --force` rewrites the manifest in place (ADR-020 D2); where that
-    manifest does not load, the default `paths.docs` and the default rule.
+    so `init --force` rewrites the configuration in place (ADR-020 D2): a
+    store project's `paths.docs` is read back relative to the store when its
+    docs live there. Where that manifest does not load, the default
+    `paths.docs` and the default rule.
     """
     from ..core import needs
     from ..domains.docs import STARTER_DOCS, STARTER_SRCDIR
@@ -866,8 +874,19 @@ def _init_docs_home(root: Path, new: bool) -> tuple[str, Path | None]:
         old = Manifest.locate(root)
     except InvariantError:
         return default, needs.resolve_srcdir(root, None, default)
-    docs = project_relative(old.get("paths.docs"), [old.root]) if old.store is None else None
+    if old.store is None:
+        docs = project_relative(old.get("paths.docs"), [old.root])
+    else:
+        docs = _spelled_under(_docs_root(old), old.path_for("docs"))
     return docs or default, needs.srcdir_of(old)
+
+
+def _docs_root(manifest: Manifest) -> Path:
+    """The root ``manifest``'s `paths.docs` is read against: the store's,
+    under ``records.docs: store`` (ADR-014 D1), else the project's."""
+    if manifest.store_root is not None and manifest.get("records.docs") == "store":
+        return manifest.store_root
+    return manifest.root
 
 
 def _init_ecosystem_settings(
@@ -926,6 +945,21 @@ def _store_refusal(root: Path) -> str | None:
     return None
 
 
+def _repo_refusal(root: Path) -> str | None:
+    """Why `init` cannot offer the repository home at ``root``, or ``None``
+    (ADR-020 D4, D8): a content ``conf.py`` at the root that does not
+    exclude ``invariant-docs/`` would read invariant's docs project as its
+    own. The rule is ``store migrate --to repo``'s (``conf_readers``), read
+    through the ``sphinx`` adapter's ``conf_excludes``."""
+    from ..adapters.sphinx import conf_excludes
+    from ..core.storemigrate import conf_readers
+    from ..domains.docs import STARTER_SRCDIR
+
+    reasons: list[str] = []
+    conf_readers(root, STARTER_SRCDIR, conf_excludes, reasons)
+    return reasons[0] if reasons else None
+
+
 def _init_candidate(root: Path, manifest_path: Path, raw: Mapping[str, Any]) -> Manifest:
     """``raw`` resolved as the manifest `init` would write, over the tree as it
     stands, with the user level below."""
@@ -940,17 +974,21 @@ def _init_candidate(root: Path, manifest_path: Path, raw: Mapping[str, Any]) -> 
     )
 
 
-def _init_resolved(root: Path, manifest_path: Path, body: str, written: bool):
+def _init_resolved(root: Path, manifest_path: Path, body: str | None, written: bool,
+                   docs: _InitDocs | None = None):
     """The configuration `init` reports on: the project as written, or for a
-    dry run the manifest it would write over the tree as it stands, with the
-    user level below. A refusal is returned, not raised: the project is
+    dry run the configuration it would write over the tree as it stands,
+    with the user level below: the in-repo manifest, or the store home's
+    levels as planned. A refusal is returned, not raised: the project is
     initialised by the time a written run asks."""
     import yaml
 
     try:
         if written:
             return Manifest.locate(root)
-        return _init_candidate(root, manifest_path, yaml.safe_load(body) or {})
+        if docs is not None and docs.planned is not None:
+            return docs.planned.manifest(root)
+        return _init_candidate(root, manifest_path, yaml.safe_load(body or "") or {})
     except InvariantError as exc:
         return exc
 
@@ -973,11 +1011,11 @@ def _init_assessment(resolved):
     return assessment, assessment.to_dict()
 
 
-def _init_configuration(resolved) -> tuple[str, list | dict]:
+def _init_configuration(resolved, home: _InitHome, written: bool) -> tuple[str, list | dict]:
     """What a non-interactive `init` adds after its report (ADR-017 D9):
-    ``(text, payload)``, each core question's resolved value and provenance,
-    the payload `{"error"}` when it could not be resolved. Reported, never
-    raised, as the assessment is."""
+    ``(text, payload)``, the home first (ADR-020 D4), then each core
+    question's resolved value and provenance, the payload `{"error"}` when it
+    could not be resolved. Reported, never raised, as the assessment is."""
     from ..core import questionnaire
 
     error = resolved if isinstance(resolved, InvariantError) else None
@@ -987,81 +1025,370 @@ def _init_configuration(resolved) -> tuple[str, list | dict]:
         except InvariantError as exc:
             error = exc
         else:
-            return questionnaire.render_report(rows), [row.report_dict() for row in rows]
+            rows = [home.row(resolved), *rows]
+            text = questionnaire.render_report(rows, home.route_lines(written))
+            return text, [row.report_dict() for row in rows]
     return f"configuration not resolved: {error}", {"error": str(error)}
+
+
+@dataclass
+class _InitHome:
+    """Where `init` puts the configuration (ADR-020 D1, D4)."""
+
+    #: ``store`` or ``repo``.
+    location: str
+    #: How it was chosen: ``default``, ``--home``, ``--store``, ``answered``,
+    #: or ``kept``, an existing project's own (ADR-020 D2).
+    provenance: str
+    #: Why the other home was not offered, or ``None`` when both were.
+    reason: str | None = None
+    #: For ``store``, the store planned (``core.stores.HomeStore``).
+    store: Any = None
+
+    def payload(self) -> dict[str, Any]:
+        """The `home` field under ``--json`` (ADR-020 D4)."""
+        return {
+            "location": self.location,
+            "store": None if self.store is None else str(self.store.root),
+            "reason": self.reason,
+        }
+
+    def row(self, resolved: Manifest):
+        """The configuration report's first row: the home, where the
+        configuration lives as it resolves, and how it was chosen."""
+        from ..core import questionnaire
+
+        question = questionnaire.home_question(resolved)
+        return replace(
+            question, default=questionnaire.home_of(resolved), provenance=self.provenance
+        )
+
+    def route_lines(self, written: bool) -> list[str]:
+        """The lines after the rows: the other route, or why it was not
+        offered (ADR-020 D4). A written run names only the route that still
+        works: init has made its home by then."""
+        if self.location == "store":
+            if self.reason is not None:
+                return [f"the repository is not offered as the home: {self.reason}"]
+            if written:
+                return [
+                    "to commit the configuration instead: invariant store migrate --to repo"
+                ]
+            return [
+                "to commit the configuration instead: invariant init --home repo,",
+                "or later: invariant store migrate --to repo",
+            ]
+        if self.reason is not None:
+            return [f"a store is not offered as the home: {self.reason}"]
+        if written:
+            return [
+                "to keep the configuration out of the repository instead: invariant "
+                + "store migrate --to store"
+            ]
+        return [
+            "to keep the configuration out of the repository instead: invariant init "
+            + "--home store,",
+            "or later: invariant store migrate --to store",
+        ]
+
+
+#: The `home:location` question (ADR-020 D4) and the store step's.
+HOME_QUESTION = "Where does this project's invariant configuration live?"
+STORE_QUESTION = (
+    "store path (empty: {default}; a path holding a store links it, an empty "
+    "or absent one gets a new store)"
+)
+
+
+def _init_existing_store(root: Path) -> Manifest | None:
+    """The store project rooted at ``root``, or ``None``: one that does not
+    load is no project init can rewrite, and is reported by the store's own
+    refusal when init plans its home."""
+    try:
+        found = Manifest.locate(root, required=False)
+    except InvariantError:
+        return None
+    if found.located and found.store is not None and found.root == root:
+        return found
+    return None
+
+
+def _init_home(args, root: Path, new: bool, stored: Manifest | None, asker) -> _InitHome:
+    """Where the configuration lives (ADR-020 D1, D4): asked first, the store
+    the default in every mode.
+
+    ``--home`` and ``--store`` answer it as ``--profile`` answers its
+    question, checked like a typed answer: one naming a home not offered,
+    or a store that cannot be the home, is a usage error before anything is
+    written. An existing project keeps its home (D2): ``store migrate``
+    moves it. A store is not offered outside a git repository or below its
+    top level, and the repository is not offered where a root ``conf.py``
+    would read ``invariant-docs/`` (D8); each is said, never a silent
+    fallback.
+    """
+    from ..core import questionnaire
+    from ..core.stores import HomeStore
+
+    if args.store is not None and args.home == "repo":
+        raise UsageError(
+            "--store names the store the store home lives in, and --home repo "
+            "keeps the configuration in the repository: give one of them"
+        )
+    given = args.home or ("store" if args.store is not None else None)
+    flag = "--home" if args.home is not None else "--store"
+    if stored is not None:
+        reasons = {
+            "repo": (
+                f"this project's configuration is in the store {stored.store.root}; "
+                f"'invariant store migrate --to repo' moves it (ADR-020 D2)"
+            ),
+            "store": None,
+        }
+    elif not new:
+        reasons = {
+            "store": (
+                "this project's configuration is in the repository, "
+                f"{MANIFEST_RELPATH}; 'invariant store migrate --to store' moves it "
+                "(ADR-020 D2)"
+            ),
+            "repo": None,
+        }
+    else:
+        store_reason = _store_refusal(root)
+        reasons = {
+            "store": store_reason,
+            # Without a store, the repository is the only home there is.
+            "repo": _repo_refusal(root) if store_reason is None else None,
+        }
+    offered = [home for home in questionnaire.HOMES if reasons[home] is None]
+    if given is not None:
+        if given not in offered:
+            raise UsageError(f"{flag} {args.store if flag == '--store' else given}: "
+                             f"the {given} home is not offered here: {reasons[given]}")
+        location, provenance = given, flag
+    elif asker is not None and len(offered) == len(questionnaire.HOMES):
+        location = asker.choose(
+            HOME_QUESTION,
+            [(home, questionnaire.HOME_DESCRIPTIONS[home]) for home in questionnaire.HOMES],
+            questionnaire.HOMES[0],
+        )
+        provenance = "answered"
+    else:
+        location = offered[0]
+        provenance = "default" if new else "kept"
+        other = next(home for home in questionnaire.HOMES if home != location)
+        if asker is not None:
+            asker.say(f"The configuration lives in the {location} home: {other} is not "
+                      f"offered: {reasons[other]}")
+    other = next(home for home in questionnaire.HOMES if home != location)
+    home = _InitHome(location=location, provenance=provenance, reason=reasons[other])
+    if location == "store":
+        if stored is not None:
+            link = stored.store
+            if args.store is not None and Path(args.store).expanduser().resolve() != link.root:
+                raise UsageError(
+                    f"--store {args.store}: this project's store is {link.root}; "
+                    f"'invariant store migrate' moves a project, init does not"
+                )
+            home.store = HomeStore(root=link.root, identity=link.identity, link=True)
+        else:
+            home.store = _init_store_plan(root, args.store, flag, asker)
+    return home
+
+
+def _init_store_plan(root: Path, given: str | None, flag: str, asker):
+    """The store the store home is placed in: ``--store``'s, the answer to
+    the store step's question, or the default (ADR-020 D4, ADR-014 D2).
+    Nothing is written; a refused flag is a usage error, a refused answer
+    asked again."""
+    from ..core.stores import plan_home_store
+
+    try:
+        default = plan_home_store(root, given)
+    except InvariantError as exc:
+        spelled = f"{flag} {given}: " if given is not None else ""
+        raise UsageError(f"{spelled}the store home cannot be placed: {exc}") from exc
+    if given is not None or asker is None:
+        return default
+    while True:
+        answer = asker.ask(STORE_QUESTION.format(default=default.root), "").strip()
+        if not answer:
+            return default
+        try:
+            return plan_home_store(root, answer)
+        except InvariantError as exc:
+            asker.say(f"refused: {exc}")
+
+
+@dataclass
+class _PlannedStore:
+    """The store home as `init` will leave it (ADR-020 D1), before anything
+    is written: the store's own level and this repository's block. Every
+    question, the starter's plan and a dry run read the configuration it
+    resolves to; the writes then make it so."""
+
+    #: The store planned (``core.stores.HomeStore``).
+    home: Any
+    #: What `init` writes at the store's own level when it creates the
+    #: store: the project, and the profile where nothing was asked.
+    project: dict[str, Any]
+    #: The store's own level as it will read.
+    top: dict[str, Any]
+    #: This repository's block as `init` writes it.
+    block: dict[str, Any]
+    #: The block the store already holds for this repository, when linked.
+    existing: dict[str, Any] = field(default_factory=dict)
+    #: Settings answered at the store's own level.
+    store_level: dict[str, Any] = field(default_factory=dict)
+
+    def manifest(self, root: Path, block: Mapping[str, Any] | None = None) -> Manifest:
+        """The configuration the store home resolves to, as
+        ``Manifest.locate`` will read it once written."""
+        from ..core.home import load_user_config
+        from ..core.stores import POINTER, STORE_MANIFEST, StoreLink
+
+        user = load_user_config()
+        link = StoreLink(
+            self.home.root, self.home.root.name, self.home.identity, self.home.key, "user"
+        )
+        below = [(user.label, user.defaults)] if user.defaults else []
+        below += [
+            (link.label, _over(self.top, self.store_level)),
+            (link.repo_label, _over(_over(self.existing, self.block), block or {})),
+        ]
+        return Manifest.from_raw(
+            {}, root=root, path=self.home.root / STORE_MANIFEST, below=below,
+            store=link, label=f"repo:{POINTER}",
+        )
+
+    def lines(self) -> list[str]:
+        """What a dry run says it would do in the store."""
+        from ..core.stores import STORE_MANIFEST
+        from ..domains.docs import setting_lines
+
+        lines = [self.home.describe()]
+        if self.home.note:
+            lines.append(self.home.note)
+        lines.append(
+            f"store {self.home.root.name}: install its privacy hooks through its local "
+            f"core.hooksPath (ADR-014 D8)"
+        )
+        if self.store_level:
+            lines.append(
+                f"write {', '.join(setting_lines(self.store_level))} to the store's own "
+                f"level, {self.home.root / STORE_MANIFEST}"
+            )
+        lines.append(
+            f"write {', '.join(setting_lines(self.block))} to "
+            f"{self.home.root / STORE_MANIFEST} (uncommitted: review and commit it in "
+            f"the store)"
+        )
+        return lines
+
+
+def _plan_store(home: _InitHome, project: dict[str, Any], docs: str, new: bool) -> _PlannedStore:
+    """The store home's levels before the answers (ADR-020 D1): a store init
+    creates gets ``project`` at its own level; a linked one keeps its own,
+    and its block for this repository is read under what init adds. A new
+    project's block sets every record's location and `paths.docs`; an
+    existing store project's keeps its records (D2)."""
+    from ..core.storemigrate import STORE_HOME_RECORDS
+    from ..core.stores import read_store_manifest, repo_name
+
+    store = home.store
+    block: dict[str, Any] = {"paths": {"docs": docs}}
+    if new:
+        block = {"records": dict(STORE_HOME_RECORDS), **block}
+    if store.link:
+        top, repos = read_store_manifest(store.root)
+        return _PlannedStore(
+            home=store, project={}, top=top, block=block,
+            existing=dict(repos.get(store.key) or {}),
+        )
+    top = _over({"version": 1, "project": {"name": repo_name(store.identity, store.root)}},
+                project)
+    return _PlannedStore(home=store, project=project, top=top, block=block)
 
 
 @dataclass
 class _InitDocs:
     """What `init`'s docs step decided (ADR-016 D4, re-housed by ADR-017 D3)."""
 
-    #: Where the docs live: a ``cli.onboarding.DocsChoice``.
+    #: Where the docs live: a ``cli.onboarding.DocsChoice``, relative to the
+    #: home that holds them (ADR-020 D4).
     choice: Any
-    #: The store created or linked, a ``cli.onboarding.StorePlacement``.
+    #: The store written, a ``cli.onboarding.StorePlacement``, once it is.
     store: Any = None
     #: How the gaps are closed; ``None`` when the offer was not made.
     mode: str | None = None
     #: A new project, with no manifest yet: its docs project is
     #: ``invariant-docs/``, and a content folder is refused for it (ADR-020 D8).
     new: bool = True
+    #: The store home as planned, or ``None`` for the repository home.
+    planned: _PlannedStore | None = None
+    #: The root ``choice`` is relative to: the repository, or the store.
+    root: Path | None = None
 
 
-def _init_docs_step(prompter, root: Path, docs: _InitDocs, candidate, project) -> None:
+def _init_docs_step(prompter, docs: _InitDocs, candidate) -> None:
     """ADR-016 D4.1 to D4.3 as the questionnaire's docs step, in their order
     and with their meaning: where the docs live, the assessment of that
     location, and how its gaps are closed.
 
-    The assessment reads the candidate configuration (``candidate``, given
-    the location chosen), as `init --dry-run` does (ADR-017 D3), and the key
-    the offer chooses is written with the rest. A store is created or linked
-    as soon as it is chosen, as before: it is the first write, the one most
-    likely to be refused, and the assessment reads the docs in it. A store
-    `init` creates gets ``project()`` at its own level.
+    The location is offered within the home (ADR-020 D4): the repository, or
+    the store, where an existing directory there is reused or another path
+    named. The assessment reads the candidate configuration (``candidate``,
+    given the location chosen), as `init --dry-run` does (ADR-017 D3), and
+    the key the offer chooses is written with the rest.
     """
     from . import onboarding
 
-    if (root / docs.choice.docs).exists():
+    if (docs.root / docs.choice.docs).exists():
         docs.choice = onboarding.offer_location(
-            prompter, root, docs.choice.docs, _store_refusal(root), new_project=docs.new
+            prompter,
+            docs.root,
+            docs.choice.docs,
+            within="the store" if docs.planned is not None else "the repository",
+            new_project=docs.new,
         )
-    if docs.choice.kind == "store":
-        docs.store = onboarding.place_in_store(_store_repo(root), docs.choice, project())
-        try:
-            resolved = Manifest.locate(root)
-        except InvariantError as exc:
-            resolved = exc
-    else:
-        resolved = candidate(docs.choice)
-    assessment, _report = _init_assessment(resolved)
+    assessment, _report = _init_assessment(candidate(docs.choice))
     if assessment is not None and assessment.gaps:
         docs.mode = onboarding.offer_onboarding(prompter, assessment)
 
 
 def _init_ask(asker, prompter, args, root: Path, manifest_path: Path, name: str,
               ecosystems: list[str], docs: _InitDocs):
-    """ADR-017 D3.1 and D3.2: the level, then the core sections in catalogue
-    order, the docs step at its place among them. Returns ``(base, asked)``:
-    the configuration the answers were asked over, and the answers.
+    """ADR-017 D3.1 and D3.2 after ADR-020 D4's home: the level, then the
+    core sections in catalogue order, the docs step at its place among them.
+    Returns ``(base, asked)``: the configuration the answers were asked
+    over, and the answers.
 
-    A flag given is an answer, checked as a typed one and not asked:
-    `--profile` (ADR-017 D5) and `--ecosystem`. A refused flag is a usage
-    error, before anything is written.
+    Under the store home the answers are asked over the store as planned,
+    and the level question offers ``user``, ``store`` and ``store-repo``,
+    the block the default: the repository's level is a pointer init does
+    not write. A flag given is an answer, checked as a typed one and not
+    asked: `--profile` (ADR-017 D5) and `--ecosystem`. A refused flag is a
+    usage error, before anything is written.
     """
     from ..core import questionnaire
     from . import configure
 
     try:
-        base = _init_candidate(
-            root,
-            manifest_path,
-            {"version": 1, "project": {"name": name, "ecosystems": ecosystems}},
-        )
+        if docs.planned is not None:
+            base = docs.planned.manifest(root)
+        else:
+            base = _init_candidate(
+                root,
+                manifest_path,
+                {"version": 1, "project": {"name": name, "ecosystems": ecosystems}},
+            )
         catalogue = questionnaire.load_catalogue()
     except InvariantError as exc:
         raise UsageError(f"the questionnaire cannot be asked: {exc}") from exc
-    asked = configure.Asked(
-        level=configure.ask_level(asker, base), draft=questionnaire.Draft(base)
+    level = configure.ask_level(
+        asker, base, exclude=("repo",) if docs.planned is not None else ()
     )
+    asked = configure.Asked(level=level, draft=questionnaire.Draft(base))
     given: dict[str, tuple[Any, str]] = {}
     if args.ecosystem:
         given["project.ecosystems"] = ([args.ecosystem], "--ecosystem")
@@ -1070,7 +1397,9 @@ def _init_ask(asker, prompter, args, root: Path, manifest_path: Path, name: str,
 
     def candidate(choice):
         draft = asked.draft
-        if _docs_written(choice):
+        if docs.planned is not None:
+            draft = draft.placed("paths.docs", choice.docs, "store-repo")
+        elif _docs_written(choice):
             draft = draft.placed("paths.docs", choice.docs, "repo")
         try:
             return draft.manifest()
@@ -1078,20 +1407,8 @@ def _init_ask(asker, prompter, args, root: Path, manifest_path: Path, name: str,
             return exc
 
     def docs_step(_asked) -> None:
-        if prompter is None:
-            return
-        _init_docs_step(
-            prompter,
-            root,
-            docs,
-            candidate,
-            lambda: {
-                "project": {
-                    "name": name,
-                    "ecosystems": list(asked.value("project.ecosystems", ecosystems)),
-                }
-            },
-        )
+        if prompter is not None:
+            _init_docs_step(prompter, docs, candidate)
 
     try:
         configure.ask_sections(
@@ -1101,25 +1418,25 @@ def _init_ask(asker, prompter, args, root: Path, manifest_path: Path, name: str,
             catalogue.core,
             given=given,
             prefill={"project.ecosystems": (ecosystems, "detected")},
-            steps={"docs": docs_step},
+            # The home was asked first, before the level (ADR-020 D4).
+            steps={"home": lambda _asked: None, "docs": docs_step},
         )
     except questionnaire.Refused as exc:
         raise UsageError(str(exc)) from exc
     return base, asked
 
 
-def _init_plan(asker, root: Path, base: Manifest, asked, docs: _InitDocs):
+def _init_plan(asker, base: Manifest, asked, docs: _InitDocs):
     """ADR-017 D4, D5: the writes the answers make, over the configuration as
-    it now stands. The project block is init's own body and is not planned.
-    When the docs step made this a store project, its repo level is the
-    pointer, which init does not write: an answer aimed at it goes to this
-    repository's block in the store, saying so (D4)."""
+    it now stands. The project block is init's own and is not planned. Under
+    the store home, the project's repo level is the pointer, which init does
+    not write: an answer aimed at it goes to this repository's block in the
+    store, saying so (D4)."""
     from ..core import questionnaire
     from . import configure
 
     answers = [a for a in asked.answers if not a.key.startswith("project.")]
-    if docs.store is not None:
-        base = Manifest.locate(root)
+    if docs.planned is not None:
         moved = []
         for answer in answers:
             if answer.level == "repo":
@@ -1147,24 +1464,53 @@ def cmd_init(args) -> int:
             f"{manifest_path.relative_to(root)} already exists; pass --force to "
             f"overwrite, or edit it directly"
         )
-    new = not manifest_path.exists()
-    mandate = {} if new else _kept_mandate(root)
+    stored = None if manifest_path.exists() else _init_existing_store(root)
+    if stored is not None and not args.force:
+        raise UsageError(
+            f"this repository's configuration is already in the store "
+            f"{stored.store.root} ({stored.store.repo_label}); pass --force to "
+            f"write init's settings into its block again, or edit it there"
+        )
+    new = not manifest_path.exists() and stored is None
+    kept = {} if new or stored is not None else _kept_on_force(root)
     docs_location, docs_srcdir = _init_docs_home(root, new)
 
     ecosystems = [args.ecosystem] if args.ecosystem else detect(root, docs_srcdir=docs_srcdir)
     name = args.name or root.name
     profile = args.profile or DEFAULTS["enforcement"]["profile"]
 
-    # The questions (ADR-017 D3). Only an interactive run is asked anything:
-    # the level and the core sections, then the docs step (ADR-016 D4), which
-    # offers a location only where `paths.docs` exists; an absent directory
-    # gets the starter as it always has, and the existing one is never
-    # written. Nothing but a chosen store is written until the last answer.
-    # A new project's docs location is `invariant-docs/architecture`
-    # (ADR-020 D8); `--force` over an existing manifest keeps its own.
+    # The home first (ADR-020 D4): the store by default in every mode, the
+    # repository with --home repo or where no store can be had. Nothing is
+    # written yet: the store is planned, and created or linked first among
+    # the writes.
     prompter = _init_prompter(args)
     asker = _questionnaire_prompter(args)
-    docs = _InitDocs(onboarding.DocsChoice("reuse", docs_location), new=new)
+    home = _init_home(args, root, new, stored, asker)
+    # Where nothing is asked, the profile is written at the home's own level,
+    # as the in-repo manifest always carried it.
+    unasked = {"enforcement": {"profile": profile}} if asker is None else {}
+    planned = None
+    if home.location == "store":
+        project = {"project": {"name": name, "ecosystems": ecosystems}, **unasked}
+        try:
+            planned = _plan_store(home, project, docs_location, new)
+        except InvariantError as exc:
+            raise UsageError(f"the store home cannot be placed: {exc}") from exc
+
+    # The questions (ADR-017 D3). Only an interactive run is asked anything:
+    # the level and the core sections, then the docs step (ADR-016 D4), which
+    # offers a location only where `paths.docs` exists in the home; an absent
+    # directory gets the starter as it always has, and the existing one is
+    # never written. Nothing but the home's store is written until the last
+    # answer. A new project's docs location is `invariant-docs/architecture`
+    # (ADR-020 D8); `--force` over an existing project keeps its own.
+    docs = _InitDocs(
+        onboarding.DocsChoice("reuse", docs_location),
+        new=new,
+        planned=planned,
+        root=planned.home.root if planned is not None and _docs_in_store(planned, stored)
+        else root,
+    )
     asked = None
     if asker is not None:
         base, asked = _init_ask(
@@ -1172,47 +1518,49 @@ def cmd_init(args) -> int:
         )
         ecosystems = list(asked.value("project.ecosystems", ecosystems))
     elif prompter is not None:
-        _init_docs_step(
-            prompter,
-            root,
-            docs,
-            lambda choice: _init_resolved(
-                root,
-                manifest_path,
-                _init_body(
-                    name, ecosystems, _init_settings({"enforcement": {"profile": profile}}, docs)
-                ),
-                written=False,
-            ),
-            lambda: {
-                "project": {"name": name, "ecosystems": ecosystems},
-                "enforcement": {"profile": profile},
-            },
-        )
+
+        def candidate(choice):
+            if planned is not None:
+                try:
+                    return planned.manifest(root, {"paths": {"docs": choice.docs}})
+                except InvariantError as exc:
+                    return exc
+            body = _init_body(
+                name, ecosystems, _init_settings({"enforcement": {"profile": profile}}, docs)
+            )
+            return _init_resolved(root, manifest_path, body, written=False)
+
+        _init_docs_step(prompter, docs, candidate)
 
     # Only answers that differ from what the levels below resolve are
     # written (ADR-017 D5); a run that asked nothing writes today's body.
     plan, notes = (None, [])
     if asked is not None:
-        plan, notes = _init_plan(asker, root, base, asked, docs)
-    repo_settings = (
-        {"enforcement": {"profile": profile}} if plan is None else plan.at("repo").sets
-    )
+        plan, notes = _init_plan(asker, base, asked, docs)
     # What the adapters need written that their static defaults cannot know
     # (the sphinx source directory), never over an answer given above.
-    store = docs.store
     eco_settings, eco_notes = _init_ecosystem_settings(root, ecosystems, docs_srcdir)
-    if store is None:
+    body = None
+    if planned is None:
+        repo_settings = (
+            {"enforcement": {"profile": profile}} if plan is None else plan.at("repo").sets
+        )
         repo_settings = _under(repo_settings, eco_settings)
-    settings = _init_settings(repo_settings, docs)
-    body = _init_body(name, ecosystems, settings)
-
-    if store is not None:
-        actions = list(store.lines)
-        docs_dir = store.root / docs.choice.docs
+        settings = _init_settings(repo_settings, docs)
+        body = _init_body(name, ecosystems, settings)
     else:
-        actions = [f"write {manifest_path.relative_to(root)}"]
-        docs_dir = root / docs.choice.docs
+        if planned.project:
+            planned.project["project"]["ecosystems"] = ecosystems
+            planned.top = _over(planned.top, planned.project)
+        block = _over(planned.block, {"paths": {"docs": docs.choice.docs}})
+        if plan is not None:
+            block = _over(block, plan.at("store-repo").sets)
+            planned.store_level = plan.at("store").sets
+        if docs.mode in ONBOARDING_WRITTEN:
+            block = _over(block, {"docs": {"onboarding": docs.mode}})
+        planned.block = _under(block, eco_settings)
+
+    docs_dir = docs.root / docs.choice.docs
     # The docs starter (ADR-018 D11), ONLY where the docs directory is absent.
     # A fresh project otherwise starts out failing its own docs-first gate with
     # nothing to read. A directory that exists, even empty, is the project's,
@@ -1223,16 +1571,36 @@ def cmd_init(args) -> int:
         if not docs_dir.exists()
         else (None, None)
     )
-    if store is None and (starter is not None or mandate):
-        settings = _over(settings, starter.settings if starter is not None else mandate)
+    if planned is None and (starter is not None or kept):
+        settings = _over(settings, starter.settings if starter is not None else kept)
         body = _init_body(name, ecosystems, settings)
+    if planned is not None and starter is not None:
+        # The starter's ruleset is in the store with the docs project, so the
+        # guidelines records are the store's too (ADR-014 D9, increment 4c-2).
+        records = {"backlog": "store"}
+        if starter.ruleset is not None:
+            records["guidelines"] = "store"
+        planned.block = _over(planned.block, _over(starter.settings, {"records": records}))
+    if docs_dir.exists():
+        # Read over the configuration as it will be written, what `--force`
+        # keeps included, so neither an enforced project nor an adopted one
+        # is told to adopt the docs project it already has (BUG_128, BUG_147).
+        starter_note = _init_adoption_note(root, manifest_path, body, docs)
     install = _init_host_install(args)
-    host = ClaudeCodeHost(root)
+    candidate = _init_resolved(root, manifest_path, body, written=False, docs=docs)
+    host = ClaudeCodeHost(
+        root,
+        manifest=candidate if planned is not None and isinstance(candidate, Manifest) else None,
+    )
+    actions = (
+        planned.lines() if planned is not None else [f"write {manifest_path.relative_to(root)}"]
+    )
     if install:
         actions.extend(host.plan_install())
     else:
         actions.append(_not_installed_line())
-    actions.append("add the state root to .gitignore")
+    if planned is None:
+        actions.append("add the state root to .gitignore")
     actions.append("register this project in the oracle index")
     venv = None
     if starter is not None:
@@ -1252,14 +1620,14 @@ def cmd_init(args) -> int:
         notes_after.append(starter.note)
 
     if args.dry_run:
-        resolved = _init_resolved(root, manifest_path, body, written=False)
-        assessment, report = _init_assessment(resolved)
+        assessment, report = _init_assessment(candidate)
         payload = {
             "actions": actions,
             "docs_assessment": report,
             "notes": eco_notes + notes_after,
             "docs_venv": venv,
             "host_install": _host_install_payload(install),
+            "home": home.payload(),
         }
         text = (
             "would:\n"
@@ -1269,13 +1637,24 @@ def cmd_init(args) -> int:
             + "".join(f"\n\n{note}" for note in eco_notes + notes_after)
         )
         if prompter is None:
-            listed, payload["configuration"] = _init_configuration(resolved)
+            listed, payload["configuration"] = _init_configuration(candidate, home, False)
             text += f"\n\n{listed}"
         return emit(args, payload, text)
 
     # The writes, all after the last answer (ADR-017 D5): the store's, then
     # the user level's, then the repository's.
     by_hand_settings: list[dict[str, str]] = []
+    if planned is not None:
+        planned_lines = len(planned.lines())
+        store = onboarding.place_store(
+            root, planned.home, planned.project, planned.block, planned.store_level
+        )
+        docs.store = store
+        # The store's privacy screen, as `store init` and `store link` give
+        # it (ADR-014 D8): a store made the default must not drop it.
+        actions[:planned_lines] = [*store.lines, *_ensure_store_hooks(store.root)]
+    else:
+        store = None
     if plan is not None:
         user = plan.at("user")
         if user.sets or user.removes:
@@ -1284,36 +1663,23 @@ def cmd_init(args) -> int:
                 actions.append(applied.action)
             if applied.by_hand is not None:
                 by_hand_settings.append(applied.by_hand)
-        if store is not None:
-            block = plan.at("store-repo")
-            if block.sets or block.removes:
-                actions.append(store.write(block.sets, block.removes))
-    if store is not None and eco_settings:
-        actions.append(store.write(eco_settings))
-    if store is not None and starter is not None:
-        # The starter's ruleset is in the store with the docs project, so the
-        # guidelines records are the store's too (ADR-014 D9, increment 4c-2).
-        records = {"backlog": "store"}
-        if starter.ruleset is not None:
-            records["guidelines"] = "store"
-        actions.append(store.write(_over(starter.settings, {"records": records})))
-    if store is not None and docs.mode in ("incremental", "all_at_once"):
-        actions.append(store.write({"docs": {"onboarding": docs.mode}}))
-    elif docs.mode in ("incremental", "all_at_once"):
+        if store is not None and plan.at("store-repo").removes:
+            actions.append(store.write({}, plan.at("store-repo").removes))
+    if store is None and docs.mode in ONBOARDING_WRITTEN:
         actions.append(f"write docs.onboarding: {docs.mode} to {MANIFEST_RELPATH}")
 
     if store is None:
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(body, encoding="utf-8")
 
-    gitignore = root / ".gitignore"
-    marker = ".claude/invariant/state/"
-    existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
-    if marker not in existing:
-        with gitignore.open("a", encoding="utf-8") as handle:
-            handle.write(
-                f"\n# invariant runtime state: machine-local and session-scoped\n{marker}\n"
-            )
+        gitignore = root / ".gitignore"
+        marker = ".claude/invariant/state/"
+        existing = gitignore.read_text(encoding="utf-8") if gitignore.is_file() else ""
+        if marker not in existing:
+            with gitignore.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    f"\n# invariant runtime state: machine-local and session-scoped\n{marker}\n"
+                )
 
     if starter is not None:
         from ..domains import docs as docs_domain
@@ -1337,8 +1703,13 @@ def cmd_init(args) -> int:
                     f"/.venv from its requirements.txt"
                 )
 
-    JsonStore(root / ".claude" / "invariant" / "state").ensure_root()
     resolved = _init_resolved(root, manifest_path, body, written=True)
+    if store is None:
+        JsonStore(root / ".claude" / "invariant" / "state").ensure_root()
+    elif isinstance(resolved, Manifest):
+        # The store home writes nothing into the working tree: its runtime
+        # state is in the git common directory (ADR-020 D1).
+        JsonStore(resolved.state_root).ensure_root()
     if install:
         _init_install(root, resolved)
     registration = _register_after_init(root)
@@ -1377,11 +1748,13 @@ def cmd_init(args) -> int:
         "settings_by_hand": by_hand_settings,
         "docs_venv": venv,
         "host_install": _host_install_payload(install),
+        "home": home.payload(),
     }
     # Each core question's resolved value and where it came from (ADR-017
-    # D9), after everything else. Only where nothing was asked.
+    # D9), the home first, after everything else. Only where nothing was
+    # asked.
     if prompter is None and asker is None:
-        listed, payload["configuration"] = _init_configuration(resolved)
+        listed, payload["configuration"] = _init_configuration(resolved, home, True)
         after.append(listed)
     return emit(
         args,
@@ -1393,13 +1766,20 @@ def cmd_init(args) -> int:
             "linked\nworktree, and a worktree checks out a commit — an uncommitted "
             "manifest\nis invisible from inside one."
             if store is None
-            else "\n\nCommit the repository's files before starting a session, "
-            "and the store's\ninvariant.yaml in the store: the manifest lives "
-            "there, not in the repository."
+            else "\n\nNothing of invariant's is in the repository. Review and commit "
+            f"the store's\nfiles in the store, {store.root}: the configuration "
+            "lives there, not in\nthe repository."
         )
         + note
         + "".join(f"\n\n{text}" for text in after if text),
     )
+
+
+def _docs_in_store(planned: _PlannedStore, stored: Manifest | None) -> bool:
+    """Whether the store home's docs live in the store: always for a new
+    project (ADR-020 D1), and as its ``records.docs`` says for an existing
+    store project (D2)."""
+    return stored is None or stored.get("records.docs") == "store"
 
 
 def _host_install_payload(installed: bool) -> dict:
@@ -1425,27 +1805,39 @@ def _init_install(root: Path, resolved) -> None:
     ClaudeCodeHost(resolved.root, manifest=resolved).install()
 
 
-def _init_starter(root: Path, manifest_path: Path, body: str, name: str, docs: _InitDocs):
+def _init_docs_configuration(root: Path, manifest_path: Path, body: str | None,
+                             docs: _InitDocs):
+    """``(base, configuration)``: the root the docs resolve under and the
+    configuration being written, or the refusal that stopped it loading. In
+    the store home that is the store as planned, under the root its docs
+    are read against (ADR-016 ruling G, ADR-020 D1)."""
+    return docs.root, _init_resolved(root, manifest_path, body, written=False, docs=docs)
+
+
+def _init_adoption_note(root: Path, manifest_path: Path, body: str | None, docs: _InitDocs):
+    """Where the docs directory exists inside a hand-built sphinx-needs
+    project, the note naming the settings that describe it, else ``None``
+    (BUG_128, DEC_ADR_018_B128)."""
+    from ..domains import docs as docs_domain
+
+    base, candidate = _init_docs_configuration(root, manifest_path, body, docs)
+    if isinstance(candidate, InvariantError):
+        return None
+    return docs_domain.adoption_note(candidate, base=base, docs=docs.choice.docs)
+
+
+def _init_starter(root: Path, manifest_path: Path, body: str | None, name: str,
+                  docs: _InitDocs):
     """``(starter, note)``: the docs starter `init` writes (ADR-018 D11), or
     ``None`` and why not.
 
     Planned over the configuration being written, before the starter's own
     keys are added: its need types, its assessment sections and the source
-    areas its adapters derive. In a store project that is the store's, and
-    the starter goes under the store root, where ``records.docs`` resolves
-    (ADR-016 ruling G).
+    areas its adapters derive (:func:`_init_docs_configuration`).
     """
     from ..domains import docs as docs_domain
 
-    if docs.store is not None:
-        base = docs.store.root
-        try:
-            candidate = Manifest.locate(root)
-        except InvariantError as exc:
-            candidate = exc
-    else:
-        base = root
-        candidate = _init_resolved(root, manifest_path, body, written=False)
+    base, candidate = _init_docs_configuration(root, manifest_path, body, docs)
     if isinstance(candidate, InvariantError):
         return None, f"The docs starter was not written: the configuration does not load: {candidate}"
     try:
@@ -1454,9 +1846,10 @@ def _init_starter(root: Path, manifest_path: Path, body: str, name: str, docs: _
         )
     except docs_domain.StarterNotWritten as exc:
         return None, str(exc)
-    if docs.store is not None:
+    if docs.planned is not None and docs.planned.home.link:
         # A write into a store's policy with no session goes only into units
-        # nobody holds or queues for (ADR-014 D5, increment 4c-2).
+        # nobody holds or queues for (ADR-014 D5, increment 4c-2). A store
+        # init creates has no lease yet.
         from ..domains.session import SessionDomain
 
         try:
@@ -1466,17 +1859,41 @@ def _init_starter(root: Path, manifest_path: Path, body: str, name: str, docs: _
     return starter, None
 
 
-def _kept_mandate(root: Path) -> dict[str, Any]:
-    """What `init --force` keeps of an enforced manifest it rewrites: the keys
-    that put the project under the mandate (ADR-018 D10). Rewriting the
-    manifest never moves a project back to migrating, which only the
-    reasoned route may do; ``{}`` for a manifest that is not enforced or
-    does not load."""
+#: The keys of an in-repo manifest's own ``docs`` block that describe the
+#: docs project rather than enforce anything on it: its format and source
+#: directory, and the vocabulary BUG_128's adoption note tells a hand-built
+#: project to set by hand (DEC_ADR_018_B128). `init --force` keeps each the
+#: manifest sets (DEC_ADR_018_B147).
+DESCRIBED_DOCS_KEYS = (
+    ("format",),
+    ("needs", "srcdir"),
+    ("needs", "types"),
+    ("needs", "decision_statuses"),
+    ("needs", "require_links"),
+)
+
+
+def _kept_on_force(root: Path) -> dict[str, Any]:
+    """What `init --force` keeps of the in-repo manifest it rewrites: the
+    mandate of an enforced one (:func:`_kept_mandate`), then the docs
+    project's description its own file sets (:func:`_kept_description`),
+    whatever its state (BUG_147). ``{}`` for a manifest that does not load,
+    or a store project, whose block is rewritten in place and keeps them."""
     try:
         old = Manifest.locate(root)
     except InvariantError:
         return {}
-    if old.store is not None or old.get("docs.needs.state") != "enforced":
+    if old.store is not None:
+        return {}
+    return _under(_kept_mandate(old), _kept_description(old))
+
+
+def _kept_mandate(old: Manifest) -> dict[str, Any]:
+    """The keys that put ``old`` under the mandate, where it is enforced
+    (ADR-018 D10). Rewriting the manifest never moves a project back to
+    migrating, which only the reasoned route may do; ``{}`` for a manifest
+    that is not enforced."""
+    if old.get("docs.needs.state") != "enforced":
         return {}
     needs = {"state": "enforced"}
     if old.get("docs.needs.srcdir") is not None:
@@ -1490,6 +1907,30 @@ def _kept_mandate(root: Path) -> dict[str, Any]:
     if old.get("guidelines.ruleset") is not None:
         kept["guidelines"] = {"ruleset": old.get("guidelines.ruleset")}
     return kept
+
+
+def _kept_description(old: Manifest) -> dict[str, Any]:
+    """The :data:`DESCRIBED_DOCS_KEYS` ``old``'s own file sets, as it sets
+    them; never a default or another level's value, so a manifest with no
+    ``docs`` block keeps nothing (DEC_ADR_018_B147). ``{}`` where the file
+    cannot be read back."""
+    import yaml
+
+    try:
+        raw = yaml.safe_load(Path(old.path).read_text(encoding="utf-8"))
+    except (OSError, TypeError, yaml.YAMLError):
+        return {}
+    docs = raw.get("docs") if isinstance(raw, Mapping) else None
+    if not isinstance(docs, Mapping):
+        return {}
+    kept: dict[str, Any] = {}
+    for key in DESCRIBED_DOCS_KEYS:
+        node: Any = docs
+        for part in key:
+            node = node.get(part) if isinstance(node, Mapping) else None
+        if node is not None:
+            _merge_setting(kept, ".".join(key), node)
+    return {"docs": kept} if kept else {}
 
 
 def _venv_deferred(root: Path, starter) -> str:
@@ -1604,12 +2045,18 @@ def cmd_doctor(args) -> int:
         # this machine, so it is named here rather than discovered. A row
         # that informs and never fails: a default is the operator's choice.
         checks.append(("user defaults", True, user_defaults_summary(ctx.manifest)))
-        home_row = _config_home_row(ctx.manifest)
-        if home_row is not None:
-            label, detail, warns = home_row
-            checks.append((label, True, detail))
+        rulings_row = _rulings_row(ctx.manifest)
+        if rulings_row is not None:
+            detail, warns = rulings_row
+            checks.append(("rulings", True, detail))
             if warns:
-                warned.add(label)
+                warned.add("rulings")
+        for home_row in (_config_home_row(ctx.manifest), _docs_folder_row(ctx.manifest)):
+            if home_row is not None:
+                label, detail, warns = home_row
+                checks.append((label, True, detail))
+                if warns:
+                    warned.add(label)
         for store_row in (store_identity_row(ctx.manifest), store_privacy_row(ctx.manifest)):
             if store_row is not None:
                 label, ok, detail, warns = store_row
@@ -1670,11 +2117,10 @@ def cmd_doctor(args) -> int:
         if plantuml is not None:
             checks.append(plantuml)
 
-        for name in ("build", "test"):
-            configured = ctx.manifest.get(f"commands.{name}")
-            checks.append(
-                (f"commands.{name} configured", bool(configured), str(configured or "unset"))
-            )
+        # The command rows follow the lanes the project's sessions can run
+        # (ADR-015 D2, ruling 5): a command is required where a selectable
+        # lane carries a gate that reads its run, and each row names them.
+        checks.extend(command_rows(ctx.manifest))
         # A declared adapter whose coverage is not applicable says so, by name
         # (ADR-015 D1), rather than leaving an unset coverage command to read
         # as something missing.
@@ -2424,6 +2870,74 @@ def _refuse_a_higher_level(manifest: Manifest, setting_lines: list[str]) -> None
             )
 
 
+def command_rows(manifest: Manifest) -> list[tuple[str, bool, str]]:
+    """`doctor`'s command rows (ADR-015 D2, ruling 5): ``commands.build``,
+    ``commands.test`` and ``commands.coverage``, each judged by the lanes the
+    project's sessions can run (``core/machines.command_needs``).
+
+    A command is required where a selectable lane carries a gate that reads
+    its run, and the row names each such lane and gate, so a failure says
+    which gate would have nothing to run. ``commands.coverage`` is required
+    only while some declared adapter's coverage applies (ADR-015 D1).
+    ``commands.build`` is read by no gate, so it is reported and never
+    required. These are the flat keys, the primary ecosystem's, which a
+    whole run uses (ADR-013).
+    """
+    from ..adapters import get_adapter
+    from ..core.machines import command_needs
+
+    try:
+        needs = command_needs(manifest)
+    except InvariantError as exc:
+        return [("commands", False, f"the lanes could not be read: {exc}")]
+    configured_lane = str(manifest.get("methodology.pipeline") or "tdd")
+
+    def lanes_text(found: list[tuple[str, list[str]]]) -> str:
+        return "; ".join(
+            f"{lane}{' (methodology.pipeline)' if lane == configured_lane else ''}: "
+            + ", ".join(gates)
+            for lane, gates in found
+        )
+
+    rows: list[tuple[str, bool, str]] = []
+    build = manifest.get("commands.build")
+    rows.append(
+        (
+            "commands.build",
+            True,
+            f"{build or 'unset'}; required by nothing: no gate of any lane runs it",
+        )
+    )
+    inapplicable = [
+        eco for eco in manifest.declared_ecosystems if not get_adapter(eco).coverage_applicable
+    ]
+    applies = len(inapplicable) < len(manifest.declared_ecosystems)
+    for name in ("test", "coverage"):
+        key = f"commands.{name}"
+        value = manifest.get(key)
+        shown = value or "unset"
+        found = needs[name]
+        if name == "coverage" and found and not applies:
+            detail = (
+                f"{shown}; not required: every declared adapter declares coverage "
+                f"not applicable ({', '.join(inapplicable)}), so the gates that "
+                f"read it have nothing to measure: {lanes_text(found)}"
+            )
+            rows.append((key, True, detail))
+        elif not found:
+            detail = f"{shown}; required by nothing: no lane carries a gate that reads its run"
+            rows.append((key, True, detail))
+        elif value:
+            rows.append((key, True, f"{value}; required by {lanes_text(found)}"))
+        else:
+            detail = (
+                f"unset; required by {lanes_text(found)}: those gates would have "
+                f"nothing to run. Set {key}"
+            )
+            rows.append((key, False, detail))
+    return rows
+
+
 def command_shape_row(manifest: Manifest) -> tuple[str, str, bool]:
     """`doctor`'s `command shape` row (ADR-017 ruling 13): ``(label, detail,
     warns)``, each misshapen command named with its key and what is wrong."""
@@ -2560,19 +3074,42 @@ def _oracle_web_checks() -> list[tuple[str, bool, str]]:
 
 
 def _config_home_row(manifest) -> tuple[str, str, bool] | None:
-    """``config home`` for an in-repo manifest (ADR-020 D5 as D11 amends it).
+    """``config home`` (ADR-020 D5, as D11 amends it): where the
+    configuration lives. It informs and never fails.
 
-    Informs, and warns only on a manifest git neither tracks nor ignores: no
-    worktree would hold it, and ``git status`` shows it. A store project's
-    cases are D5's, not built yet.
+    In-repo, it reads committed (shared through the repository) or local
+    (kept out of git, copied into each worktree), and warns on a manifest git
+    neither tracks nor ignores, and on two homes: an in-repo manifest beside
+    a store the user level or a pointer names for this repository. A store
+    project's row names the store, that nothing of invariant's is committed,
+    the route to share it, and "this machine only" with no store remote.
     """
+    from ..core import git
+
     location = manifest.location
+    if location.kind == "store":
+        store = manifest.store
+        detail = (
+            f"store {store.name} at {store.root}: nothing of invariant's is "
+            f"committed in the repository; a fresh clone or CI is unconfigured "
+            f"until it links the store (invariant store clone); to share the "
+            f"configuration: invariant store migrate --to repo"
+        )
+        if not git.remotes(store.root):
+            detail += "; this machine only: the store has no remote"
+        return "config home", detail, False
     if location.kind != "repo":
         return None
     tracking = manifest_tracking(location.tree, location.relpath)
     if tracking is None:
         return None
     rel = location.relpath
+    second = _second_home(manifest)
+    if second is not None:
+        return "config home", (
+            f"two homes: {rel} in the repository, and {second}; "
+            f"Manifest.locate uses {rel}"
+        ), True
     if tracking == "committed":
         return "config home", f"repo: {rel}, committed (shared through the repository)", False
     if tracking == "local":
@@ -2587,6 +3124,71 @@ def _config_home_row(manifest) -> tuple[str, str, bool] | None:
         f"echo {rel} >> .git/info/exclude"
     )
     return "config home", loose, True
+
+
+def _second_home(manifest) -> str | None:
+    """The other home of an in-repo project, said with how to retire it, or
+    ``None`` (ADR-020 D5): a store the repository's pointer or the user
+    level's link names for it. A half-landed ``store migrate`` is named as
+    the cause when it is one."""
+    from ..core.home import display_path, load_user_config
+    from ..core.identity import repo_identity
+    from ..core.storemigrate import marker_note
+    from ..core.stores import find_store, read_pointer
+
+    top = Path(manifest.root)
+    try:
+        user = load_user_config()
+        link = find_store(top, repo_identity(top), read_pointer(top), user)
+    except InvariantError as exc:
+        return f"a store named for this repository that does not resolve ({exc})"
+    if link is None:
+        return None
+    named = (
+        f"the repository's pointer, {link.root}" if link.via == "pointer"
+        else f"repos.{link.key} in {display_path(user.path)}"
+    )
+    note = marker_note(manifest.state_root)
+    if note is not None:
+        return f"the store {link.root}, named by {named}; {note}"
+    return (
+        f"the store {link.root}, named by {named}; retire the one not in use: "
+        f"remove that entry and this repository's block from the store, or "
+        f"git rm {MANIFEST_RELPATH} once the store holds the configuration"
+    )
+
+
+def _docs_folder_row(manifest) -> tuple[str, str, bool] | None:
+    """``docs folder`` (ADR-020 D5, D8): present only where a ``conf.py`` in
+    the repository, at or above the docs project's folder, would read it.
+    It passes when every such ``conf.py`` excludes the folder, and warns,
+    naming the ``exclude_patterns`` line to add, when one does not:
+    invariant never edits it, and a store project's docs stay in the store
+    until it is added (``store migrate --to repo`` refuses)."""
+    from ..adapters.sphinx import conf_excludes
+    from ..core.needs import docs_store_root, srcdir_of
+    from ..core.storemigrate import conf_readers, confs_above
+
+    srcdir = srcdir_of(manifest)
+    if srcdir is None:
+        return None
+    base = docs_store_root(manifest) or Path(manifest.root)
+    try:
+        folder = Path(srcdir).resolve().relative_to(Path(base).resolve()).as_posix()
+    except ValueError:
+        return None
+    if folder in ("", ".") or not confs_above(Path(manifest.root), folder):
+        return None
+    reasons: list[str] = []
+    conf_readers(Path(manifest.root), folder, conf_excludes, reasons)
+    if not reasons:
+        return "docs folder", f"{folder}/ is excluded by every conf.py above it", False
+    stays = (
+        " Until then the docs stay in the store ('store migrate --to repo' refuses)."
+        if manifest.store is not None
+        else " Until then the content's build reads invariant's docs project."
+    )
+    return "docs folder", " ".join(reasons) + stays, True
 
 
 def _report_checks(
@@ -3450,15 +4052,11 @@ def cmd_store_push(args) -> int:
 
 def cmd_store_migrate(args) -> int:
     """Move a project between its repository and a store (ADR-014 D12,
-    increment 7a; ADR-020 D3). Refused, exit 2, with nothing written."""
+    increments 7a and 7b; ADR-020 D3). Refused, exit 2, with nothing written."""
     from . import migrate
 
-    if args.to == "repo":
-        raise UsageError(
-            "store migrate --to repo is not built yet: it lands with ADR-014 "
-            "increment 7b. Nothing was written."
-        )
-    payload, text = migrate.to_store(args)
+    migrate.refuse_records(args)
+    payload, text = migrate.to_repo(args) if args.to == "repo" else migrate.to_store(args)
     return emit(args, payload, text)
 
 
@@ -4015,7 +4613,7 @@ def cmd_session_resume(args) -> int:
     refusal below names sessions in the `<name>  [<state>]` shape the ambiguity
     messages already use, which has no such sequence in it.
     """
-    ctx = Context()
+    ctx = Context(manifest_start=_move_back_start())
     session = _resume_target(ctx, args)
     # Pulled before the binding moves, so a diverged store resumes nothing
     # (ADR-014 D7). The refusal names no session in the binding's shape.
@@ -4228,19 +4826,30 @@ def _launch_successor(launch, plan, after: str = "") -> int:
     """Launch ``plan`` and return the pid of the live successor it started.
 
     Terminal accepting the script is not a launch: the window's shell can
-    still run nothing, as a tty-cut line did (BUG_075). Sessions of the same
-    name already running are read first and never counted. On any failure the
-    launch file is removed, so a window that opens late runs nothing rather
-    than contradicting the failure just reported, and the error carries the
-    command to run by hand. The caller signals nothing either way. ``after``
-    is the caller's own sentence about what the failure leaves, such as the
-    handoff's "the note is recorded".
+    still run nothing, as a tty-cut line did (BUG_075), or run ``claude``
+    somewhere else (BUG_129), so the successor counts only once the watch
+    proves it runs in ``plan.cwd``. Sessions of the same name already running
+    are read first and never counted. On any failure the launch file is
+    removed, so a window that opens late runs nothing rather than
+    contradicting the failure just reported, and the error carries the
+    command to run by hand. The caller signals nothing either way; a
+    successor found outside the main checkout is named by its pid and left
+    running (DEC_ADR_005_D8). ``after`` is the caller's own sentence about
+    what the failure leaves, such as the handoff's "the note is recorded".
     """
     watch = _handoff_successor()
     before = watch.running(plan.name)
     try:
         _handoff_launcher().launch(plan)
-        pid = watch.wait_for(plan.name, exclude=before)
+        pid = watch.wait_for(plan.name, exclude=before, cwd=plan.cwd)
+    except launch.SuccessorNotPlaced as misplaced:
+        plan.discard()
+        raise InvariantError(
+            f"the launch did not start a successor in the main checkout: "
+            f"{misplaced} {after + ' ' if after else ''}"
+            f"Once no claude named {plan.name} is left running, run it by hand:\n"
+            f"    {plan.by_hand}"
+        ) from misplaced
     except BaseException:
         plan.discard()
         raise
@@ -4907,8 +5516,37 @@ def cmd_session_review(args) -> int:
     )
 
 
+def _move_back_start() -> Path | None:
+    """Where ``session merge`` and ``session resume`` resolve the project from
+    while ``store migrate --to repo`` is under way (ADR-020 D3).
+
+    Mid-move the main checkout finds neither home: its store no longer lists
+    the repository and its ``.claude/invariant.yaml`` lands with the merge.
+    It refuses everything else, naming the session, but the two commands that
+    finish the move run there, the merge from the main checkout as ever, the
+    project read from the session's worktree, which the marker names. ``None``
+    when no such move is under way or the checkout resolves.
+    """
+    from ..core import git as gitq
+    from ..core import storemigrate
+
+    cwd = Path.cwd()
+    common = gitq.common_dir(cwd)
+    marker = storemigrate.read_marker(common / "invariant" / "state") if common else None
+    if not marker or marker.get("to") != "repo" or not marker.get("worktree"):
+        return None
+    worktree = Path(marker["worktree"])
+    if not worktree.is_dir():
+        return None
+    try:
+        Manifest.locate(cwd)
+    except ManifestError:
+        return worktree
+    return None
+
+
 def cmd_session_merge(args) -> int:
-    ctx = Context(session_id=args.id)
+    ctx = Context(session_id=args.id, manifest_start=_move_back_start())
     session = ctx.require_session()
     text, performed, after = _land_repo(ctx, session, args, force=args.force)
     lines = [text, *_after_merge_lines(ctx, after)]
@@ -5379,6 +6017,36 @@ def cmd_pipeline_coverage(args) -> int:
     return emit(args, result, "\n".join(lines))
 
 
+def cmd_pipeline_receipt(args) -> int:
+    """The gate receipt, read off the coverage record (ADR-026 D2).
+
+    Exit 0 on a match, 1 otherwise: the reviewer's fast path turns on it, so
+    a shell can branch on the status. Writes nothing.
+    """
+    ctx = Context(session_id=args.id)
+    session = ctx.require_session()
+    doc = ctx.pipelines.gate_receipt(session.id, session=session.to_dict(), cwd=ctx.cwd)
+    if doc["match"]:
+        lines = [
+            (
+                f"receipt: MATCH — the coverage run recorded at "
+                f"{str(doc.get('commit'))[:12]} measured this tree"
+            ),
+            f"  ran: {doc.get('command')} ({doc.get('scope')})",
+            f"  suite: {describe_run(doc)}",
+            f"  coverage.meets_floor: {doc['floor']['message'] or 'passed'}",
+            f"  coverage for {len(doc.get('coverage') or {})} file(s):",
+        ]
+        lines += [
+            f"    {path}  {pct:g}%" for path, pct in sorted((doc.get("coverage") or {}).items())
+        ]
+    else:
+        lines = ["receipt: NO MATCH — run the full gates"]
+        lines += [f"  - {reason}" for reason in doc["reasons"]]
+    emit(args, doc, "\n".join(lines))
+    return EXIT_OK if doc["match"] else 1
+
+
 def cmd_pipeline_status(args) -> int:
     ctx = Context(session_id=args.id)
     session = ctx.require_session()
@@ -5651,8 +6319,56 @@ def cmd_item_transition(args) -> int:
     return emit(args, item.to_dict(), text)
 
 
+def cmd_item_set(args) -> int:
+    """Change an item's fields, one history row per field (DEC_ADR_023)."""
+    ctx = Context()
+    changes = [
+        *(("set", *_item_pair("--field", p)) for p in args.field or []),
+        *(("add", *_item_pair("--add", p)) for p in args.add or []),
+        *(("remove", *_item_pair("--remove", p)) for p in args.remove or []),
+        *(("unset", key, None) for key in args.unset or []),
+    ]
+    items = ctx.items
+    try:
+        item, rows = items.set_fields(
+            args.id, changes, reason=args.reason, evidence=args.evidence, cwd=ctx.cwd
+        )
+    except GateFailure as exc:
+        report_verdicts(exc.verdicts, args)
+        raise
+    _item_warnings(items)
+    text = "\n".join(f"{item.id}  {_field_change(row)}" for row in rows) or (
+        f"{item.id}: nothing changed; every field already holds what was asked"
+    )
+    return emit(args, {**item.to_dict(), "changed": rows}, text)
+
+
+def _item_pair(flag: str, pair: str) -> tuple[str, str]:
+    key, sep, value = pair.partition("=")
+    if not sep or not key.strip():
+        raise UsageError(f"{flag} {pair!r} is not key=value; nothing was written")
+    return key.strip(), value
+
+
+def _field_change(row: dict) -> str:
+    """A field row's change: the field, what it held and what it holds now."""
+
+    def shown(value) -> str:
+        if value is None:
+            return "(unset)"
+        return ", ".join(map(str, value)) if isinstance(value, list) else str(value)
+
+    return f"{row.get('field')}: {shown(row.get('was'))} -> {shown(row.get('now'))}"
+
+
 def _history_line(row: dict) -> str:
-    """One history row as ``item show`` prints it."""
+    """One history row as ``item show`` prints it: a status move, or a field
+    change (DEC_ADR_023_D2), which names no ``from`` and ``to``."""
+    if "field" in row:
+        notes = [str(row[k]) for k in ("reason", "date") if row.get(k)]
+        if row.get("evidence"):
+            notes.append(f"evidence {str(row['evidence'])[:12]}")
+        return _field_change(row) + (f"  ({'; '.join(notes)})" if notes else "")
     line = f"{row.get('from')} -> {row.get('to')}"
     notes = []
     if row.get("reason"):
@@ -6002,6 +6718,24 @@ def host_instruction_files(manifest) -> tuple[str, ...]:
         return ()
     if manifest.get("host.kind") == "claude_code":
         return ClaudeCodeHost.INSTRUCTION_FILES
+    return ()
+
+
+def host_attribution_trailers(manifest) -> tuple:
+    """The commit trailers the host adapter for ``manifest``'s ``host.kind``
+    asks agents to append (DEC_ADR_024_D1).
+
+    ``privacy.clean`` lets each through in a commit message's trailer block.
+    Nothing below the CLI may import a host, so the CLI supplies them on the
+    rule context it builds, the one the commit hook and ``check`` evaluate.
+    A transition hands the rule no commit message, so the pipeline domain and
+    the oracle's gate cache need none. A host kind with no adapter declares
+    none, and then a message is read line by line alike.
+    """
+    from ..hosts.claude_code import ClaudeCodeHost
+
+    if manifest.get("host.kind") == "claude_code":
+        return ClaudeCodeHost.ATTRIBUTION_TRAILERS
     return ()
 
 
@@ -6416,12 +7150,162 @@ def cmd_rules_list(args) -> int:
     text = "\n".join(
         f"  {i:<{width}}  {lvl:<6} {ev:<14} {s}"
         + (f"  [{declared[i]}]" if i in declared else "")
+        + _ruling_note(ctx.manifest, i)
         for i, lvl, ev, s in rows
     )
+    # What the configuration loosens, and each one's ruling (ADR-021 D6), with
+    # the one-release warning for those that carry none (D8).
+    from ..core import rulings
+
+    recorded = rulings.recorded(ctx.manifest)
+    loosened = [
+        {"key": item.key, "value": item.value, "source": item.source,
+         "ruling": recorded.get(item.key)}
+        for item in rulings.loosenings(ctx.manifest)
+    ]
+    said = rulings.warning(ctx.manifest)
+    if said:
+        text += f"\n  {said}"
     return emit(args, {"rules": [
         {"id": i, "level": lvl, "events": ev, "summary": s,
          **({"provenance": declared[i]} if i in declared else {})}
-        for i, lvl, ev, s in rows]}, text)
+        for i, lvl, ev, s in rows], "loosenings": loosened}, text)
+
+
+def _rulings_row(manifest) -> tuple[str, bool] | None:
+    """``doctor``'s rulings row (ADR-021 D6, D8): ``None`` when the project
+    loosens nothing and records nothing, else the detail and whether it warns.
+
+    A loosening with no ruling loads for one release, and this row is where
+    that is said: a warning printed at every load would be read by nobody.
+    """
+    from ..core import rulings
+
+    said = rulings.warning(manifest)
+    if said is not None:
+        return said, True
+    recorded = rulings.recorded(manifest)
+    if not recorded:
+        return None
+    return (
+        f"{len(recorded)} ruling(s) recorded: "
+        + ", ".join(
+            f"{key} (by {entry.get('by')}, {entry.get('date')})"
+            for key, entry in recorded.items()
+        ),
+        False,
+    )
+
+
+def _ruling_note(manifest, rule_id: str) -> str:
+    """What ``rules list`` adds to a loosened rule's row (ADR-021 D6)."""
+    from ..core import rulings
+
+    entry = rulings.recorded(manifest).get(rule_id)
+    if entry is not None:
+        return f"  [ruling: by {entry.get('by')}, {entry.get('date')}]"
+    if any(loosening.key == rule_id for loosening in manifest.unruled):
+        return "  [loosened with no ruling: invariant rules carry-over]"
+    return ""
+
+
+def cmd_rules_loosen(args) -> int:
+    """Lower a built-in rule and record the user's ruling for it (ADR-021 D7).
+
+    Writes the level and the ruling, dated today, in the project's own level,
+    once confirmed at a terminal. Without one it writes nothing: a ruling the
+    agent could write would be the agent ruling for the user (ruling 3).
+    """
+    import datetime
+
+    from ..core import rulings
+
+    with rulings.collecting():
+        manifest = Manifest.locate(Path.cwd())
+    try:
+        plan = rulings.plan_loosen(
+            manifest, args.key, to=args.to, by=args.by, reason=args.reason,
+            today=datetime.datetime.now().astimezone().date(),
+        )
+    except rulings.RulingRefused as exc:
+        raise UsageError(str(exc)) from exc
+    what = f"loosen {args.key}" + (f" to {args.to}" if args.to else "")
+    return _write_ruling_plan(args, manifest, plan, what, [])
+
+
+def cmd_rules_carry_over(args) -> int:
+    """Record a ruling for each loosening the configuration already has
+    (ADR-021 D8), once confirmed at a terminal."""
+    import datetime
+
+    from ..core import rulings
+
+    with rulings.collecting():
+        manifest = Manifest.locate(Path.cwd())
+    plan, carried = rulings.plan_carry_over(
+        manifest, datetime.datetime.now().astimezone().date()
+    )
+    if plan is None:
+        return emit(
+            args,
+            {"written": False, "carried": []},
+            "  nothing to carry over: every loosening here carries a ruling",
+        )
+    lines = [f"  {loosening.key}: {reason}" for loosening, reason in carried] or [
+        (
+            "  nothing is loosened; enforcement.rulings is written empty, so a "
+            "loosening added later is refused without a ruling"
+        )
+    ]
+    return _write_ruling_plan(args, manifest, plan, "carry over", lines)
+
+
+def _write_ruling_plan(args, manifest, plan, what: str, lines: list[str]) -> int:
+    """Show ``plan``, ask at the terminal, and write it only on a yes."""
+    from ..core import rulings
+
+    target = plan.target
+    shown = [
+        f"rules {what}: in {target.path} ({target.label})",
+        *lines,
+        "  the entries written:",
+        *(f"    {line}" for line in plan.by_hand.splitlines()),
+    ]
+    payload = {
+        "file": str(target.path),
+        "level": target.label,
+        "entries": plan.by_hand,
+        "written": False,
+    }
+    if getattr(args, "json", False) or not _stdin_is_terminal():
+        shown.append(
+            "refused: a ruling is the user's to record (ADR-021 ruling 3), and this "
+            "command confirms it at a terminal. Nothing was written. Run it "
+            "yourself, in a terminal of your own."
+        )
+        emit(args, {**payload, "refused": "no terminal"}, "\n".join(shown))
+        return 1
+    print("\n".join(shown))
+    try:
+        answer = input("Record this ruling? [y/N] ")
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        print("declined: nothing was written")
+        return 1
+    if plan.after is None:
+        print(
+            f"not written: {plan.reason}. Add these entries to {target.path} by hand:\n"
+            + plan.by_hand
+        )
+        return 1
+    try:
+        rulings.write(plan, lambda: Manifest.locate(manifest.root))
+    except ManifestError as exc:
+        print(f"not written: the configuration would not load with it: {exc}")
+        return 1
+    print(f"written: {target.path}. Review and commit it.")
+    return EXIT_OK
 
 
 def cmd_check(args) -> int:
@@ -8024,6 +8908,19 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="install invariant's hooks and agents in this project (asked, default no)",
     )
+    p.add_argument(
+        "--home",
+        choices=("store", "repo"),
+        help="where the configuration lives: a store outside the repository "
+        "(the default) or committed in the repository (ADR-020 D4)",
+    )
+    p.add_argument(
+        "--store",
+        metavar="PATH",
+        help="the store the store home lives in: a store there is linked, an "
+        "empty or absent directory gets a new one (default: a new store under "
+        "the invariant home)",
+    )
     p.set_defaults(func=cmd_init)
 
     sub.add_parser(
@@ -8243,7 +9140,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--to", required=True, choices=("store", "repo"), help="the home to move to")
     q.add_argument("--store", help="--to store: the store, or where a new one goes")
     q.add_argument(
-        "--records", help="--to repo: the records to move within a store project (increment 7b)"
+        "--records",
+        help="single records to move within a store project (ADR-020 D3); in no "
+        "increment yet, so refused",
     )
     q.set_defaults(func=cmd_store_migrate)
 
@@ -8479,6 +9378,13 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--selector", action="append")
     q.set_defaults(func=cmd_pipeline_coverage)
 
+    q = pipeline.add_parser(
+        "receipt",
+        help="whether the coverage run on record still vouches for this tree",
+        parents=[session_arg],
+    )
+    q.set_defaults(func=cmd_pipeline_receipt)
+
     q = pipeline.add_parser("start", parents=[session_arg])
     q.add_argument("--methodology")
     q.add_argument("--task")
@@ -8538,8 +9444,34 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--reason")
     q.add_argument("--force", action="store_true")
     q.add_argument("--ruling", help="who ruled, and when; needs --evidence")
-    q.add_argument("--evidence", help="the commit the ruling rests on; needs --ruling")
+    q.add_argument(
+        "--evidence",
+        help="the commit the transition rests on, checked to resolve; "
+        "with --ruling, the commit the ruling rests on",
+    )
     q.set_defaults(func=cmd_item_transition)
+
+    q = item.add_parser(
+        "set",
+        help="change an existing item's fields, each change recorded in its history "
+        "(ADR-023)",
+    )
+    q.add_argument("id")
+    q.add_argument("--field", action="append", metavar="K=V", help="set K to V")
+    q.add_argument(
+        "--add", action="append", metavar="K=V",
+        help="add V to K's comma-separated list, creating K if absent",
+    )
+    q.add_argument(
+        "--remove", action="append", metavar="K=V",
+        help="remove V from K's list; K goes once empty",
+    )
+    q.add_argument("--unset", action="append", metavar="K", help="drop the field K")
+    q.add_argument("--reason", help="why; required, recorded on each row")
+    q.add_argument(
+        "--evidence", help="the commit the change rests on, checked to resolve"
+    )
+    q.set_defaults(func=cmd_item_set)
 
     q = item.add_parser("residue")
     q.add_argument("id")
@@ -8782,6 +9714,21 @@ def build_parser() -> argparse.ArgumentParser:
     # rules / checks
     q = sub.add_parser("rules").add_subparsers(dest="sub", required=True)
     q.add_parser("list").set_defaults(func=cmd_rules_list)
+    r = q.add_parser(
+        "loosen",
+        help="lower a built-in rule and record the user's ruling for it, "
+        "confirmed at a terminal (ADR-021 D7)",
+    )
+    r.add_argument("key", help="a rule id, 'profile', or 'machine.<name>'")
+    r.add_argument("--to", help="the level, or for 'profile' the profile; none for a machine")
+    r.add_argument("--by", required=True, help="who gives the ruling")
+    r.add_argument("--reason", required=True, help="why the rule is loosened")
+    r.set_defaults(func=cmd_rules_loosen)
+    q.add_parser(
+        "carry-over",
+        help="record a ruling for each loosening the configuration already has, "
+        "confirmed at a terminal (ADR-021 D8)",
+    ).set_defaults(func=cmd_rules_carry_over)
 
     q = sub.add_parser("check", parents=[session_arg])
     q.add_argument("rules", nargs="*")

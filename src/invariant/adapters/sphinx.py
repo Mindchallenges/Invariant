@@ -143,10 +143,14 @@ class ConfFacts:
     ``extensions`` is ``None`` when they cannot be told: the file is absent,
     does not parse, or builds the list at run time. ``narrowing`` names each
     setting that narrows what a strict build refuses, with its count.
+    ``needs_directives`` is each ``directive`` of a literal ``needs_types``, in
+    order: ``()`` where the file sets none, ``None`` where it cannot be told
+    (BUG_128: what adoption names, never what it derives a setting from).
     """
 
     extensions: tuple[str, ...] | None
     narrowing: tuple[str, ...]
+    needs_directives: tuple[str, ...] | None = ()
 
 
 def conf_facts(path: Path) -> ConfFacts:
@@ -154,9 +158,10 @@ def conf_facts(path: Path) -> ConfFacts:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
-        return ConfFacts(extensions=None, narrowing=())
+        return ConfFacts(extensions=None, narrowing=(), needs_directives=None)
     extensions: list[str] | None = []
     narrowing: dict[str, str] = {}
+    directives: tuple[str, ...] | None = ()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AugAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -165,6 +170,10 @@ def conf_facts(path: Path) -> ConfFacts:
                     continue
                 if target.id == "extensions":
                     extensions = _extend(extensions, node.value)
+                elif target.id == "needs_types":
+                    directives = (
+                        _directives(node.value) if isinstance(node, ast.Assign) else None
+                    )
                 else:
                     said = _narrows(target.id, node.value)
                     if said is not None:
@@ -184,7 +193,90 @@ def conf_facts(path: Path) -> ConfFacts:
     return ConfFacts(
         extensions=None if extensions is None else tuple(extensions),
         narrowing=tuple(narrowing[name] for name in order if name in narrowing),
+        needs_directives=directives,
     )
+
+
+def conf_excludes(path: Path, folder: str) -> bool | None:
+    """Does the ``conf.py`` at ``path`` keep ``folder`` out of its build?
+
+    ``folder`` is spelled from the ``conf.py``'s directory. ``exclude_patterns``
+    is read from its literals, as ``conf_facts`` reads ``extensions``: an
+    assignment and each ``+=``. A pattern excludes the folder when it matches
+    the folder itself, or a folder above it, with Sphinx's reading (``*`` and
+    ``?`` stop at a ``/``, ``**`` crosses it), a trailing ``/``, ``/*`` or
+    ``/**`` naming the folder whole. ``False`` when nothing excludes it, and
+    ``None`` when it cannot be told: no file, a file that does not parse, or
+    patterns built at run time (ADR-020 D8: a content ``conf.py`` at the
+    repository root reads every folder below it).
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+    patterns: list[str] | None = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == "exclude_patterns" for t in targets):
+                start = patterns if isinstance(node, ast.AugAssign) else []
+                patterns = _extend(start, node.value)
+    if patterns is None:
+        return None
+    parts = folder.strip("/").split("/")
+    owners = ["/".join(parts[:n]) for n in range(1, len(parts) + 1)]
+    for pattern in patterns:
+        text = pattern.strip()
+        for tail in ("/**", "/*", "/"):
+            if text.endswith(tail) and len(text) > len(tail):
+                text = text[: -len(tail)]
+                break
+        matcher = _glob(text)
+        if any(matcher.fullmatch(owner) for owner in owners):
+            return True
+    return False
+
+
+def _glob(pattern: str) -> re.Pattern[str]:
+    """A Sphinx ``exclude_patterns`` entry as a regular expression."""
+    out, index = [], 0
+    while index < len(pattern):
+        if pattern.startswith("**", index):
+            out.append(".*")
+            index += 2
+        elif pattern[index] == "*":
+            out.append("[^/]*")
+            index += 1
+        elif pattern[index] == "?":
+            out.append("[^/]")
+            index += 1
+        else:
+            out.append(re.escape(pattern[index]))
+            index += 1
+    return re.compile("".join(out))
+
+
+def _directives(value: ast.expr) -> tuple[str, ...] | None:
+    """Each ``directive`` of a literal list of mappings, or ``None``."""
+    if not isinstance(value, (ast.List, ast.Tuple)):
+        return None
+    found: list[str] = []
+    for entry in value.elts:
+        if not isinstance(entry, ast.Dict):
+            return None
+        named = [
+            item
+            for key, item in zip(entry.keys, entry.values, strict=True)
+            if isinstance(key, ast.Constant) and key.value == "directive"
+        ]
+        if (
+            len(named) != 1
+            or not isinstance(named[0], ast.Constant)
+            or not isinstance(named[0].value, str)
+        ):
+            return None
+        found.append(named[0].value)
+    return tuple(found)
 
 
 def _extend(known: list[str] | None, value: ast.expr) -> list[str] | None:

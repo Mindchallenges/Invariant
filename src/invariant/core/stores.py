@@ -484,6 +484,38 @@ def link_repo(top: Path, store: Path, env: Mapping[str, str] | None = None) -> L
     return Linked(identity=identity, store=root, key=identity.key, added=current is None)
 
 
+def unlink_repo(
+    keys: Sequence[str], store: Path, env: Mapping[str, str] | None = None
+) -> list[str]:
+    """Remove the user level's link of each of ``keys`` to ``store``: ``store
+    link``'s inverse (ADR-020 D3). Returns the keys removed.
+
+    Only an entry naming that store is removed, so a key linked elsewhere
+    keeps its link, and every other key of the user config is kept. A
+    ``repos`` left empty is dropped. Nothing to remove writes nothing.
+    """
+    root = Path(store).expanduser().resolve()
+    user = load_user_config(env)
+    removed: list[str] = []
+    for key in dict.fromkeys(k for k in keys if k):
+        entry = user.repos.get(key)
+        if entry is None:
+            continue
+        path = Path(entry["store"]).expanduser()
+        if (path if path.is_absolute() else user.path.parent / path).resolve() == root:
+            removed.append(key)
+    if not removed:
+        return []
+    raw = _user_raw(env)
+    repos = {k: v for k, v in dict(raw.get("repos") or {}).items() if k not in removed}
+    if repos:
+        raw["repos"] = repos
+    else:
+        raw.pop("repos", None)
+    _write_user(raw, env)
+    return removed
+
+
 def update_link(top: Path, env: Mapping[str, str] | None = None) -> Linked:
     """Re-key a link made by local ID onto the repo's origin (D4).
 
@@ -599,6 +631,85 @@ def init_store(
     }
     (target / STORE_MANIFEST).write_text(yaml.safe_dump(body, sort_keys=False), encoding="utf-8")
     return Created(store=target, note=note, linked=link_repo(top, target, env))
+
+
+@dataclass(frozen=True)
+class HomeStore:
+    """The store a store-home ``init`` creates or links (ADR-020 D1), planned
+    before anything is written, so a dry run can name it and a refusal
+    comes before the first write."""
+
+    #: Where the store is, or will be.
+    root: Path
+    #: The repository's identity. With no origin and no ``invariant.id`` yet,
+    #: a provisional local ID: the real run writes its own (D4).
+    identity: Identity
+    #: ``True`` when ``root`` already holds a store listing this repository,
+    #: which is linked rather than created.
+    link: bool
+    #: Why the default name was not taken, when it was not (ruling 14).
+    note: str | None = None
+
+    @property
+    def key(self) -> str:
+        return self.identity.key
+
+    def describe(self) -> str:
+        """The action line: the store created and linked, or linked."""
+        if self.link:
+            return f"link the store {self.root} as {self.key}"
+        return f"create the store {self.root} and link it as {self.key}"
+
+
+def plan_home_store(
+    top: Path, path: Path | str | None = None, env: Mapping[str, str] | None = None
+) -> HomeStore:
+    """The store ``init`` makes the project's home (ADR-020 D1), writing
+    nothing.
+
+    ``path`` given: a store there that lists this repository is linked, an
+    absent or empty directory gets a new one, and a store that does not list
+    it or any other non-empty directory is refused, as ``store link`` and
+    ``store init`` refuse them. No ``path``: the default parent, named by the
+    user level's ``store_naming`` (ruling 14), where a name already holding a
+    store that lists this repository is linked, a free one is created, and a
+    name taken by anything else falls back to the URL form, as ``store init``
+    does.
+    """
+    identity = repo_identity(top)
+    if identity is None:
+        local = new_local_id(Path(top).name)
+        identity = Identity(key=local, origin=None, local_id=local)
+    if path is not None:
+        target = Path(path).expanduser().resolve()
+        if (target / STORE_MANIFEST).is_file():
+            store_levels(StoreLink(target, target.name, identity, identity.key, "user"))
+            return HomeStore(root=target, identity=identity, link=True)
+        if target.exists() and (not target.is_dir() or any(target.iterdir())):
+            raise ManifestError(f"{target} already exists and is not empty, and holds no store")
+        return HomeStore(root=target, identity=identity, link=False)
+    user = load_user_config(env)
+    parent = invariant_home(env) / STORES_DIR
+    naming = user.store_naming
+    names = [repo_name(identity, top), url_name(identity)] if naming == "repo" else [url_name(identity)]
+    taken: list[Path] = []
+    for name in names:
+        candidate = parent / name
+        if lists(candidate, identity):
+            return HomeStore(root=candidate.resolve(), identity=identity, link=True)
+        if not candidate.exists():
+            note = (
+                f"{taken[0]} already exists for another repository, so this store "
+                f"is named {name} instead (ruling 14)"
+                if taken
+                else None
+            )
+            return HomeStore(root=candidate, identity=identity, link=False, note=note)
+        taken.append(candidate)
+    raise ManifestError(
+        "no store name is free: " + ", ".join(str(p) for p in taken) + " already "
+        "exist for other repositories. Name one: 'invariant init --store <path>'."
+    )
 
 
 def _merged(base: Mapping[str, Any], extra: Mapping[str, Any]) -> dict[str, Any]:

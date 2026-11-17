@@ -127,7 +127,7 @@ def project(tmp_path, monkeypatch):
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
     monkeypatch.chdir(root)
     monkeypatch.delenv("INVARIANT_HOST_SESSION_ID", raising=False)
-    assert main(["init", "--host-install", "--name", "demo"]) == 0
+    assert main(["init", "--home", "repo", "--host-install", "--name", "demo"]) == 0
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "manifest"], cwd=root, check=True)
     return root
@@ -429,23 +429,25 @@ class TestTheLaunchPlan:
         plan = self.plan()
         tokens = shlex.split(plan.shell_line)
         unset = [arg for name in launch.LAUNCH_UNSET for arg in ("-u", name)]
-        assert tokens[:5] == ["cd", "/work/a dir/it's here", "&&", "exec", "env"]
-        assert tokens[5 : 5 + len(unset)] == unset
-        assert tokens[5 + len(unset) :] == [launch.LAUNCH_SHELL, plan.launch_file]
+        assert tokens[:2] == ["exec", "env"]
+        assert tokens[2 : 2 + len(unset)] == unset
+        assert tokens[2 + len(unset) :] == [launch.LAUNCH_SHELL, plan.launch_file]
 
     def test_the_launch_file_round_trips_the_command_through_shlex(self):
         plan = self.plan()
         lines = Path(plan.launch_file).read_text(encoding="utf-8").splitlines()
         assert lines[0] == "#!/bin/sh"
         assert shlex.split(lines[1]) == ["rm", "-f", "--", plan.launch_file]
-        assert tuple(shlex.split(lines[2])) == plan.argv
+        assert shlex.split(lines[2])[:4] == ["cd", "--", "/work/a dir/it's here", "||"]
+        assert tuple(shlex.split(lines[3])) == plan.argv
         assert plan.script == "\n".join(lines) + "\n"
 
     def test_the_by_hand_line_carries_the_note_inline(self):
         plan = self.plan()
         tokens = shlex.split(plan.by_hand)
         assert tuple(tokens[-len(plan.argv) :]) == plan.argv
-        assert plan.shell_line.split(" exec env ", 1)[0] == plan.by_hand.split(" env ", 1)[0]
+        assert tokens[:3] == ["cd", plan.cwd, "&&"]
+        assert plan.shell_line.startswith("exec env ")
 
     def test_the_applescript_string_round_trips(self):
         plan = self.plan()
@@ -862,7 +864,7 @@ class TestTheCommand:
         root.mkdir()
         subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
         monkeypatch.chdir(root)
-        assert run("init", "--host-install", "--name", "bare") == 0
+        assert run("init", "--home", "repo", "--host-install", "--name", "bare") == 0
         capsys.readouterr()
         assert run("session", "handoff", "--note", "next: ship it") == 2
         assert "no session" in capsys.readouterr().err
@@ -2205,9 +2207,11 @@ class TestTheLaunchFile:
     def test_a_typed_line_too_long_for_the_tty_is_refused_writing_nothing(
         self, _launch_files_here
     ):
-        deep = Path("/w") / ("d" * 600)
-        with pytest.raises(InvariantError, match="1024") as caught:
-            launch.plan_launch("/opt/bin/claude", "x", "next: x", deep)
+        deep = _launch_files_here / ("d" * 600)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(launch, "launch_dir", lambda: deep)
+            with pytest.raises(InvariantError, match="1024") as caught:
+                launch.plan_launch("/opt/bin/claude", "x", "next: x", Path("/w"))
         assert "Run it by hand" in str(caught.value)
         assert not _launch_files_here.exists()
 
@@ -2309,28 +2313,38 @@ LIVE = "  500 /opt/bin/claude --name s --remote-control s next: x"
 OLD = "  400 /opt/bin/claude --name s --remote-control s next: y"
 
 
+#: Where a scripted watch's successors run: the main checkout it is asked about.
+MAIN = "/work/main"
+
+
+def _in_main(pid):
+    return MAIN
+
+
 class TestTheSuccessorWatch:
     def test_a_new_successor_alive_after_the_grace_is_found(self):
-        watch = _ScriptedWatch(["", "", LIVE, LIVE], timeout=10, grace=3, poll=1)
-        assert watch.wait_for("s", exclude=set()) == 500
+        watch = _ScriptedWatch(["", "", LIVE, LIVE], timeout=10, grace=3, poll=1,
+                               cwd_of=_in_main)
+        assert watch.wait_for("s", exclude=set(), cwd=MAIN) == 500
         assert watch.clock_obj.slept == [1, 1, 3]
 
     def test_one_that_dies_within_the_grace_is_not(self):
-        watch = _ScriptedWatch([LIVE, ""], timeout=10, grace=3, poll=1)
-        assert watch.wait_for("s", exclude=set()) is None
+        watch = _ScriptedWatch([LIVE, ""], timeout=10, grace=3, poll=1, cwd_of=_in_main)
+        assert watch.wait_for("s", exclude=set(), cwd=MAIN) is None
 
     def test_none_appearing_times_out(self):
-        watch = _ScriptedWatch([""], timeout=2, grace=3, poll=1)
-        assert watch.wait_for("s", exclude=set()) is None
+        watch = _ScriptedWatch([""], timeout=2, grace=3, poll=1, cwd_of=_in_main)
+        assert watch.wait_for("s", exclude=set(), cwd=MAIN) is None
         assert watch.clock_obj.now == 2
 
     def test_a_session_of_that_name_already_running_is_not_the_successor(self):
-        watch = _ScriptedWatch([OLD], timeout=2, grace=3, poll=1)
+        watch = _ScriptedWatch([OLD], timeout=2, grace=3, poll=1, cwd_of=_in_main)
         before = watch.running("s")
         assert before == {400}
-        assert watch.wait_for("s", exclude=before) is None
-        both = _ScriptedWatch([OLD + "\n" + LIVE], timeout=2, grace=0, poll=1)
-        assert both.wait_for("s", exclude={400}) == 500
+        assert watch.wait_for("s", exclude=before, cwd=MAIN) is None
+        both = _ScriptedWatch([OLD + "\n" + LIVE], timeout=2, grace=0, poll=1,
+                              cwd_of=_in_main)
+        assert both.wait_for("s", exclude={400}, cwd=MAIN) == 500
 
     def test_the_table_is_ps_over_every_process(self, monkeypatch):
         calls = []
@@ -2367,10 +2381,11 @@ class TestTheSuccessorWatch:
         watch = launch.ProcessTableWatch(timeout=10, grace=0.3, poll=0.1)
         before = watch.running(name)
         proc = subprocess.Popen(
-            [str(fake), "--name", name, "--remote-control", name, "next: x"]
+            [str(fake), "--name", name, "--remote-control", name, "next: x"],
+            cwd=tmp_path,
         )
         try:
-            assert watch.wait_for(name, exclude=before) == proc.pid
+            assert watch.wait_for(name, exclude=before, cwd=str(tmp_path)) == proc.pid
         finally:
             proc.kill()
             proc.wait()
@@ -2461,3 +2476,200 @@ def test_no_test_here_waits_on_the_real_process_table():
     from invariant.cli import main as cli
 
     assert not isinstance(cli._handoff_successor(), launch.ProcessTableWatch)
+
+
+# -- BUG_129: the successor starts in the main checkout, or not at all ----
+#
+# Repro for BUG_129 — see the backlog entry.
+#
+# The symptom: `session handoff` reports a successor and SIGTERMs the parent,
+# but the successor `claude` runs in the home directory, because a shell
+# start-up prompt ate the leading `c` of the typed `cd <main> && ...` line.
+# No window is opened: the launch file and the mangled line are run by a real
+# `/bin/sh` / `zsh -f` against a stub `claude` that records its directory.
+
+
+def _bug_129_world(tmp_path):
+    """A main checkout, a "home" to start elsewhere from, and a stub claude
+    that writes the directory it was started in to ``where``."""
+    main_checkout = tmp_path / "main-checkout"
+    home = tmp_path / "home"
+    main_checkout.mkdir()
+    home.mkdir()
+    where = tmp_path / "claude-started-in.txt"
+    stub = tmp_path / "stub-bin" / "claude"
+    stub.parent.mkdir()
+    stub.write_text(
+        f"#!/bin/sh\npwd -P > {shlex.quote(str(where))}\nexit 0\n", encoding="utf-8"
+    )
+    stub.chmod(0o755)
+    return main_checkout, home, where, stub
+
+
+class TestBUG129SuccessorStartsInTheMainCheckout:
+    def test_BUG_129_the_launch_file_alone_starts_claude_in_the_main_checkout(
+        self, tmp_path
+    ):
+        main_checkout, home, where, stub = _bug_129_world(tmp_path)
+        plan = launch.plan_launch(str(stub), "bug-129", "next: x", main_checkout)
+        subprocess.run(
+            [launch.LAUNCH_SHELL, plan.launch_file],
+            cwd=home, stdin=subprocess.DEVNULL, check=True, timeout=30,
+        )
+        assert where.read_text(encoding="utf-8").strip() == os.path.realpath(
+            main_checkout
+        )
+
+    @pytest.mark.skipif(shutil.which("zsh") is None, reason="needs zsh")
+    def test_BUG_129_a_typed_line_missing_its_first_character_never_starts_claude_elsewhere(
+        self, tmp_path
+    ):
+        main_checkout, home, where, stub = _bug_129_world(tmp_path)
+        plan = launch.plan_launch(str(stub), "bug-129", "next: x", main_checkout)
+        # oh-my-zsh's update prompt (`read -r -k 1`) eats one character; its
+        # `d` is `dirs "$@"`, which exits 0 without changing directory.
+        eaten = plan.shell_line[1:]
+        subprocess.run(
+            [shutil.which("zsh"), "-f", "-c", 'd () { dirs "$@" }\n' + eaten],
+            cwd=home, stdin=subprocess.DEVNULL, check=False, timeout=30,
+        )
+        started_in = where.read_text(encoding="utf-8").strip() if where.exists() else None
+        assert started_in in (None, os.path.realpath(main_checkout)), (
+            f"claude started in {started_in}, not the main checkout"
+        )
+
+    def test_BUG_129_a_successor_outside_the_main_checkout_fails_the_handoff_and_closes_nothing(
+        self, project, capsys, closer, macos_with_claude, monkeypatch, tmp_path
+    ):
+        started(project, capsys)
+        elsewhere = tmp_path / "home"
+        elsewhere.mkdir()
+        listing = "  500 /opt/bin/claude --name ship-it --remote-control ship-it next: ship it"
+        watch = _ScriptedWatch(["", listing], timeout=5, grace=1, poll=1)
+        monkeypatch.setattr("invariant.cli.main._handoff_successor", lambda: watch)
+        monkeypatch.setattr(launch, "process_cwd", lambda pid: str(elsewhere))
+
+        code = run("session", "handoff", "--note", "next: ship it")
+
+        assert closer.closed == [], "the parent was scheduled for SIGTERM"
+        assert code != 0, "a successor outside the main checkout counted as success"
+
+
+# -- BUG_129 fix: the launch enters the checkout, and the watch checks it ----
+
+
+SHIP_IT = "  500 /opt/bin/claude --name ship-it --remote-control ship-it next: ship it"
+
+
+class TestTheTypedLineFailsClosed:
+    @pytest.mark.parametrize("eaten", [1, 2, 3])
+    def test_a_line_that_lost_part_of_exec_runs_nothing(self, tmp_path, eaten):
+        """Whatever a start-up prompt eats of ``exec``, no command is left to run."""
+        main_checkout, home, where, stub = _bug_129_world(tmp_path)
+        plan = launch.plan_launch(str(stub), "bug-129", "next: x", main_checkout)
+        proc = subprocess.run(
+            ["/bin/sh", "-c", plan.shell_line[eaten:]],
+            cwd=home, stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            check=False,
+        )
+        assert proc.returncode != 0
+        assert not where.exists()
+
+    @pytest.mark.parametrize("eaten", [4, 5, 9])
+    def test_a_line_that_lost_more_starts_nothing_outside_the_checkout(
+        self, tmp_path, eaten
+    ):
+        """Past ``exec``, what is left either fails or runs the launch file,
+        which enters the checkout itself."""
+        main_checkout, home, where, stub = _bug_129_world(tmp_path)
+        plan = launch.plan_launch(str(stub), "bug-129", "next: x", main_checkout)
+        subprocess.run(
+            ["/bin/sh", "-c", plan.shell_line[eaten:]],
+            cwd=home, stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            check=False,
+        )
+        started_in = where.read_text(encoding="utf-8").strip() if where.exists() else None
+        assert started_in in (None, os.path.realpath(main_checkout))
+
+    def test_the_launch_file_alone_cleans_and_places_claude(self, tmp_path):
+        """Run whole from anywhere, the file starts claude in the checkout."""
+        main_checkout, home, where, stub = _bug_129_world(tmp_path)
+        plan = launch.plan_launch(str(stub), "bug-129", "next: x", main_checkout)
+        subprocess.run(["/bin/sh", "-c", plan.shell_line], cwd=home,
+                       stdin=subprocess.DEVNULL, check=True, timeout=30)
+        assert where.read_text(encoding="utf-8").strip() == os.path.realpath(main_checkout)
+
+
+class TestSameDirectory:
+    def test_a_link_to_the_checkout_is_the_checkout(self, tmp_path):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        assert launch.same_directory(str(link), real)
+
+    def test_another_directory_is_not(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        assert not launch.same_directory(str(tmp_path / "a"), tmp_path / "b")
+
+    def test_a_missing_directory_never_matches_an_existing_one(self, tmp_path):
+        assert not launch.same_directory(str(tmp_path / "gone"), tmp_path)
+
+    def test_two_unreadable_spellings_compare_resolved(self, tmp_path):
+        gone = tmp_path / "gone"
+        assert launch.same_directory(str(gone) + "/", gone)
+
+
+class TestTheWatchChecksTheDirectory:
+    def test_the_successor_in_the_checkout_wins_over_one_elsewhere(self):
+        other = "  499 /opt/bin/claude --name s --remote-control s next: z"
+        both = LIVE + "\n" + other
+        places = {499: "/home/u", 500: MAIN}
+        watch = _ScriptedWatch([both], timeout=2, grace=0, poll=1, cwd_of=places.get)
+        assert watch.wait_for("s", exclude=set(), cwd=MAIN) == 500
+
+    def test_one_elsewhere_is_refused_with_its_pid_and_place(self):
+        watch = _ScriptedWatch([LIVE], timeout=2, grace=0, poll=1,
+                               cwd_of=lambda pid: "/home/u")
+        with pytest.raises(launch.SuccessorNotPlaced) as caught:
+            watch.wait_for("s", exclude=set(), cwd=MAIN)
+        assert (caught.value.pid, caught.value.where, caught.value.cwd) == (
+            500, "/home/u", MAIN)
+        assert "pid 500" in str(caught.value) and "in /home/u" in str(caught.value)
+        assert "left running" in str(caught.value)
+
+    def test_a_directory_that_cannot_be_read_is_not_proof(self):
+        watch = _ScriptedWatch([LIVE], timeout=2, grace=0, poll=1, cwd_of=lambda pid: None)
+        with pytest.raises(launch.SuccessorNotPlaced) as caught:
+            watch.wait_for("s", exclude=set(), cwd=MAIN)
+        assert caught.value.where is None
+        assert "could not be read" in str(caught.value)
+
+
+class TestTheHandoffNeedsTheSuccessorInTheCheckout:
+    def test_the_watch_is_asked_about_the_main_checkout(
+        self, project, capsys, successor, macos_with_claude
+    ):
+        started(project, capsys)
+        assert run("session", "handoff", "--note", "next: ship it") == 0
+        (place,) = successor.places
+        assert os.path.samefile(place, project)
+
+    def test_an_unreadable_directory_fails_the_handoff_and_says_so(
+        self, project, capsys, launcher, closer, macos_with_claude, monkeypatch
+    ):
+        started(project, capsys)
+        watch = _ScriptedWatch(["", SHIP_IT], timeout=5, grace=1, poll=1)
+        monkeypatch.setattr("invariant.cli.main._handoff_successor", lambda: watch)
+        monkeypatch.setattr(launch, "process_cwd", lambda pid: None)
+
+        assert run("session", "handoff", "--note", "next: ship it") == 1
+
+        err = capsys.readouterr().err
+        (plan,) = launcher.plans
+        assert "pid 500" in err and "could not be read" in err
+        assert "stays open" in err
+        assert plan.by_hand in err
+        assert closer.closed == []
+        assert not Path(plan.launch_file).exists()

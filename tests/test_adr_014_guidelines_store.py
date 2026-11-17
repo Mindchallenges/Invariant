@@ -31,7 +31,7 @@ from test_adr_014_docs_lock_host import hosts  # noqa: F401 - the fixture, by na
 from test_adr_014_per_leg_gates import ctx_for, gate, passed
 from test_docs_onboarding import (  # noqa: F401 - fixtures are used by name
     SRC,
-    init,
+    init_store,
     interactive,
     toy,
     unrelated,
@@ -353,8 +353,8 @@ class TestTheStoreStarter:
     def test_the_starter_writes_its_ruleset_into_the_store(
         self, unrelated, capsys, interactive
     ):
-        interactive("store", "", "", "not_now")
-        code, text = init(capsys)
+        interactive("not_now")
+        code, text = init_store(capsys)
         assert code == 0, text
         m = Manifest.locate(unrelated)
         assert m.get("records.guidelines") == "store"

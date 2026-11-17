@@ -424,17 +424,36 @@ def test_this_repository_is_enforced_on_sphinx(monkeypatch):
 
 
 class FakeUv:
-    def __init__(self, fail_at: str | None = None) -> None:
+    """``uv`` and the environment's ``sphinx-build``, recorded.
+
+    ``fail_at`` names the argument whose command fails; ``said`` is what it
+    prints. ``sphinx`` false leaves ``sphinx-build`` out of the environment.
+    """
+
+    def __init__(self, fail_at: str | None = None, said: str = "uv: no network",
+                 sphinx: bool = True) -> None:
         self.calls: list[list[str]] = []
         self.fail_at = fail_at
+        self.said = said
+        self.sphinx = sphinx
 
     def __call__(self, argv, cwd):
         self.calls.append(list(argv))
         if self.fail_at and self.fail_at in argv:
-            return subprocess.CompletedProcess(argv, 2, "", "uv: no network")
+            return subprocess.CompletedProcess(argv, 2, self.said, "")
         if argv[1] == "venv":
             write(Path(argv[-1]), "bin/python", "")
+            if self.sphinx:
+                write(Path(argv[-1]), "bin/sphinx-build", "")
         return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def steps(self) -> list[list[str]]:
+        """Each call by what it runs: ``uv``'s subcommand, or the program."""
+        return [c[1:3] if c[0] == "uv" else [Path(c[0]).name, *c[1:]] for c in self.calls]
+
+
+#: What ``docs venv`` runs after the environment is filled.
+CHECKED = [["pip", "check"], ["sphinx-build", "--version"]]
 
 
 class TestVenv:
@@ -453,11 +472,11 @@ class TestVenv:
         srcdir = self.project(tmp_path)
         uv = FakeUv()
         state = docs_domain.sync_venv(srcdir, run=uv, uv="uv")
-        assert [c[1:3] for c in uv.calls] == [["venv", str(srcdir / ".venv")], ["pip", "sync"]]
+        assert uv.steps() == [["venv", str(srcdir / ".venv")], ["pip", "sync"], *CHECKED]
         assert uv.calls[1][-1] == str(srcdir / "requirements.txt")
         assert state.present and state.in_sync
         again = docs_domain.sync_venv(srcdir, run=uv, uv="uv")
-        assert again.in_sync and [c[1] for c in uv.calls[2:]] == ["pip"]
+        assert again.in_sync and uv.steps()[4:] == [["pip", "sync"], *CHECKED]
 
     def test_a_changed_requirements_file_is_out_of_sync(self, tmp_path):
         srcdir = self.project(tmp_path)
@@ -471,6 +490,88 @@ class TestVenv:
         srcdir = self.project(tmp_path)
         with pytest.raises(UsageError, match="no network"):
             docs_domain.sync_venv(srcdir, run=FakeUv(fail_at="sync"), uv="uv")
+        assert not docs_domain.venv_state(srcdir).in_sync
+
+    def test_a_ranges_file_is_resolved_into_the_environment_then_synced(self, tmp_path):
+        srcdir = self.project(tmp_path)
+        write(srcdir, "requirements.txt", "sphinx>=9.1\nsphinx-needs>=9.2\n")
+        uv = FakeUv()
+        state = docs_domain.sync_venv(srcdir, run=uv, uv="uv")
+        lock = str(srcdir / ".venv" / docs_domain.VENV_LOCK)
+        assert uv.steps() == [
+            ["venv", str(srcdir / ".venv")], ["pip", "compile"], ["pip", "sync"], *CHECKED
+        ]
+        assert uv.calls[1][-3:] == [str(srcdir / "requirements.txt"), "-o", lock]
+        assert uv.calls[2][-1] == lock
+        assert state.in_sync
+
+    def test_a_pinned_file_missing_dependencies_is_refused_naming_them(self, tmp_path):
+        srcdir = self.project(tmp_path)
+        said = "Using Python 3.12 environment at: .venv\nChecked 2 packages\nFound 7 incompatibilities\n" + "".join(
+            f"The package `sphinx` requires `dep{n}`, but it's not installed\n" for n in range(7)
+        )
+        with pytest.raises(UsageError) as refused:
+            docs_domain.sync_venv(srcdir, run=FakeUv(fail_at="check", said=said), uv="uv")
+        text = str(refused.value)
+        assert "requirements.txt" in text and "dep0" in text and "dep4" in text
+        assert "dep5" not in text and "(and 2 more)" in text
+        assert "Using Python" not in text and "Found 7" not in text
+        assert "pin what they depend on" in text and "invariant docs venv" in text
+        assert not docs_domain.venv_state(srcdir).in_sync
+
+    def test_a_resolved_file_that_does_not_check_is_refused(self, tmp_path):
+        srcdir = self.project(tmp_path)
+        write(srcdir, "requirements.txt", "sphinx\n")
+        said = "The package `sphinx` requires `docutils`, but it's not installed\n"
+        with pytest.raises(UsageError, match="does not install cleanly") as refused:
+            docs_domain.sync_venv(srcdir, run=FakeUv(fail_at="check", said=said), uv="uv")
+        assert "docutils" in str(refused.value) and "more" not in str(refused.value)
+        assert not docs_domain.venv_state(srcdir).in_sync
+
+    def test_a_file_that_installs_no_sphinx_is_refused(self, tmp_path):
+        srcdir = self.project(tmp_path)
+        with pytest.raises(UsageError, match="has no sphinx-build"):
+            docs_domain.sync_venv(srcdir, run=FakeUv(sphinx=False), uv="uv")
+        assert not docs_domain.venv_state(srcdir).in_sync
+
+    def test_a_sphinx_build_that_does_not_run_is_refused(self, tmp_path):
+        srcdir = self.project(tmp_path)
+        uv = FakeUv(fail_at="--version", said="No module named 'docutils'")
+        with pytest.raises(UsageError, match="cannot run sphinx-build") as refused:
+            docs_domain.sync_venv(srcdir, run=uv, uv="uv")
+        assert "docutils" in str(refused.value)
+        assert not docs_domain.venv_state(srcdir).in_sync
+
+    def test_a_failed_resolution_is_refused(self, tmp_path):
+        srcdir = self.project(tmp_path)
+        write(srcdir, "requirements.txt", "sphinx>=99\n")
+        with pytest.raises(UsageError, match="pip compile failed"):
+            docs_domain.sync_venv(srcdir, run=FakeUv(fail_at="compile"), uv="uv")
+        assert not docs_domain.venv_state(srcdir).in_sync
+
+    def test_a_failed_resync_of_an_environment_in_sync_leaves_it_out_of_sync(self, tmp_path):
+        srcdir = self.project(tmp_path)
+        assert docs_domain.sync_venv(srcdir, run=FakeUv(), uv="uv").in_sync
+        with pytest.raises(UsageError):
+            docs_domain.sync_venv(srcdir, run=FakeUv(fail_at="sync"), uv="uv")
+        assert not docs_domain.venv_state(srcdir).in_sync
+
+    @pytest.mark.parametrize("step", ["venv", "compile", "sync", "check", "--version"])
+    def test_a_step_that_raises_leaves_an_environment_in_sync_out_of_sync(self, tmp_path, step):
+        srcdir = self.project(tmp_path)
+        write(srcdir, "requirements.txt", "sphinx>=9.1\n")
+        assert docs_domain.sync_venv(srcdir, run=FakeUv(), uv="uv").in_sync
+        if step == "venv":
+            (srcdir / ".venv" / "bin" / "python").unlink()
+        fake = FakeUv()
+
+        def run(argv, cwd):
+            if step in argv:
+                raise subprocess.TimeoutExpired(argv, 1)
+            return fake(argv, cwd)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            docs_domain.sync_venv(srcdir, run=run, uv="uv")
         assert not docs_domain.venv_state(srcdir).in_sync
 
     def test_no_requirements_file_is_refused(self, tmp_path):
@@ -593,7 +694,7 @@ class TestCommands:
         monkeypatch.setattr(docs_domain, "_uv", lambda: "uv")
         monkeypatch.chdir(toy)
         assert main(["docs", "venv"]) == 0
-        assert [c[1] for c in uv.calls] == ["venv", "pip"]
+        assert [step[0] for step in uv.steps()] == ["venv", "pip", "pip", "sphinx-build"]
         assert "in sync" in capsys.readouterr().out
 
 
@@ -749,6 +850,39 @@ def test_a_venv_with_no_sphinx_build_is_refused_naming_docs_venv(toy):
     write(wt, "docs/.venv/bin/python", "")
     with pytest.raises(UsageError, match="no .*sphinx-build; run 'invariant docs venv'"):
         build(wt)
+
+
+@pytest.mark.parametrize(
+    ("text", "pinned"),
+    [
+        (REQUIREMENTS, True),
+        ("# pins\nsphinx==9.1.1  # the build\n\nfuro===2025.12.19\n", True),
+        ("sphinx[test]==9.1.1 ; python_version >= '3.12'\n", True),
+        ("--index-url https://pypi.org/simple\nsphinx==9.1.1 \\\n    --hash=sha256:ab12\n", True),
+        ("sphinx>=9.1\n", False),
+        ("sphinx\n", False),
+        ("sphinx==9.*\n", False),
+        ("sphinx==9.1,<10\n", False),
+        ("sphinx @ https://example.org/sphinx.whl\n", False),
+        ("sphinx==9.1.1\n-r more.txt\n", False),
+        ("-e ./local\n", False),
+        ("--requirement=more.txt\n", False),
+        ("-rmore.txt\nsphinx==9.1.1\n", False),
+        ("-cconstraints.txt\nsphinx==9.1.1\n", False),
+        ("-e.\nsphinx==9.1.1\n", False),
+        ("--editable=./local\nsphinx==9.1.1\n", False),
+        ("sphinx==9.1.1\n--constraint constraints.txt\n", False),
+        ("-i https://pypi.org/simple\n--extra-index-url https://x.org/simple\nsphinx==9.1.1\n", True),
+        ("sphinx [test]==9.1.1\n", True),
+        ("sphinx==9.1.1\r\nfuro==2025.12.19\r\n", True),
+        ("sphinx==9.1.1 --hash=sha256:ab12 --hash=sha256:cd34\n", True),
+        ("sphinx~=9.1\n", False),
+        ("sphinx!=9.0\n", False),
+        ("# nothing\n\n", False),
+    ],
+)
+def test_fully_pinned_reads_every_package_pinned_with_double_equals(text, pinned):
+    assert docs_domain.fully_pinned(text) is pinned
 
 
 def test_no_requirements_names_what_to_write():

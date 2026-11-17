@@ -32,10 +32,11 @@ import yaml
 
 from ..adapters import Adapter, get_adapter
 from ..adapters.base import Reference
-from . import doclock, git, storescan
+from . import doclock, git, shell, storescan
 from . import findings as findings_reader
 from . import guidelines as guidelines_reader
 from . import plan as plan_reader
+from . import rulings as rulings_reader
 from . import steps as steps_reader
 from . import sweep as sweep_reader
 from . import verdicts as verdicts_reader
@@ -50,7 +51,7 @@ from .manifest import (
     glob_matches,
     project_relative,
 )
-from .privacy import EXEMPTION_MARKER, PrivacyScanner
+from .privacy import EXEMPTION_MARKER, AttributionTrailer, PrivacyScanner
 from .store import JsonStore
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -355,6 +356,13 @@ class RuleContext:
     #: the CLI supplies it as it supplies ``host_instruction_files``. ``None``
     #: means ``host.kind`` names no adapter, and then the rule is N/A.
     host_agent_plan: Callable[[], Sequence[AgentCopy]] | None = None
+    #: The commit trailers the host adapter asks agents to append, which
+    #: ``privacy.clean`` lets through in a commit message's trailer block and
+    #: nowhere else (DEC_ADR_024_D1). Which trailer a host writes is the host's
+    #: answer, and nothing below the CLI imports a host, so the CLI supplies it
+    #: as it supplies ``host_instruction_files``. Empty means the host declares
+    #: none, and then every line of a message is read alike.
+    host_attribution_trailers: tuple[AttributionTrailer, ...] = ()
 
     def __post_init__(self) -> None:
         # Here rather than at each caller, so no rule can see the audit record
@@ -2596,28 +2604,26 @@ def _docs_needs_traceable(ctx: RuleContext) -> Verdict:
     except needs.NeedsJsonError as exc:
         return Verdict.fail(str(exc), fixes=("invariant docs build --force",))
     manifest = ctx.manifest
-    problems = needs.check(
-        read,
-        needs.types_of(manifest),
-        needs.parse_link_rules(manifest.get("docs.needs.require_links") or ()),
-        manifest.get("docs.needs.decision_statuses") or (),
-        prefix=f"{build.srcdir}/",
-    )
+    types = needs.types_of(manifest)
+    rules = needs.parse_link_rules(manifest.get("docs.needs.require_links") or ())
+    statuses = manifest.get("docs.needs.decision_statuses") or ()
+    problems = needs.check(read, types, rules, statuses, prefix=f"{build.srcdir}/")
     if not problems:
         return Verdict.clean(
             f"{len(read.needs)} need(s), each declared and linked as docs.needs requires"
         )
-    shown = [p.render() for p in problems[:_DOCS_NAMED]]
+    # Each kind is named with the setting that settles it, and the ones shown
+    # are taken in turn from each kind, so the largest never hides the rest
+    # (BUG_128, DEC_ADR_018_B128).
+    shown = [p.render() for p in needs.sample(problems, _DOCS_NAMED)]
     more = len(problems) - len(shown)
+    counts = ", ".join(f"{n} by {setting}" for setting, n in needs.by_setting(problems).items())
     return Verdict.fail(
-        f"{len(problems)} need problem(s): "
-        + ", ".join(sorted({p.need for p in problems})[:_DOCS_NAMED]),
+        f"{len(problems)} need problem(s), settled {counts}",
         detail="; ".join(shown) + (f"; and {more} more" if more > 0 else ""),
         fixes=(
-            (
-                "link each named need, or map its directive in docs.needs.types, "
-                "then: invariant docs build"
-            ),
+            *needs.advise(problems, read, types, rules, statuses),
+            "after any change: invariant docs build",
         ),
     )
 
@@ -2884,6 +2890,85 @@ def _items_decisions_linked(ctx: RuleContext) -> Verdict:
         return Verdict.na("the changed items name no decision, requirement, ui or rule id")
     held, why = _held(ctx, tree, green_for_tree=False)
     return _unheld_verdict(ids, held, why, what="the items this change touched")
+
+
+@rule(
+    "config.rulings_by_user",
+    summary="A ruling that loosens a built-in rule is recorded by the user, never written by an agent.",
+    events=("pre-tool-use",),
+)
+def _rulings_by_user(ctx: RuleContext) -> Verdict:
+    """ADR-021 D7, ruling 3: an agent's edit adding or changing a ruling is
+    refused, naming the command the user records one with.
+
+    Any file a config level is read from (``core/rulings.is_config_file``):
+    an in-repo manifest in any checkout, the project's store
+    ``invariant.yaml`` and the user level. The edit is applied to the file as
+    it stands and both read as YAML; a ruling the result adds or changes is
+    the agent ruling for the user. One removed is not, since that tightens.
+    """
+    if not ctx.is_edit:
+        return Verdict.na(_NOT_AN_EDIT)
+    target = ctx.target_path
+    if target is None:
+        return Verdict.na("no file path in this call")
+    if not rulings_reader.is_config_file(ctx.manifest, target):
+        return Verdict.na("not a file a config level is read from")
+    try:
+        before = Path(target).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        before = ""
+    except (OSError, UnicodeDecodeError) as exc:
+        return Verdict.fail(f"{target} cannot be read to judge the edit: {exc}")
+    after = _edited(ctx, before)
+    if after is None:
+        return Verdict.na("the edit does not apply to the file as it stands")
+    changed = rulings_reader.changed_rulings(before, after)
+    if changed is None:
+        if "rulings" not in "\n".join(_edit_texts(ctx)):
+            return Verdict.clean("the edit writes no ruling")
+        changed = ["(the edit does not read as YAML, and names rulings)"]
+    if not changed:
+        return Verdict.clean("the edit adds or changes no ruling")
+    return Verdict.fail(
+        f"this edit writes the ruling(s) {', '.join(changed)} in {Path(target).name}, "
+        f"and only the user records a ruling (ADR-021 ruling 3, D7)",
+        detail="A ruling lowers a rule for every session after it, so the agent "
+        "cannot give it. The user records one with a command that asks for "
+        "confirmation at a terminal of their own.",
+        fixes=(
+            (
+                "ask the user to run: invariant rules loosen <rule-id> --to <level> "
+                "--by <who> --reason <why>"
+            ),
+            "for lowerings the configuration already had: invariant rules carry-over",
+        ),
+    )
+
+
+def _edited(ctx: RuleContext, before: str) -> str | None:
+    """The file an edit tool call would leave, or ``None`` when it does not apply."""
+    tool_input = ctx.tool_input
+    if ctx.tool_name == "Write":
+        return str(tool_input.get("content") or "")
+    edits = (
+        [e for e in tool_input.get("edits") or () if isinstance(e, Mapping)]
+        if ctx.tool_name == "MultiEdit"
+        else [tool_input]
+    )
+    text = before
+    for edit in edits:
+        old = str(edit.get("old_string") or "")
+        new = str(edit.get("new_string") or "")
+        if not old:
+            if text:
+                return None
+            text = new
+            continue
+        if old not in text:
+            return None
+        text = text.replace(old, new) if edit.get("replace_all") else text.replace(old, new, 1)
+    return text
 
 
 def _cited(text: str, prefixes: Sequence[str]) -> list[str]:
@@ -7031,28 +7116,33 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
     # A store commit's message is read with the store's block whatever the
     # repository's scope says, and not at all while its relaxation holds.
     if ("commit_messages" in scope) if store_tree is None else store_screen is not None:
-        message = ctx.extra.get("commit_message")
-        problem = None
-        fixes: tuple[str, ...] = (_INLINE_MESSAGE_FIX,)
-        if not message and ctx.tool_name == "Bash":
-            message, problem, fixes = _extract_commit_message(
-                command, cwd=commit_cwd, shell_cwd=ctx.cwd
-            )
-        if problem:
+        carried = _CommitMessage(text=ctx.extra.get("commit_message") or "")
+        if not carried.text and ctx.tool_name == "Bash":
+            carried = _extract_commit_message(command, cwd=commit_cwd, shell_cwd=ctx.cwd)
+        if carried.problem:
             # Fail closed, per the do-not-relax convention every other
             # unanswerable question here follows (AUD-07/08): a message this
             # gate is configured to scan and cannot read is not a clean one.
             return Verdict.fail(
                 "the commit message could not be scanned",
-                detail=problem,
-                fixes=fixes,
+                detail=carried.problem,
+                fixes=carried.fixes,
             )
-        if message and store_screen is not None:
+        if carried.text or carried.others or carried.trailers:
             scanned.append("commit message")
-            findings.extend(store_screen.scan_message(message))
-        elif message:
-            scanned.append("commit message")
-            findings.extend(scanner.scan_text(message))
+        for text in (carried.text, *carried.others):
+            if text and store_screen is not None:
+                findings.extend(store_screen.scan_message(text))
+            elif text:
+                findings.extend(scanner.scan_message(text, ctx.host_attribution_trailers))
+        for trailer in carried.trailers:
+            # A --trailer value is a line git adds to the trailer block. It is
+            # read as any line is, and never admitted as the host's trailer.
+            findings.extend(
+                store_screen.scan_message(trailer)
+                if store_screen is not None
+                else scanner.scan_message(trailer)
+            )
 
     if store_tree is not None:
         if store_screen is not None:
@@ -7263,6 +7353,9 @@ def _history_matches_status(ctx: RuleContext) -> Verdict:
     A ``forced`` entry is not drift. An override went through the machine, was
     refused, and recorded a written reason; flagging it would report the audit
     trail working as if it were the failure.
+
+    A field row (``item set``, DEC_ADR_023_D2) names no ``to`` and is not
+    walked: it records a field, never a status.
     """
     if ctx.payload.get("stop_hook_active"):
         return Verdict.na("already raised this turn")
@@ -7331,6 +7424,15 @@ def _history_problems(item, machine) -> list[str]:
             unrecorded = (
                 f"{item.id}: status {item.status!r} with no recorded history "
                 f"(the machine starts at {machine.initial!r})"
+            )
+            return [unrecorded]
+        if not any(entry.get("to") for entry in item.history):
+            # Field rows only (`item set`, DEC_ADR_023_D2): they name no `to`,
+            # so no status was ever recorded, which is what to say.
+            unrecorded = (
+                f"{item.id}: status {item.status!r} with no recorded transition "
+                f"(its history holds field changes only; the machine starts at "
+                f"{machine.initial!r})"
             )
             return [unrecorded]
         return [f"{item.id}: status {item.status!r} but its history ends at {at!r}"]
@@ -9450,14 +9552,6 @@ def _rel(path: Path, root: Path) -> str:
         return str(path)
 
 
-#: A short-option cluster whose LAST letter takes a value — git's own rule for
-#: combining flags, which is why ``-am <msg>`` means ``-a -m <msg>``. Matching
-#: only the exact ``-m`` token let ``-am`` (the most common combined spelling)
-#: carry a message past the scan unread (AUD-09).
-_COMMIT_MESSAGE_CLUSTER = re.compile(r"-[a-zA-Z]*m$")
-_COMMIT_FILE_CLUSTER = re.compile(r"-[a-zA-Z]*F$")
-
-
 def _shell_tokens(command: str) -> list[str]:
     """A shell command as words, or nothing when it cannot be read as words."""
     try:
@@ -9481,26 +9575,14 @@ def _is_git_commit(command: str) -> bool:
     this function was added for (BUG_027).
     """
     saw_git = False
-    for token in _shell_tokens(command):
+    # The shell's operators split off (BUG_132): `(git commit` and
+    # `true;git commit` run git as surely as `git commit` does.
+    for token, _ in shell.lex(command):
         if saw_git and token == "commit":
             return True
         if PurePosixPath(token).name == "git":
             saw_git = True
     return False
-
-
-#: git options that take their value as the NEXT token and are not `-C`.
-#: They have to be listed only so the scan steps over their value: a bare
-#: word is otherwise read as the subcommand, and `git -c commit.gpgsign=false
-#: -C <other> commit` would stop at the config pair and never see the `-C`.
-_GIT_VALUE_OPTIONS = frozenset({"-c", "--namespace", "--exec-path", "--super-prefix"})
-
-#: Redirections of the same class as `-C` that this rule will NOT follow.
-#: Resolving them means reproducing git's own gitdir/worktree pairing, and a
-#: half-right resolution here reports a scan of a tree nobody asked about —
-#: the exact failure being fixed. Naming the option and failing closed is the
-#: honest floor (AUD-09).
-_GIT_LAYOUT_OPTIONS = frozenset({"--git-dir", "--work-tree"})
 
 
 def _git_command_cwd(command: str, cwd: Path) -> tuple[Path, str | None]:
@@ -9518,65 +9600,28 @@ def _git_command_cwd(command: str, cwd: Path) -> tuple[Path, str | None]:
     keeps ``--git-dir`` on a neighbouring ``rev-parse`` from failing a commit
     it has nothing to do with.
 
-    ``-C`` is REPEATABLE and cumulative within one invocation, each path
-    resolved against the one before — ``git -C a -C b`` runs in ``a/b``. A
-    reader that took the first and stopped would land one directory up, which
-    is usually a real directory with a real index, so the mistake produces a
-    confident scan of the wrong tree rather than an error anyone notices.
-
-    Only git's OWN options are read, which is why each scan stops at the
-    subcommand: ``commit -C <commit>`` reuses another commit's message and has
-    nothing to do with directories, and a reader that kept going would take it
-    for one.
+    git's own options, ``-C`` cumulative and the subcommand where they stop,
+    are read by :func:`shell.git_options`, which the host's placement of a
+    shell call reads too (BUG_125).
     """
-    tokens = _shell_tokens(command)
+    tokens = [word for word, _ in shell.lex(command)]
     index = 0
     while index < len(tokens):
         if PurePosixPath(tokens[index]).name != "git":
             index += 1
             continue
-        index += 1
-        resolved = Path(cwd)
-        refusal: str | None = None
-        while index < len(tokens):
-            token = tokens[index]
-            head = token.split("=", 1)[0]
-            if head in _GIT_LAYOUT_OPTIONS:
-                # Held, not returned yet: it only matters if this invocation
-                # turns out to be the commit.
-                refusal = refusal or (
-                    f"{head} points git at a repository this scan does not "
-                    "follow, so the content this commit would put into "
-                    "history could not be read."
-                )
-                index += 2 if "=" not in token else 1
-                continue
-            if token == "-C":
-                following = tokens[index + 1] if index + 1 < len(tokens) else ""
-                if not following:
-                    # Nothing to resolve against. Reachable only at the very
-                    # end of the command — where no subcommand follows, so
-                    # this invocation is not the commit — and for the literal
-                    # `-C ""`, which git itself reads as no change of
-                    # directory. Both mean: leave the directory where it is.
-                    break
-                candidate = Path(following)
-                resolved = (
-                    candidate if candidate.is_absolute() else resolved / candidate
-                )
-                index += 2
-                continue
-            if token in _GIT_VALUE_OPTIONS:
-                index += 2
-                continue
-            if token.startswith("-"):
-                index += 1
-                continue
-            break  # the subcommand: what follows belongs to it, not to git
+        options = shell.git_options(tokens, index + 1, cwd)
+        index = options.end
         if index >= len(tokens) or tokens[index] != "commit":
             continue  # some other invocation in the chain; keep looking
-        if refusal:
-            return resolved, refusal
+        resolved = options.directory
+        if options.layout:
+            # Held until now: it only matters if this invocation is the commit.
+            return resolved, (
+                f"{options.layout} points git at a repository this scan does "
+                "not follow, so the content this commit would put into history "
+                "could not be read."
+            )
         if not resolved.is_dir():
             return resolved, (
                 f"-C names {str(resolved)!r}, which is not a directory at scan "
@@ -9649,48 +9694,421 @@ def _joined(name: str, base: Path | None) -> Path:
     return path
 
 
+#: ``git commit``'s short options that take a value: the rest of the word
+#: when there is one, else the next word. git reads a cluster letter by letter
+#: and the first of these ends it, which is why ``-am <msg>`` is ``-a -m
+#: <msg>`` and ``-mfix`` is ``-m fix`` (AUD-09, BUG_132).
+_COMMIT_SHORT_VALUES = {
+    "m": "message",
+    "F": "file",
+    "C": "reuse-message",
+    "c": "reedit-message",
+    "t": "template",
+}
+
+#: Short options whose value is optional and only ever attached (``-u<mode>``,
+#: ``-S<keyid>``): the rest of the cluster is theirs, and the next word is not.
+_COMMIT_SHORT_OPTIONAL = frozenset("uS")
+
+#: ``git commit``'s long options as git 2.50 lists them
+#: (``--git-completion-helper-all``), each with the ``no-`` spellings it
+#: accepts. Every spelling is listed so an abbreviation resolves as git's
+#: parser resolves it: a unique prefix of one spelling names that option, and
+#: ``--mess=<v>`` is ``--message=<v>``.
+_COMMIT_LONG_SPELLINGS: dict[str, tuple[str, bool]] = {
+    **{
+        name: (name, False)
+        for name in (
+            "quiet", "verbose", "file", "author", "date", "message",
+            "reedit-message", "reuse-message", "fixup", "squash", "reset-author",
+            "trailer", "signoff", "template", "edit", "cleanup", "status",
+            "gpg-sign", "all", "include", "interactive", "patch", "only",
+            "no-verify", "dry-run", "short", "branch", "ahead-behind",
+            "porcelain", "long", "null", "amend", "no-post-rewrite",
+            "untracked-files", "pathspec-from-file", "pathspec-file-nul",
+            "allow-empty", "allow-empty-message",
+        )
+    },
+    **{
+        "no-" + name: (name, True)
+        for name in (
+            "quiet", "verbose", "file", "author", "date", "message",
+            "reedit-message", "reuse-message", "fixup", "squash", "reset-author",
+            "signoff", "template", "edit", "cleanup", "status", "gpg-sign",
+            "all", "include", "interactive", "patch", "only", "dry-run",
+            "short", "branch", "ahead-behind", "porcelain", "long", "null",
+            "amend", "untracked-files", "pathspec-from-file",
+            "pathspec-file-nul", "allow-empty", "allow-empty-message",
+        )
+    },
+    "verify": ("no-verify", True),
+    "post-rewrite": ("no-post-rewrite", True),
+}
+
+#: Long options that take a value, attached with ``=`` or as the next word.
+_COMMIT_LONG_VALUES = frozenset(
+    {
+        "file", "author", "date", "message", "reedit-message", "reuse-message",
+        "fixup", "squash", "trailer", "template", "cleanup", "pathspec-from-file",
+    }
+)
+
+#: Options after which git makes no commit at all: a status run, or help.
+_COMMIT_NO_COMMIT = frozenset({"dry-run", "short", "porcelain", "long", "help"})
+
+#: The remedy when git would open an editor on a message it copies.
+_KEEP_MESSAGE_FIX = "or add --no-edit to keep the message git copies as it is"
+
+
+def _commit_long_option(name: str) -> tuple[str, bool] | None:
+    """The long option ``name`` spells, as ``(option, negated)``, or None.
+
+    An exact spelling, else a prefix of exactly one spelling, which is git's
+    rule. An unknown or ambiguous one is None: git refuses it and commits
+    nothing, so nothing it carries reaches history.
+    """
+    if name in _COMMIT_LONG_SPELLINGS:
+        return _COMMIT_LONG_SPELLINGS[name]
+    if name == "help":
+        return ("help", False)
+    found = {_COMMIT_LONG_SPELLINGS[s] for s in _COMMIT_LONG_SPELLINGS if s.startswith(name)}
+    return found.pop() if name and len(found) == 1 else None
+
+
+def _commit_words(command: str) -> tuple[list[str], bool]:
+    """The words of the ``git commit`` this command runs, after ``commit``,
+    and whether ``commit`` is surely git's subcommand there.
+
+    The words run to the first operator that ends a command (``;``, ``&&``,
+    ``||``, ``|``, ``&``, a parenthesis). A redirection and its target are not
+    the commit's words. Where the end cannot be told (a newline between
+    commands) the words run on: more is read, never less.
+
+    ``commit`` is sure when it is the first word after a ``git`` and git's own
+    options, read as :func:`_git_command_cwd` reads them. Otherwise the words
+    after the first ``commit`` :func:`_is_git_commit` would see are still
+    read, for their messages; but nothing is demanded of them, because
+    ``git log --grep commit`` makes no commit at all.
+    """
+    lexed = shell.lex(command)
+    words = [word for word, _ in lexed]
+    found: int | None = None
+    sure = False
+    for index, word in enumerate(words):
+        if PurePosixPath(word).name != "git":
+            continue
+        at = index + 1
+        while at < len(words) and words[at].startswith("-"):
+            head = words[at].split("=", 1)[0]
+            takes_next = head in shell.GIT_LAYOUT_OPTIONS and "=" not in words[at]
+            at += 2 if words[at] == "-C" or words[at] in shell.GIT_VALUE_OPTIONS or takes_next else 1
+        if at < len(words) and words[at] == "commit":
+            found, sure = at, True
+            break
+    if found is None:
+        saw_git = False
+        for index, word in enumerate(words):
+            if saw_git and word == "commit":
+                found = index
+                break
+            saw_git = saw_git or PurePosixPath(word).name == "git"
+    if found is None:
+        return [], False
+    out: list[str] = []
+    rest = iter(lexed[found + 1 :])
+    for word, operator in rest:
+        if operator and not set(word) & set("<>"):
+            break  # ; & && | || ( ): the command ends
+        if operator:
+            next(rest, None)  # the redirection's target, or a heredoc's tag
+            continue
+        out.append(word)
+    return out, sure
+
+
+def _changes_directory_before_commit(command: str) -> str | None:
+    """The ``cd`` or ``pushd`` this command runs before its ``git commit``.
+
+    A relative ``-F`` path is read against the directory the commit runs in,
+    and a directory change earlier in the same command is not followed: the
+    shell has not made it yet when the hook runs.
+    """
+    lexed = shell.lex(command)
+    for index, (word, operator) in enumerate(lexed):
+        if operator:
+            continue
+        if word == "commit" and any(
+            PurePosixPath(w).name == "git" for w, _ in lexed[:index]
+        ):
+            return None
+        if word in ("cd", "pushd"):
+            return word
+    return None
+
+
+@dataclass
+class _CommitSources:
+    """Where ``git commit`` takes the message from, as its words say.
+
+    The fields hold what git acts on: every ``-m`` since the last
+    ``--no-message``, and the last of each other source unless a ``--no-``
+    spelling cleared it. ``dropped`` and ``files`` keep what was named besides.
+    """
+
+    messages: list[str] = field(default_factory=list)
+    #: The ``-m`` values a ``--no-message`` dropped: git does not write them,
+    #: and they are read all the same, on the noisy side (DEC_ADR_024_D4).
+    dropped: list[str] = field(default_factory=list)
+    file: str | None = None
+    #: Every ``-F`` the command names, in order, the one git reads included.
+    files: list[str] = field(default_factory=list)
+    reuse: str | None = None
+    reedit: str | None = None
+    template: str | None = None
+    fixup: str | None = None
+    squash: str | None = None
+    trailers: list[str] = field(default_factory=list)
+    edit: bool | None = None
+    amend: bool = False
+    #: The options in force after which git makes no commit (``--dry-run``,
+    #: ``--short``, …); a ``--no-`` spelling takes its own back.
+    status_only: set[str] = field(default_factory=set)
+
+    def set(self, option: str, negated: bool, value: str | None) -> None:
+        if option == "message":
+            if negated:
+                self.dropped.extend(self.messages)  # git writes none of them
+                self.messages.clear()
+            else:
+                self.messages.append(value or "")
+        elif option == "trailer":
+            self.trailers.append(value or "")
+        elif option == "edit":
+            self.edit = not negated
+        elif option == "amend":
+            self.amend = not negated
+        elif option in _COMMIT_NO_COMMIT:
+            if negated:
+                self.status_only.discard(option)
+            else:
+                self.status_only.add(option)
+        else:
+            attribute = {
+                "file": "file",
+                "reuse-message": "reuse",
+                "reedit-message": "reedit",
+                "template": "template",
+                "fixup": "fixup",
+                "squash": "squash",
+            }.get(option)
+            if attribute:
+                setattr(self, attribute, None if negated else value)
+            if option == "file" and not negated:
+                self.files.append(value or "")
+
+
+def _commit_sources(words: list[str]) -> _CommitSources | None:
+    """The message sources ``words`` name, or None when git refuses them.
+
+    Every occurrence counts, in order: ``-m`` is repeatable, ``-F``, ``-C``,
+    ``-c``, ``-t``, ``--fixup`` and ``--squash`` keep the last, each
+    ``--no-<option>`` clears it, and ``--`` ends the options. A value-taking
+    option with no value left is git's refusal: None.
+    """
+    sources = _CommitSources()
+    index = 0
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if word == "--":
+            break
+        if word.startswith("--"):
+            name, eq, value = word[2:].partition("=")
+            spelled = _commit_long_option(name)
+            if spelled is None:
+                continue
+            option, negated = spelled
+            if option in _COMMIT_LONG_VALUES and not negated and not eq:
+                if index >= len(words):
+                    return None
+                value = words[index]
+                index += 1
+            sources.set(option, negated, value if eq or option in _COMMIT_LONG_VALUES else None)
+            continue
+        if not word.startswith("-") or word == "-":
+            continue  # a pathspec
+        for at, letter in enumerate(word[1:], start=2):
+            if letter in _COMMIT_SHORT_VALUES:
+                value = word[at:]
+                if not value:
+                    if index >= len(words):
+                        return None
+                    value = words[index]
+                    index += 1
+                sources.set(_COMMIT_SHORT_VALUES[letter], False, value)
+                break
+            if letter in _COMMIT_SHORT_OPTIONAL:
+                break
+            if letter == "e":
+                sources.edit = True
+            elif letter == "h":
+                sources.status_only.add("help")
+    return sources
+
+
+def _commit_refusal(sources: _CommitSources) -> tuple[str, tuple[str, ...]] | None:
+    """Why git, or this scan, will not let these sources through, with the
+    remedy; None when the message is the text the command carries.
+
+    git's own refusals first, as git 2.50 makes them: then no commit is made,
+    and the refusal says so rather than scanning half of what was given. Then
+    every way the message is written where a hook cannot see it: in an editor,
+    or from a ``-t`` template (DEC_ADR_024_D4).
+    """
+    rewords = (sources.fixup or "").startswith(("amend:", "reword:"))
+    for group in (
+        (("-C", sources.reuse), ("-c", sources.reedit), ("-F", sources.file),
+         ("--fixup", sources.fixup)),
+        (("-m", sources.messages), ("-c", sources.reedit), ("-C", sources.reuse),
+         ("-F", sources.file)),
+        (("--squash", sources.squash), ("--fixup", sources.fixup)),
+        (
+            ("-m", sources.messages if rewords else None),
+            (f"--fixup={(sources.fixup or '').split(':', 1)[0]}:", sources.fixup),
+        ),
+    ):
+        given = [name for name, value in group if value is not None and value != []]
+        if len(given) > 1:
+            return (
+                f"git refuses {given[0]} together with {given[1]}, so this "
+                "command makes no commit, and which message was meant cannot "
+                "be told from it."
+            ), ("give the message one way: -m '<message>', or -F <file>",)
+    if sources.status_only:
+        return None
+    carried = bool(sources.messages) or sources.file is not None or sources.reuse is not None
+    editor = not carried and not (sources.fixup is not None and not rewords)
+    if sources.edit is not None:
+        editor = sources.edit
+    if editor:
+        fixes = (_INLINE_MESSAGE_FIX,)
+        copied = sources.amend or sources.reedit is not None or sources.squash is not None
+        if not carried and (copied or rewords):
+            fixes += (_KEEP_MESSAGE_FIX,)
+        return (
+            "git opens an editor for this message, and what is written there "
+            "is out of a hook's sight. The message would land in history "
+            "unscanned."
+        ), fixes
+    if sources.template is not None and not carried and sources.reedit is None:
+        return (
+            f"-t names {sources.template!r} as the message's template, and "
+            "with no -m or -F git writes it unread by this scan. The message "
+            "would land in history unscanned."
+        ), (_INLINE_MESSAGE_FIX,)
+    return None
+
+
+def _git_joined(messages: list[str]) -> str:
+    """The ``-m`` values as git joins them: each one a paragraph, ended by a
+    newline, and a blank line between two. So the last ``-m`` is the last
+    paragraph, which is where a trailer block is read (DEC_ADR_024_D2)."""
+    joined = ""
+    for value in messages:
+        if joined:
+            joined += "\n"
+        joined += value
+        if joined and not joined.endswith("\n"):
+            joined += "\n"
+    return joined
+
+
+@dataclass(frozen=True)
+class _CommitMessage:
+    """What a ``git commit`` writes into its message, as far as it is read.
+
+    ``text`` is the message the command carries: every ``-m`` joined as git
+    joins them, or the ``-F`` file git reads. ``others`` is text the command
+    names that git does not write (a ``-m`` value a ``--no-message`` dropped,
+    any other ``-F`` file), each read as a message of its own: reading more
+    than git writes is the noisy side. ``trailers`` are the ``--trailer``
+    values, each scanned as a line of its own and never admitted as the
+    host's trailer. ``problem`` is set when the message cannot be read, and
+    the caller fails closed on it; ``fixes`` is its remedy.
+    """
+
+    text: str = ""
+    others: tuple[str, ...] = ()
+    trailers: tuple[str, ...] = ()
+    problem: str | None = None
+    fixes: tuple[str, ...] = (_INLINE_MESSAGE_FIX,)
+
+
 def _extract_commit_message(
     command: str, cwd: Path | None = None, shell_cwd: Path | None = None
-) -> tuple[str, str | None, tuple[str, ...]]:
+) -> _CommitMessage:
     """The message a ``git commit`` invocation carries, or why it is unreadable.
 
-    Returns ``(message, problem, fixes)``. ``problem`` is set when the command
-    names a message this scan cannot read — a ``-F`` file that is absent at
-    hook time, or ``-F -`` (stdin, which a hook never sees). The caller fails
-    closed on it: the scan's whole subject exists and could not be looked at,
-    and an unanswered question is not a pass (AUD-09). ``fixes`` is the
-    remedy for that cause.
+    Every source git writes a message from is read or refused
+    (DEC_ADR_024_D4): every ``-m`` and ``--message`` in any spelling, the
+    ``-F`` file, each ``--trailer``. A message written in an editor or from a
+    ``-t`` template, a ``-F`` file absent at hook time or ``-F -`` (stdin,
+    which a hook never sees), and any combination git itself refuses set
+    ``problem``. The caller fails closed on it: the scan's subject exists and
+    could not be looked at, and an unanswered question is not a pass (AUD-09).
+
+    Text git copies from a commit the repository already holds (``-C``,
+    ``--amend --no-edit``, the subject ``--fixup`` and ``--squash`` name) is
+    not read: it puts nothing into history that is not there already.
 
     ``cwd`` is where git reads a relative ``-F`` path (``-C`` applied);
     ``shell_cwd`` is where the shell resolves a relative redirection target.
     """
     if not _is_git_commit(command):
-        return "", None, (_INLINE_MESSAGE_FIX,)
-    tokens = _shell_tokens(command)
-    for index, token in enumerate(tokens):
-        following = tokens[index + 1] if index + 1 < len(tokens) else ""
-        if token == "--message" or _COMMIT_MESSAGE_CLUSTER.fullmatch(token):
-            return following, None, (_INLINE_MESSAGE_FIX,)
-        if token.startswith("--message="):
-            return token.split("=", 1)[1], None, (_INLINE_MESSAGE_FIX,)
-        name = None
-        if token == "--file" or _COMMIT_FILE_CLUSTER.fullmatch(token):
-            name = following
-        elif token.startswith("--file="):
-            name = token.split("=", 1)[1]
-        if name is None:
-            continue
+        return _CommitMessage()
+    words, sure = _commit_words(command)
+    sources = _commit_sources(words)
+    if sources is None:
+        return _CommitMessage()
+    if not sure:
+        sources.status_only.add("unsure")
+    refusal = _commit_refusal(sources)
+    if refusal is not None:
+        return _CommitMessage(problem=refusal[0], fixes=refusal[1])
+    moved = _changes_directory_before_commit(command)
+    for name in sources.files:
+        if moved and name not in ("", "-") and not Path(name).is_absolute():
+            return _CommitMessage(
+                problem=(
+                    f"-F names {name!r}, a relative path, after this same "
+                    f"command changes directory with {moved}. Which file git "
+                    "reads cannot be told before the command runs, and the "
+                    "message would land in history unscanned."
+                ),
+                fixes=("give -F an absolute path", "or " + _INLINE_MESSAGE_FIX),
+            )
+    others = list(sources.dropped)
+    text = _git_joined(sources.messages)
+    for index, name in enumerate(sources.files):
         message, problem = _read_commit_message_file(name, cwd)
         if problem and name not in ("", "-") and _written_by(
-            tokens, _joined(name, cwd), shell_cwd or cwd
+            _shell_tokens(command), _joined(name, cwd), shell_cwd or cwd
         ):
-            return "", (
-                f"-F names {name!r}, which this same command writes. A hook "
-                "runs before the command, so the file cannot exist at scan "
-                "time, and the message would land in history unscanned."
-            ), _SEPARATE_CALL_FIXES
-        return message, problem, (_INLINE_MESSAGE_FIX,)
-    return "", None, (_INLINE_MESSAGE_FIX,)
+            return _CommitMessage(
+                problem=(
+                    f"-F names {name!r}, which this same command writes. A hook "
+                    "runs before the command, so the file cannot exist at scan "
+                    "time, and the message would land in history unscanned."
+                ),
+                fixes=_SEPARATE_CALL_FIXES,
+            )
+        if problem:
+            return _CommitMessage(problem=problem)
+        if sources.file is not None and index == len(sources.files) - 1:
+            text = message  # the last -F, which git reads
+        else:
+            others.append(message)
+    return _CommitMessage(text=text, others=tuple(others), trailers=tuple(sources.trailers))
 
 
 def _written_by(tokens: list[str], path: Path, shell_cwd: Path | None) -> bool:
@@ -9712,7 +10130,10 @@ def _read_commit_message_file(name: str, cwd: Path | None) -> tuple[str, str | N
             "The message would land in history unscanned."
         )
     try:
-        return _joined(name, cwd).read_text(encoding="utf-8"), None
+        # Bytes, not read_text: universal newlines would turn a lone carriage
+        # return into a line break git never makes, and privacy.clean's
+        # trailer reading must see the lines git will write (DEC_ADR_024_D2).
+        return _joined(name, cwd).read_bytes().decode("utf-8"), None
     except (OSError, UnicodeDecodeError):
         return "", (
             f"-F names {name!r}, which could not be read at scan time. The "

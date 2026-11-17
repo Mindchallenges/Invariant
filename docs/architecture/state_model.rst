@@ -424,23 +424,28 @@ existed. Written by the CLI's release and merge through
 ``SessionDomain.docs_unlock``, ``record_repo_failure`` and
 ``record_repo_landed``; ``session status`` names it.
 
-``migrate`` is the tenth (ADR-014 D12, increment 7a,
-:need:`DEC_ADR_014_I7A`), under the same contract: the move a ``store
-migrate`` session carries, ``{"to", "store", "identity", "wiring", "roots",
-"finished"}``: the home it moves to, the store's main checkout, the
-repository's identity, which committed wiring (``hooks``, ``agents``) becomes
-local once the repository leg lands, the repository-relative roots that
-moved, and when the move finished (null until then). A migrate session keeps
+``migrate`` is the tenth (ADR-014 D12, increments 7a and 7b,
+:need:`DEC_ADR_014_I7A`, :need:`DEC_ADR_014_I7B`), under the same contract:
+the move a ``store migrate`` session carries, ``{"to", "store", "identity",
+"wiring", "roots", "finished"}``: the home it moves to (``store`` or
+``repo``), the store's main checkout, the key the store lists the repository
+under, which wiring (``hooks``, ``agents``) changes form once the repository
+leg lands (committed to local, or local to committed), the relative roots
+that moved, and when the move finished (null until then). A migrate session keeps
 its ``landing`` record whichever home the tree in hand resolves to: its
 main checkout reads ``.claude/invariant.yaml`` until the merge, while its
 store leg has already landed, so a failed merge leaves it half-landed and
 ``session merge`` or ``session resume`` finishes it. Null for every other
 session. Written by ``SessionDomain.record_migrate``, ``record_store_landed``
 and ``finish_migrate``. While it is under way, ``<state root>/migrate.json``
-names the session (``{"session", "to", "store", "identity"}``), which
-``Manifest.locate`` reads to name it when a store does not list the
-repository; the marker goes when the move finishes or the session is
-abandoned.
+names the session (``{"session", "to", "store", "identity", "worktree"}``),
+which ``Manifest.locate`` reads to name it and its worktree when a store does
+not list the repository; the marker goes when the move finishes or the
+session is abandoned. Mid-way through ``--to repo`` the main checkout finds
+neither home, since the store no longer lists the repository and the
+manifest lands with the merge; ``session merge`` and ``session resume`` read
+the marker's worktree there and resolve the project from it, so the move is
+finished from the main checkout (:need:`DEC_ADR_014_I7B`).
 
 ``decisions`` is the sixth (ADR-018 D9, increment 5), under the same contract:
 the decisions the session made, ``{"n", "id", "draft"}`` per ``session decisions`` entry, numbered as the plan is. An entry with no ``id`` is a draft.
@@ -972,8 +977,9 @@ consumes **one** note:
        stale --> [*]
 
 - **Claimed — by the token the launcher set.** The launched line is
-  ``cd <main> && exec env -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>``,
-  and the launch file runs ``claude`` (BUG_075, IDEA_035), so the variable reaches that
+  ``exec env -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>``,
+  and the launch file enters the main checkout and runs ``claude`` (BUG_075,
+  IDEA_035, BUG_129), so the variable reaches that
   one ``claude`` process and every hook it spawns. On the
   PostToolUse that brackets the host's first ``session start`` or
   ``session resume`` — the binding path under "Host binding" above —
@@ -1246,6 +1252,28 @@ route — and only for it — the location is asked for explicitly rather than
 inferred. A session with no worktree passes on the binding alone, having no
 location to contradict.
 
+**A shell call's place is where its commands run**
+(:need:`ADR-025 D1 <DEC_ADR_025_D1>`, BUG_125). A call naming a destination
+is placed by it. A shell call names none, and the hook's working directory
+cannot place it: a subagent's shell starts at the host's working directory,
+the shared checkout, on every call, so a subagent working only through the
+shell spells every call ``cd <worktree> && ...`` and the hook never stands
+anywhere but the shared checkout. Such a call is placed by the directory each
+of its commands runs in, read by ``core/shell.working_directories`` from the
+hook's working directory: a top-level ``cd <dir>`` or ``pushd <dir>`` in
+sequence (``&&`` or ``;``) moves every command after it, and ``git -C <dir>``
+moves that git invocation; a newline ends a command, a ``cd`` is logical and
+``git -C`` physical, and a directory not there after the call was never
+entered. The call is placed in a worktree only when every
+one of its commands runs inside that one session's worktree. A path a command
+only names is not place, so ``echo <worktree>`` and ``grep x <worktree>`` run
+from the shared checkout stay the shared checkout's, and so does the curator
+above. A command whose directories cannot be told from its text (a ``cd`` in
+a pipe, a subshell or behind ``||``, an expanded target, ``--git-dir``) is
+placed nowhere, and one that runs nothing (a bare ``cd``) places nothing. A
+change inside a nested shell string (``bash -c '...'``) is not read. Any
+other pathless call stands where the hook does.
+
 Where the location contradicts the binding, the location wins and the run is
 recorded against the session it landed in. That is step 2 inverted, for the
 same reason the dispatch route already inverts it when a brief names a
@@ -1346,6 +1374,20 @@ Domain: pipeline
 
    ``data/machines/docs.yaml``: a docs-only change: drafting, reviewing and the
    landing. ``core/machines`` injects the docs-first gates into it.
+
+.. comp:: The ``docs-project`` pipeline machine
+   :id: COMP_MACHINE_DOCS_PROJECT
+   :part_of: COMP_DOMAINS_PIPELINE
+
+   ``data/machines/docs-project.yaml`` (:need:`ADR-015 <DEC_ADR_015>` D2,
+   ruling 5; built in increment 2): a change to a documentation repository,
+   one whose own content is a Sphinx project: drafting, reviewing and the
+   landing, ``committed``, whose entry gates are ``test.all_pass`` (the
+   ``sphinx`` adapter's strict link check and needs validation) and
+   ``privacy.clean``. It owes no red test and no coverage, and the landing
+   runs no ``commands.build`` (ruling 6). ``reviewing`` is ungated and
+   ``reviewing -> drafting`` is a retreat. ``core/machines`` injects the
+   docs-first and agent gates into it by role, as into every lane.
 
 .. comp:: The ``spec-first`` pipeline machine
    :id: COMP_MACHINE_SPEC_FIRST
@@ -1657,6 +1699,12 @@ Shipped methodologies:
 |                | entries — nothing to     | committed                    |
 |                | test or diagram          |                              |
 +----------------+--------------------------+------------------------------+
+| ``docs-``      | A documentation          | drafting → reviewing →       |
+| ``project``    | repository's change,     | committed, landing on        |
+|                | landing on its strict    | ``test.all_pass`` and        |
+|                | test with no build step  | ``privacy.clean``            |
+|                | (ADR-015 D2)             |                              |
++----------------+--------------------------+------------------------------+
 | ``none``       | Escape hatch — a single  | working                      |
 |                | state, no gates          |                              |
 +----------------+--------------------------+------------------------------+
@@ -1953,6 +2001,21 @@ status is one of ``docs.needs.decision_statuses``, and every ``require_links``
 rule holds, each violation named by need, file and line; an external need is
 held to nothing, and a role with no needs is not a failure.
 
+**Fixed (BUG_128, :need:`DEC_ADR_018_B128`).** Each problem carries the
+setting that settles it: ``docs.needs.types`` (an undeclared directive, an id
+without its type's prefix), ``docs.needs.decision_statuses`` (a decision's
+status, or none) or ``docs.needs.require_links`` (a link rule). The message
+counts the problems by setting; the detail names twenty taken in turn from
+each kind (``core/needs.sample``), so a project with 141 status problems
+still sees its five undeclared directives; and the fixes are one line per
+kind present (``core/needs.advise``), naming the setting with what the needs
+carry (each directive and its count, the statuses decisions carry, and what
+the needs failing a rule link to instead, by role and link option), then
+``invariant docs build`` after any change. A line offers both ways out, fixing the needs or
+describing the project in the setting, and never picks: nothing derives a
+setting from the needs or from ``conf.py``, so a hand-built project's real
+problems stay named.
+
 Both are ``warn`` in every profile. An enforced project's load raises both to
 ``block`` (manifest.md), so the same toy project warns while migrating on
 ``sphinx`` and blocks when enforced, and since increment 5 no level lowers
@@ -2025,6 +2088,7 @@ load (manifest.md), so the reasoned routes are the only ones left:
        REC -- "none" --> OWED["fail: invariant docs build"]
        REC -- "red" --> RED["builds_strict: each file, line, type"]
        REC -- "green" --> JSON["needs_traceable: needs.json against types, links, statuses"]
+       JSON -- "problems" --> ADVISE["counts and fix lines by setting: types, decision_statuses, require_links"]
 
 A note on ``docs``, because the reasoning generalises. A documentation-only
 change run through ``tdd`` blocks on three gates it cannot satisfy in principle —
@@ -2157,6 +2221,43 @@ The hook's answer is the same in every case. A failure to open or take the lock
 is a ``StateError`` like the timeout, so the hook's existing ``except InvariantError``
 absorbs it. The doctor probe's ``InertStore`` takes no lock and creates no lock file.
 
+The gate receipt is the coverage record
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+(:need:`ADR-026 <DEC_ADR_026>`.) ``run_coverage`` signs the tree it runs in
+before the run and after it with ``core/git.tree_signature``, the signature
+ADR-021's steps use: the commit, ``git diff HEAD`` and every untracked file git
+does not ignore, by content, plus what those two reads leave out (an untracked
+file's executable bit, an untracked symlink's target, a submodule's or an
+embedded repository's contents, a tracked file flagged ``--assume-unchanged``
+or ``--skip-worktree``). A file ``.gitignore`` names is outside the tree, and
+staging alone moves nothing, since no file on disk changed. Both land in ``coverage_run.tree`` (``root``,
+``commit``, ``before``, ``commit_after``, ``after``) in the same write as the
+rest of ``coverage_run``, or ``None`` when git cannot name the tree.
+
+``gate_receipt`` (``invariant pipeline receipt``) is a read and takes no lock.
+It matches when all five hold, and names each one that does not:
+
+.. mermaid::
+
+   flowchart TD
+       R[coverage_run on record, tree signed?] -->|no| N[NO MATCH, exit 1]
+       R -->|yes| H[before == after: the tree held still for the run?]
+       H -->|no| N
+       H -->|yes| T[signature now == before: same commit, same digest?]
+       T -->|no| N
+       T -->|yes| S[the run's suite passed?]
+       S -->|no| N
+       S -->|yes| F[coverage.meets_floor passes now?]
+       F -->|no| N
+       F -->|yes| M[MATCH, exit 0: the reviewer reuses the run]
+
+Every condition is asked even after one fails, so the answer lists them all.
+The tree is the root the record names, so a reviewer standing elsewhere
+compares the tree the run measured. Unlike a step's run, which counts at the
+tree before it or after it, a receipt needs the two equal: coverage numbers
+from a tree that changed during the run may not describe the tree it left.
+
 A malformed field reads as empty to a writer
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -2257,8 +2358,8 @@ Six properties, each deliberate:
   a ``LICENSE``-only chore needed ``--force`` to land (BUG_064, ADR-003 D2
   amendment). The decision is made at injection, not by the rule answering
   "not applicable", so ``invariant pipeline gates`` does not list the gate on a
-  machine that cannot owe it. Shipped result: ``tdd``, ``bugfix``, ``spec-first``
-  and ``docs`` carry both; ``chore`` carries the review-agent gate; ``none`` carries
+  machine that cannot owe it. Shipped result: ``tdd``, ``bugfix``, ``spec-first``,
+  ``docs`` and ``docs-project`` carry both; ``chore`` carries the review-agent gate; ``none`` carries
   neither.
 
 - **Two events, not one: the dispatch and the actor.** A dispatch is observed
@@ -2471,21 +2572,26 @@ row does not pretend it was walked: it carries ``intermediate: true`` and
 
 What the command does, in order:
 
-1. ``--ruling`` and ``--evidence`` come together or not at all; either alone is
-   refused, naming the one that is missing. The evidence is resolved to a full
-   hash through ``core/git.resolve_commit``, and a name that is no commit here is
-   refused — a ruling resting on a string nothing can check is not provenance.
+1. ``--ruling`` needs ``--evidence``, and is refused alone, naming it. The
+   evidence is resolved to a full hash through ``core/git.resolve_commit``, and
+   a name that is no commit here is refused — a ruling resting on a string
+   nothing can check is not provenance. ``--evidence`` alone is legal
+   (IDEA_052, :need:`DEC_ADR_022_D1`): it records the commit a plain
+   transition rests on, resolved the same way, and buys no route.
 2. Where the machine has no direct edge, the route is the **one** state both
    edges reach (``_one_step_between``), read from the machine rather than named
    in code. None, or two, and the edge is refused as before — ``filed → verified`` is two unwalked states, and a ruling vouches for one. Without a
-   ruling, the refusal names the ruled route instead of leaving ``--force`` as
-   the only visible way past it.
+   ruling, a commit or not, the refusal names the ruled route instead of
+   leaving ``--force`` as the only visible way past it.
 3. Each step is gated as if it were walked — the exit gates of the state left
    and the entry gates of the state entered, with the item as the previous
    step left it — and **nothing is written unless every step passes**. Then
    one save writes both rows.
 4. Every row the command writes carries ``ruling`` and ``evidence``; a ruling on
    an edge that does exist (``reproduced → fixed``) annotates that one row.
+   So does a commit given alone, which is how an ordinary ``reproduced →
+   fixed`` names the fix commit, checked to resolve, rather than leaving it
+   in the body's prose only.
 
 Who may rule is recorded, not enforced. The ruling text names the person and
 the date, and ``bug-reproducer`` still never runs the command itself: it reports
@@ -2524,6 +2630,57 @@ than exit because both are terminal: nothing ever leaves them, so an exit gate
 there is never evaluated and an entry could close owing three legs with the
 gate named to prevent exactly that staying silent.
 
+A field changes outside the machine, in the history beside it
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An item's fields — ``affects``, ``severity``, ``priority``, ``batch``,
+``decided_by`` and the rest — are not states, and no machine edge moves them.
+``invariant item set`` changes them (IDEA_051, :need:`DEC_ADR_023`), and records
+each change in the same history the transitions are recorded in, as a row of
+another kind:
+
+.. code:: yaml
+
+   - from: filed
+     to: reproduced
+     reason: red test committed
+     forced: false
+   - field: affects
+     was: COMP_CORE_ITEMS
+     now: COMP_CORE_ITEMS, COMP_CORE_RULES
+     reason: the rule check turned out to be the owner
+     date: '2026-11-16'
+
+**A field row names no ``from`` and no ``to``**, and that is the whole of how it
+stays out of the status walk (:need:`DEC_ADR_023_D2`). ``item.history_matches_status``
+walks only rows that name a ``to``, and ``item.bug_reproduced_before_fix``
+looks for ``to: reproduced``; neither rule changes, and a project whose history
+interleaves field rows with transitions reads exactly as it would without
+them. ``was`` and ``now`` are the field's whole value either side of the change,
+null where it was or became absent, so a row reads on its own.
+
+.. mermaid::
+
+   graph TD
+       S["item set id --field / --add / --remove / --unset<br/>--reason [--evidence]"] --> K{"every key a field the<br/>backend can hold, one<br/>operation per key?"}
+       K -- no --> R1["refused, nothing written<br/>(status: item transition)"]
+       K -- yes --> V{"values well-formed; --remove and<br/>--unset name what is there;<br/>the commit resolves?"}
+       V -- no --> R1
+       V -- yes --> C{"any field changes?"}
+       C -- no --> N["nothing changed: nothing written, exit 0"]
+       C -- yes --> L{"items.decisions_linked<br/>on the added text"}
+       L -- blocks --> R2["refused, exit 1, nothing written"]
+       L -- clean or warns --> W["one save: the fields, and one<br/>field row per field changed"]
+
+**A terminal state does not freeze the fields** (:need:`DEC_ADR_023_D3`). The
+machine guards the status, and the status is out of the command's reach in
+every state; a field is how the item is linked and filed. The changes that
+reach a closed item are traceability ones — a ``decided_by`` naming a decision
+written after the close, an ``affects`` following a renamed element that the
+strict build requires of closed entries too — and refusing them would send
+exactly those writes back to the hand edit. Nothing proven is lost: the row
+keeps the old value beside the new.
+
 The store the gates cannot sit in front of
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -2542,7 +2699,11 @@ recorded history through that type's machine, reporting the ones that
 disagree: a status no history explains, a history that ends somewhere else, an
 edge the machine does not have. A ``forced`` entry is not drift; an override
 went through the machine, was refused, and recorded a written reason, so
-flagging it would report the audit trail working.
+flagging it would report the audit trail working. A field row is not walked
+at all: it names no ``to`` (above). A status whose history holds field rows
+and no transition is reported as having no recorded transition, the same
+finding as an empty history, rather than as a history ending at the initial
+state.
 
 This is the same shape as the memory domain's index check below — not "you may
 not do this", but "this store no longer says what it means".

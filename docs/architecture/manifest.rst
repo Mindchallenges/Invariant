@@ -135,6 +135,14 @@ Full schema
        session.own_file_set_only: block
        memory.index_current: warn
        privacy.clean: ask         # block | ask | warn | off — see "Levels" below
+     rulings: {}                  # who allowed each loosening, when and why
+                                  # (ADR-021 D6): a rule below its standard
+                                  # level, `profile` for the loose profile,
+                                  # `machine.<name>` for a shadowing machine.
+                                  # Recorded by `rules loosen` and `rules
+                                  # carry-over` at a terminal, never by an
+                                  # agent's edit (D7). Absent by default; see
+                                  # "Loosening a built-in" below
 
    session:
      exempt_paths: [".claude/*", ".claude/**", "MEMORY.md"]
@@ -331,6 +339,17 @@ Every default is the shipped catalogue, which changes no resolved value.
   the directory it resolves to.
 - **``require_links``** and **``decision_statuses``** are what
   ``docs.needs_traceable`` holds a built ``needs.json`` to (state_model.md).
+- **A docs project built by hand** (BUG_128, :need:`DEC_ADR_018_B128`) is
+  described by ``types``, ``decision_statuses`` and ``require_links``, never
+  derived from its ``conf.py``: ``needs_types`` names no roles, a status
+  ``enum`` is every type's list, and a link rule fitted to the needs as they
+  stand would hide the ones it exists to name. ``init`` names the three
+  where it finds a ``conf.py`` loading ``sphinx_needs`` at or above
+  ``paths.docs`` (over a starter it then does not write, or around a
+  ``paths.docs`` already there while the configuration is not ``docs.format:
+  sphinx``), with the directives
+  it declares beyond the configured types, and writes none of them;
+  ``docs.needs_traceable`` names the setting that settles each problem.
 
 Refused at load, naming it: an unknown key under ``docs.needs``; a ``state``
 outside the two; in ``types``, an entry that is not a mapping of
@@ -572,15 +591,19 @@ written into an instruction file unless ``guidelines.instruction_files``
 names one. ``hosts/claude_code_wiring`` says what each location means for
 Claude Code (overview, ``hosts/``).
 
-**Accepted, not yet built (:need:`ADR-020 <DEC_ADR_020>`).** These load-time
-defaults do not move (:need:`DEC_ADR_020_D2`): an absent key still means
-``repo``, and ``paths.docs`` still defaults to ``docs/architecture``. What
-changes is what ``init`` writes. Its default home becomes the store, and a
-fresh store project's block sets ``records`` explicitly, every data and
-policy record ``store`` and ``hooks`` and ``agents`` ``local``
-(:need:`DEC_ADR_020_D1`). The configuration is in the repository only while
-every record is; ``store migrate`` moves everything together
-(:need:`DEC_ADR_020_D3`).
+**Built (:need:`ADR-020 <DEC_ADR_020>` increment 3, the switch;
+:need:`DEC_ADR_020_I3`).** These load-time defaults do not move
+(:need:`DEC_ADR_020_D2`): an absent key still means ``repo``, and
+``paths.docs`` still defaults to ``docs/architecture``. What changed is what
+``init`` writes. Its default home is the store, and a fresh store project's
+block sets ``records`` explicitly, every data and policy record ``store`` and
+``hooks`` and ``agents`` ``local`` (:need:`DEC_ADR_020_D1`;
+``core/storemigrate.STORE_HOME_RECORDS``, the same set ``store migrate --to
+store`` writes), with ``paths.docs: invariant-docs/architecture`` beside
+them; the project and its profile go at the level of a store ``init``
+created. ``init --home repo`` writes the in-repo manifest as before. The
+configuration is in the repository only while every record is; ``store
+migrate`` moves everything together (:need:`DEC_ADR_020_D3`).
 
 **Built (ADR-014 D12, increment 7a; :need:`DEC_ADR_014_I7A`).** ``store
 migrate --to store`` makes an in-repo project a store project: the store's
@@ -594,8 +617,20 @@ A record whose path key is absolute or climbs out of the repository stays
 the repository to move. ``paths.memory_index`` is a name inside
 ``paths.memory``, not a path of its own. ``config show`` then resolves the
 same values, labelled ``store:``, a ``store`` record's paths joined onto the
-store root, and the ``sync`` defaults a store project alone layers. The
-``--to repo`` direction is increment 7b.
+store root, and the ``sync`` defaults a store project alone layers.
+
+**Built (ADR-014 D12, increment 7b; :need:`DEC_ADR_014_I7B`).** ``store
+migrate --to repo`` makes a store project an in-repo one again: its
+``.claude/invariant.yaml`` takes every key the store's own level and the
+repository's block set, the block winning, less ``store`` and ``records``
+(every record ``repo``, the load-time default) and the keys an in-repo
+manifest refuses at load, ``sync`` and ``privacy.store``, which stay behind
+and are named. A ``store`` record's files return to the same relative paths,
+so its path keys keep their spelling, read repository-relative again.
+``config show`` resolves the same values, labelled ``repo:``, without the
+``sync`` defaults. The user level's ``defaults`` are the operator's and are
+not copied. The repository's block leaves the store; the store's own level
+never changes, since other repositories may read it.
 
 **Built (ADR-020 increment 1, :need:`DEC_ADR_020_D8`).** A new project's
 ``init`` writes ``docs.needs.srcdir: invariant-docs`` and ``paths.docs:
@@ -1054,6 +1089,54 @@ and this library's standing asymmetry decides that case: a spurious block is
 visible and self-correcting, a silent pass is neither. What reaches those
 surfaces instead is the override token below.
 
+Loosening a built-in
+~~~~~~~~~~~~~~~~~~~~
+
+**Built (:need:`ADR-021 <DEC_ADR_021>` D6 to D8, increment 3,
+:need:`DEC_ADR_021_I3`).** A configuration *loosens* a built-in when it sets
+a registered rule below its level in the shipped ``standard`` profile
+(``ask`` is below ``block``), chooses a profile that sets any rule there
+(``loose``; ``strict`` sets none), or lets a ``methodology.extra_machines``
+entry shadow a shipped machine, whose gates it then replaces. Each loosening
+needs a ruling under ``enforcement.rulings``, keyed by the rule's id,
+``profile`` or ``machine.<name>``, and holding ``by``, ``date`` (YYYY-MM-DD)
+and ``reason``:
+
+.. code:: yaml
+
+   enforcement:
+     rules:
+       coverage.meets_floor: "off"
+     rulings:
+       coverage.meets_floor:
+         by: owner
+         date: "2026-11-15"
+         reason: no coverage tool runs on this project yet
+
+Under ``loose``, one ruling keyed ``profile`` covers every rule the profile
+lowers (ruling 6), and a level the project sets no lower than the profile's
+rides it; a level below the profile's needs its own. Raising a level,
+choosing ``strict``, and re-levelling the project's own step (D1) need
+nothing. A floored rule (below) is never loosened, whatever a ruling says.
+The loosening is judged on the levels as configured, without
+``INVARIANT_PROFILE`` or ``INVARIANT_DISABLE``: they are per-invocation
+routes, and IDEA_049 is their own question.
+
+Only the user records a ruling (ruling 3, D7). ``invariant rules loosen``
+and ``invariant rules carry-over`` write it after a confirmation at a
+terminal, and ``config.rulings_by_user`` refuses an agent's edit that adds
+or changes one (cli.rst, "Rules and gates"). Both commands write the
+project's own level: its in-repo manifest, or in a store project the
+repository's ``store.repos.<key>`` block of the store's ``invariant.yaml``,
+so a store serving several repositories is not loosened for the others. A
+ruling set at the user level is refused at load: it records one project's
+decision, and the user level is every project's default. A loosening set at
+the user level is ruled in the project like any other.
+
+A ruling's ``by`` and ``date`` show in ``config show --provenance`` with the
+level that holds them, ``rules list`` marks each loosened rule with its
+ruling, and ``doctor``'s ``rulings`` row lists what is recorded.
+
 The override token, and why it is a grant rather than a flag
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1397,16 +1480,36 @@ Privacy scope
   text the memory scope protects, and was the unscanned second copy —
   AUD-15); ``reports`` → ``paths.reports`` (the one rendering of the raw stats
   store that leaves the machine); ``commit_messages``, which scans ``git commit``
-  messages in every spelling git accepts — ``-m``, ``--message[=]``, combined
-  clusters like ``-am``, and ``-F <file>`` by reading the file. A message the
-  gate is configured to scan and cannot read (``-F`` on an absent file, ``-F -``
-  from stdin) FAILS rather than passing unread, in the same do-not-relax
-  convention as the git helpers (AUD-09). When the same command writes the
+  messages in every spelling git accepts (DEC_ADR_024_D4): every ``-m`` and
+  ``--message[=]``, a value attached (``-mfix``), inside a cluster (``-am``)
+  or after an abbreviated long option (``--mess=``), joined as git joins
+  them, each a paragraph, so a later ``-m`` is read and the last is the
+  trailer block (BUG_132); ``-F <file>`` by reading the file; and each
+  ``--trailer`` value. What the command names and git does not write (a value
+  a ``--no-message`` drops, every ``-F`` but the last) is read as well, the
+  noisy side; the trailer block is read from what git writes. The commit's
+  words end at the shell operator that ends the command, and at ``--``, and
+  are read as bash hands them to git (quotes removed, ``$'...'`` decoded, a
+  backslash-newline joined; an operator character inside quotes is a
+  word's). A relative ``-F`` path after a ``cd`` in the same command is
+  refused: the hook cannot follow the directory change. A message the gate is configured to scan and
+  cannot read (``-F`` on an absent file, ``-F -`` from stdin, a message git
+  opens an editor for, a ``-t`` template git writes unedited) FAILS rather
+  than passing unread, in the same do-not-relax convention as the git helpers
+  (AUD-09), and so does a combination git itself refuses (``-m`` with ``-F``,
+  ``-C`` or ``-c``, for one), which makes no commit. Text git copies from a
+  commit the repository holds (``-C``, ``--amend --no-edit``, the subject
+  ``--fixup`` and ``--squash`` name) is not read: it is in history already.
+  When the same command writes the
   ``-F`` file — a ``>``, ``>>`` or ``>|`` redirect (a heredoc-fed ``cat >`` included)
   or a ``tee [-a]`` argument landing on the path git would read — the refusal
   names that cause: the hook runs before the command, so the file cannot
   exist yet, and the remedy is to write it in a separate call first, or use
-  ``-m``. Any write it does not recognise keeps the generic wording (BUG_067);
+  ``-m``. Any write it does not recognise keeps the generic wording (BUG_067).
+  The one line a message carries that the gate does not read is the host's
+  own attribution trailer, in the message's trailer block and in the shape
+  the host adapter declares (DEC_ADR_024; "Privacy allow", below); a
+  ``--trailer`` value is never admitted as it;
   ``all``, which scans everything.
 - **Literal project-relative path prefixes** — any entry that is not a
   keyword. This is how a project widens scope beyond what ``paths.*`` names:
@@ -1444,7 +1547,9 @@ So an entry is one of two kinds:
 .. mermaid::
 
    graph TD
-       M["a match, its pattern name,<br/>and the path of the text, if any"] --> V{"contains a<br/>plain value?"}
+       M["a match, its pattern name,<br/>and the path of the text, if any"] --> T{"on a line of a commit message's<br/>trailer block that a trailer the host<br/>declares admits (DEC_ADR_024)?"}
+       T -- yes --> X
+       T -- no --> V{"contains a<br/>plain value?"}
        V -- yes --> X["not a finding"]
        V -- no --> P{"does the text<br/>have a path?"}
        P -- "no: a commit message,<br/>a note, a value" --> F["a finding"]
@@ -1457,8 +1562,24 @@ So an entry is one of two kinds:
        D -- yes --> X
        D -- no --> F
 
-Six properties are deliberate:
+Seven properties are deliberate:
 
+- **The host's attribution trailer is not an allow entry** (DEC_ADR_024,
+  BUG_127). The host adapter declares the trailers it asks agents to append,
+  each a token and the whole shape of its value; for Claude Code that is
+  ``Claude-Session`` and a link to the host's own ``claude.ai/code/session_``
+  path. The CLI hands the declarations to the rule context, and
+  ``PrivacyScanner.scan_message`` skips a line only when it sits in the
+  message's trailer block (the last paragraph, not the subject, every line
+  ``Token: value``; with ``-m``, the last ``-m``), carries a declared token
+  spelled exactly, and its
+  value matches the declared shape whole. The lines are git's: a message
+  holding a line break git does not honour admits nothing. Nothing a project writes is
+  needed, and nothing reaches further: the same link in the body, after the
+  block, under another token or with more after the session id is a finding,
+  as is a forged link under the host's token, and a document, memory, report
+  or staged file is read as before. A store commit's message is still read
+  without the declarations (BUG_133).
 - **A scoped entry needs a place.** Text scanned without a path — a commit
   message, a handoff note, a guidelines verdict note, a value the oracle
   masks — is reached by plain values only. The sweep used to scan its commit
@@ -1637,10 +1758,11 @@ skip that misstates its own reason is the harder of the two to notice
 The third point: the review boundary
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``privacy.clean`` is named by six machines at that boundary — as ``session``'s
+``privacy.clean`` is named by seven machines at that boundary — as ``session``'s
 exit gate on ``reviewed``, and as the entry gate of the landing state
-``committed`` in ``tdd``, ``bugfix``, ``spec-first``, ``docs`` and ``chore`` — and for a
-long time it screened nothing in any of them. Which side of the edge it sits
+``committed`` in ``tdd``, ``bugfix``, ``spec-first``, ``docs``, ``docs-project``
+(ADR-015 D2) and ``chore`` — and for a long time it screened nothing in the
+six that predate ``docs-project``. Which side of the edge it sits
 on moved with BUG_037 and does not matter here: both are evaluated on a
 TRANSITION, and a transition evaluates a rule with an **empty payload** — no
 tool name, no edit, no command that could be a commit. Every route the gate
@@ -2133,6 +2255,24 @@ line. The steps are checked before ``enforcement.rules``, where a
 ``step.<name>`` key is known once its step is declared and refused like any
 unknown id otherwise. ``INVARIANT_DISABLE`` may name a declared step.
 
+**Built (:need:`ADR-021 <DEC_ADR_021>` D6, D8, increment 3).**
+``enforcement.rulings`` is null or a mapping, and each entry is refused,
+naming it, for: a value that is not a mapping; a key other than ``by``,
+``date`` and ``reason``; one of the three missing or empty; a ``by`` that
+is not one line; a ``reason`` that is not text; a ``date`` that is not a
+date (a YAML date is read as its ISO text). A ruling whose key the
+configuration does not loosen is refused as stale, naming it, and so is a
+key that is no rule, ``profile`` or ``machine.<name>``: the record cannot
+drift from the configuration. A ruling set at the user level is refused.
+A loosening with no ruling is refused, naming ``invariant rules loosen``
+with its key and level, once any level of the project carries
+``enforcement.rulings``, which ``rules loosen`` and ``rules carry-over``
+write (an empty mapping counts). Until then it loads, for one release
+(ruling 5, D8): ``Manifest.unruled`` holds it, ``doctor``'s ``rulings`` row
+warns and ``rules list`` names it, each pointing at ``invariant rules
+carry-over``, and nothing is printed at load, since a manifest is read on
+every command. The next release removes the warning and refuses.
+
 **Built (:need:`ADR-017 <DEC_ADR_017>` D6, increment 2).** Every answer the
 questionnaire takes is validated by this same ``validate``, as the
 configuration it would produce (``core/questionnaire.check``, through a
@@ -2163,7 +2303,9 @@ whose ``docs.needs.state`` is ``enforced``, ``docs.builds_strict``,
 has it in every project, because the change it refuses leaves the project
 migrating. A level at any config level setting one lower (``ask``, ``warn`` or
 ``off``) is refused at load, once ``docs.needs`` itself has loaded, naming ruling 1,
-the level that set it and the routes that remain. This removes ADR-001
+the level that set it and the routes that remain. A ruling does not lower
+one either (ADR-021 ruling 1), and the refusal says so when one is recorded
+for it. This removes ADR-001
 D25's permanent route for those rules only; ``invariant override``,
 ``pipeline advance --force --reason``, ``invariant standdown`` and ``invariant uninstall`` stand. Neither environment escape is a refusal: ``INVARIANT_PROFILE``
 does not lower a floored rule, and ``INVARIANT_DISABLE`` naming one is ignored
@@ -2389,9 +2531,12 @@ by its identity, or by its local ID when the pointer names it; otherwise the
 lookup refuses, naming the store, the identity and the line to add, so a
 wrong link cannot make one project's gates read another project's records.
 While a ``store migrate`` is under way (ADR-014 increment 7a), the refusal
-also names the session moving the project and the commands that finish it,
-read from ``<state root>/migrate.json`` (``core/storemigrate.marker_note``):
-mid-move, a main checkout may find neither home (ADR-020 D3).
+also names the session moving the project, its worktree and the commands that
+finish it, read from ``<state root>/migrate.json``
+(``core/storemigrate.marker_note``): mid-way through ``--to repo``, the main
+checkout finds neither home (ADR-020 D3). ``session merge`` and ``session
+resume`` run there all the same, reading the project from the session's
+worktree (increment 7b).
 
 The levels of a store project (D3), later wins:
 
@@ -2679,9 +2824,18 @@ measure.
   documents to write. ``test_scope_of`` is "full" with nothing after the
   command, "scoped" with filenames alone, and doubt for anything else.
 
-**Accepted, not yet built (:need:`ADR-015 <DEC_ADR_015>` D2 to D5).** The ``docs-project``
-lane and ``doctor``'s command rows per lane (D2, increment 2 of ADR-015), and
-the derivation of commands from CI (D3, D4). Adapters also gain
+**The lane (:need:`ADR-015 <DEC_ADR_015>` D2, built in its increment 2).** A
+documentation repository runs ``methodology.pipeline: docs-project``, a shipped
+lane: ``drafting``, ``reviewing`` and ``committed``, landing on ``test.all_pass``
+(the test above) and ``privacy.clean``, with no red test, no coverage and no
+build step (rulings 5 and 6; ``state_model.rst``). ``doctor``'s command rows
+follow the lanes the project's sessions can run, ``commands.build`` is
+required by none of them, and an unset ``commands.coverage`` passes where
+every declared adapter declares coverage not applicable (``cli.rst``,
+``doctor``).
+
+**Accepted, not yet built (:need:`ADR-015 <DEC_ADR_015>` D3 to D5).** The
+derivation of commands from CI (D3, D4). Adapters also gain
 ``related_selectors(changed)`` and ``global_inputs()`` for the measured cadence
 (D5, increment 4). The docs project of ADR-018 is built by ``invariant docs build`` from its own environment, never through ``commands.*`` (ADR-018 D3,
 D5; built in increment 3).
@@ -2740,8 +2894,13 @@ Markdown to rST converts it through the docs environment's pandoc, and rST
 to Markdown is refused for any item carrying a body (cli.md, "Work items").
 
 A backend implements read, write, list, transition-persist, ``add`` (a new item,
-with an optional placement it honours or refuses) and ``taken_ids`` (every id it
-has spent, closed store included). The lifecycle FSM, and the rules for what
+with an optional placement it honours or refuses), ``taken_ids`` (every id it
+has spent, closed store included) and ``field_refusal`` (why it cannot hold a
+field name, if it cannot; ``item set`` asks before it writes,
+:need:`DEC_ADR_023_D1`). ``markdown`` and ``json`` hold any plain name;
+``sphinx_needs`` refuses the options the need directive itself owns (``tags``,
+``links``, ``hide``, ``delete`` and the rest the docs project's ``conf.py`` never
+declares as fields), because written there they would act on the need. The lifecycle FSM, and the rules for what
 ``item new`` may set, live above it in ``domains/workitem``, so switching backends
 does not change item semantics. The id scheme (``items.id_strategy``) is shared
 by every backend in ``core/items``, and reads ``taken_ids``.
@@ -2755,6 +2914,16 @@ lines added are the transition's history rows (IDEA_019, BUG_073). A ruling's
 ``ruling`` and ``evidence`` keys travel in the history rows, so they are kept
 wherever history is: in the markdown frontmatter, the JSON document, and the
 ``sphinx_needs`` entry's history block (below).
+
+**A field change is a row of its own kind** (IDEA_051,
+:need:`DEC_ADR_023_D2`). ``item set`` writes the changed fields and one row
+per field — ``field``, ``was``, ``now``, ``reason``, ``date`` and, when given,
+``evidence`` — and, like a transition, nothing else the item holds: not the
+status, the residue, the title or the body. The row has no ``from`` and
+``to``, and every backend stores it as it stores any row. On ``sphinx_needs``
+the save is the same patch: the changed option's lines, a removed option's
+lines or one inserted option line, plus the history block, and every other
+byte of the file is unchanged.
 
 The ids a store has spent, and the closed store
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2841,8 +3010,9 @@ to that option, the title or the body; a line the read cannot classify belongs
 to none of them and is never touched. Before writing, the backend re-reads its
 own result: if the entry is not found again, the entry count moved, or the
 title, status or a field would read back differently from the item being
-saved, it refuses with an error and the file is unchanged — a stray line is
-worse than no write. An item without an id is refused outright. A value or
+saved, or a field the item no longer holds would still read back (an
+``item set --unset``, :need:`DEC_ADR_023_D2`), it refuses with an error and
+the file is unchanged — a stray line is worse than no write. An item without an id is refused outright. A value or
 title holding a line break is written on one line, joined the way a re-read
 joins a wrapped value.
 
@@ -2898,7 +3068,8 @@ json backends have no sections and refuse either option.
 **History is a comment at the end of the directive body** (BUG_073; the
 user-approved option B of 2026-10-21). The rows are the same ones the other
 backends store — ``from``, ``to``, ``reason``, ``forced``, and on a ruled transition
-``ruling``, ``evidence`` and ``intermediate`` — written as YAML, indented one step
+``ruling``, ``evidence`` and ``intermediate``; a field row's ``field``, ``was``,
+``now``, ``reason``, ``date`` and ``evidence`` — written as YAML, indented one step
 under a marker line at the directive's own option column, after a blank line:
 
 .. code:: rst

@@ -1,8 +1,10 @@
 # Installation
 
 `invariant` is one command-line program, installed once per machine. Each
-project then adopts it with `invariant init`, which writes a few committed
-files into the project's `.claude/` directory and nothing else.
+project then adopts it with `invariant init`, which by default keeps the
+project's configuration in a store outside the repository and writes nothing
+into it; `invariant init --home repo` commits it into the project's
+`.claude/` directory instead, to share it.
 
 ## Requirements
 
@@ -54,16 +56,20 @@ The shims will still find the binary there, but you will want it for yourself:
 ```bash
 cd <project>
 invariant init [--ecosystem python|node|swift|dart|flutter|sphinx|generic] [--profile standard|strict|loose]
-git add -A && git commit -m "adopt invariant"
+               [--home store|repo] [--store <path>] [--host-install]
 invariant doctor
 ```
 
-What `init` writes, and why each file is committed, is in the
-[Quickstart](quickstart.md#1-adopt-it-into-a-project). Then start a **new**
-Claude Code session in that project: hooks are read at session start.
+What `init` writes, in the store home (the default) and in the repository
+home (`--home repo`, whose files you then commit), is in the
+[Quickstart](quickstart.md#1-adopt-it-into-a-project). If you installed the
+hooks (`--host-install`, or `invariant hooks install` and `invariant agents
+install` later), start a **new** Claude Code session in that project: hooks
+are read at session start.
 
-Run `init` once per repository, not per worktree — the configuration lives at
-the repository root and every linked worktree checks it out.
+Run `init` once per repository, not per worktree. A store project is found
+from every linked worktree through its link; an in-repo configuration lives
+at the repository root and every linked worktree checks it out.
 
 ### How the hooks find the CLI
 

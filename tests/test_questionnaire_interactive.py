@@ -165,7 +165,7 @@ def interactive(monkeypatch):
 
 
 def init(capsys, *extra: str) -> tuple[int, str]:
-    return run(capsys, "init", "--host-install", "--name", "toy", *extra)
+    return run(capsys, "init", "--home", "repo", "--host-install", "--name", "toy", *extra)
 
 
 def said(keyed: Keyed) -> str:
@@ -578,10 +578,10 @@ class TestWriteRepoSettings:
 
 class TestProfileFlag:
     def test_no_parser_default(self):
-        assert build_parser().parse_args(["init"]).profile is None
+        assert build_parser().parse_args(["init", "--home", "repo"]).profile is None
 
     def test_given_it_is_parsed(self):
-        assert build_parser().parse_args(["init", "--profile", "strict"]).profile == "strict"
+        assert build_parser().parse_args(["init", "--home", "repo", "--profile", "strict"]).profile == "strict"
 
 
 # -- D3 to D5 through a scripted prompter ---------------------------------------
@@ -733,7 +733,7 @@ class TestInteractiveInit:
     def test_settings_by_hand_is_a_json_field(self, toy, capsys, interactive):
         write_user("# mine\nversion: 1\n")
         interactive(level=["user"], profile=["strict"])
-        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--home", "repo", "--host-install", "--name", "toy")
         assert code == 0, text
         (entry,) = json.loads(text)["settings_by_hand"]
         assert entry["path"] == str(user_config_path())
@@ -742,21 +742,21 @@ class TestInteractiveInit:
     def test_without_the_questionnaire_settings_by_hand_is_empty(self, toy, capsys, monkeypatch):
         monkeypatch.setattr(cli_main, "_init_prompter", lambda args: None)
         monkeypatch.setattr(cli_main, "_questionnaire_prompter", lambda args: None)
-        code, text = run(capsys, "--json", "init", "--host-install", "--name", "toy")
+        code, text = run(capsys, "--json", "init", "--home", "repo", "--host-install", "--name", "toy")
         assert code == 0, text
         assert json.loads(text)["settings_by_hand"] == []
 
 
 class TestTheSeams:
     def test_the_questionnaire_seam_answers_none_without_a_terminal(self):
-        args = build_parser().parse_args(["init"])
+        args = build_parser().parse_args(["init", "--home", "repo"])
         assert cli_main._questionnaire_prompter(args) is None
 
     def test_and_a_terminal_prompter_on_one(self, monkeypatch):
         from invariant.cli import prompts
 
         monkeypatch.setattr(prompts, "interactive", lambda args: True)
-        args = build_parser().parse_args(["init"])
+        args = build_parser().parse_args(["init", "--home", "repo"])
         assert isinstance(cli_main._questionnaire_prompter(args), prompts.TerminalPrompter)
 
 

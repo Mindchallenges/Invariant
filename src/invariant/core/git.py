@@ -633,27 +633,119 @@ def tree_signature(cwd: Path) -> tuple[str, str] | None:
     files, so a run recorded over one counts for the other, and a run from
     before the last edit, committed or not, does not. ``None`` when git
     cannot answer: no repository, or no commit yet.
-    """
-    import hashlib
 
+    It also covers what those two reads leave out (ADR-026 D1, a receipt never
+    vouches for content it did not hash): an untracked file's executable bit,
+    an untracked symlink's target, the contents of a submodule or an embedded
+    repository (signed the same way, recursively), and a tracked file git is
+    told not to look at (``--assume-unchanged``, ``--skip-worktree``), hashed
+    from disk. A file ``.gitignore`` names stays out, and so does the index:
+    staging changes no file on disk. A plain untracked file hashes as it
+    always has, so a record taken before these were added still matches.
+    """
     commit = resolve_commit(cwd, "HEAD")
     if commit is None:
         return None
-    code, diff = _run_bytes(["diff", "HEAD", "--binary", "--no-color", "--no-ext-diff"], cwd)
-    if code != 0:
-        return None
+    digest = _uncommitted_digest(Path(cwd), commit)
+    return None if digest is None else (commit, digest)
+
+
+def _uncommitted_digest(cwd: Path, commit: str | None) -> str | None:
+    """The digest half of :func:`tree_signature`; ``None`` when git cannot
+    answer. ``commit`` is ``None`` for a repository with no commit yet, which
+    only an embedded repository is allowed to be."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    if commit is not None:
+        code, diff = _run_bytes(
+            ["diff", "HEAD", "--binary", "--no-color", "--no-ext-diff"], cwd
+        )
+        if code != 0:
+            return None
+        digest.update(diff)
     code, listed = _run_bytes(["ls-files", "--others", "--exclude-standard", "-z"], cwd)
     if code != 0:
         return None
-    digest = hashlib.sha256(diff)
     for rel in sorted(_nul_separated(listed)):
+        entry = _entry_digest(cwd / rel)
+        if entry is None:
+            return None
         digest.update(b"\0untracked\0" + rel.encode("utf-8", "surrogateescape") + b"\0")
-        path = Path(cwd) / rel
+        digest.update(entry)
+    code, tagged = _run_bytes(["ls-files", "-v", "-z"], cwd)
+    if code != 0:
+        return None
+    hidden = sorted(
+        rel[2:]
+        for rel in _nul_separated(tagged)
+        if len(rel) > 2 and (rel[0].islower() or rel[0] == "S")
+    )
+    for rel in hidden:
+        entry = _entry_digest(cwd / rel)
+        if entry is None:
+            return None
+        digest.update(b"\0hidden\0" + rel.encode("utf-8", "surrogateescape") + b"\0")
+        digest.update(entry)
+    code, staged = _run_bytes(["ls-files", "--stage", "-z"], cwd)
+    if code != 0:
+        return None
+    for line in sorted(_nul_separated(staged)):
+        if not line.startswith("160000 ") or "\t" not in line:
+            continue
+        rel = line.split("\t", 1)[1]
+        if not (cwd / rel / ".git").exists():
+            continue  # not checked out: git diff HEAD already names its commit
+        inner = _nested_digest(cwd / rel)
+        if inner is None:
+            return None
+        digest.update(b"\0submodule\0" + rel.encode("utf-8", "surrogateescape") + b"\0")
+        digest.update(inner)
+    return digest.hexdigest()
+
+
+def _nested_digest(path: Path) -> bytes | None:
+    """A submodule's or an embedded repository's state: its commit and digest."""
+    commit = resolve_commit(path, "HEAD")
+    inner = _uncommitted_digest(path, commit)
+    if inner is None:
+        return None
+    return f"{commit or ''}\0{inner}".encode()
+
+
+def _entry_digest(path: Path) -> bytes | None:
+    """One file as the signature hashes it, without following a symlink.
+
+    A plain file is the SHA-256 of its content, exactly as before; an
+    executable one is marked; a symlink is its target; a directory, which
+    ``ls-files --others`` lists only for an embedded repository, is that
+    repository's own signature. ``None`` for a directory that is no
+    repository, which no reading here can sign.
+    """
+    import hashlib
+    import stat
+
+    try:
+        st = path.lstat()
+    except OSError:
+        return b"absent"
+    if stat.S_ISLNK(st.st_mode):
         try:
-            digest.update(hashlib.sha256(path.read_bytes()).digest())
+            return b"symlink\0" + os.fsencode(os.readlink(path))
         except OSError:
-            digest.update(b"unreadable")
-    return commit, digest.hexdigest()
+            return b"unreadable"
+    if stat.S_ISDIR(st.st_mode):
+        if not (path / ".git").exists():
+            return None
+        inner = _nested_digest(path)
+        return None if inner is None else b"repository\0" + inner
+    try:
+        content = hashlib.sha256(path.read_bytes()).digest()
+    except OSError:
+        return b"unreadable"
+    if st.st_mode & 0o111:
+        return b"executable\0" + content
+    return content
 
 
 def unpushed_files(cwd: Path) -> list[Path] | None:
@@ -783,18 +875,23 @@ def tree_paths(cwd: Path, ref: str, directory: str) -> list[str] | None:
     return [line for line in out.splitlines() if line.strip()]
 
 
-def commit_only(cwd: Path, paths: list[str], message: str) -> tuple[bool, str]:
+def commit_only(
+    cwd: Path, paths: list[str], message: str, *, force: bool = False
+) -> tuple[bool, str]:
     """Commit exactly ``paths`` and nothing else that may be staged. A WRITE.
 
     One of this module's writes, each named as one (ADR-010 D9): the sweep commits
     its own record and the items it filed. The paths are added first, because
     ``--only`` refuses a path git does not yet track; ``--only`` then commits
     those paths alone, leaving anything else in the index where it was. It
-    never pushes. Returns ``(committed, git's own output)``.
+    never pushes. ``force`` adds a path git ignores, which ``store migrate
+    --to repo`` commits: the local wiring it makes committed is listed in
+    ``.git/info/exclude`` until the move lands (ADR-020 D3). Returns
+    ``(committed, git's own output)``.
     """
     if not paths:
         return False, "nothing to commit"
-    code, out, err = _run(["add", "--", *paths], cwd)
+    code, out, err = _run(["add", *(["--force"] if force else []), "--", *paths], cwd)
     if code != 0:
         return False, err or out
     code, out, err = _run(["commit", "--only", "-m", message, "--", *paths], cwd)

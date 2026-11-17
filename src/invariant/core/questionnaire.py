@@ -1,8 +1,8 @@
 """The configuration questionnaire: its catalogue and what each question resolves to.
 
 ADR-017 D1 and D2. The catalogue is data, ``data/questionnaire/catalogue.yaml``:
-sections of questions, each over one manifest key, and three steps the engine
-asks by code (``commands``, ``docs``, ``store``). This module loads and checks
+sections of questions, each over one manifest key, and four steps the engine
+asks by code (``home``, ``commands``, ``docs``, ``store``). This module loads and checks
 it, and resolves every question against a project's configuration: its
 default (the value the configuration resolves to now), that value's
 provenance label as ``config show`` prints it, its current value at the
@@ -61,8 +61,24 @@ KINDS = ("choice", "text", "path", "count", "percent", "bool", "list", "command"
 #: The kinds that take choices, fixed or from a source.
 _CHOICE_KINDS = ("choice", "list")
 
-#: The steps the engine ships, each a handler in code (D1).
-STEPS = ("commands", "docs", "store")
+#: The steps the engine ships, each a handler in code (D1). ``home`` is
+#: ADR-020 D4's: where the configuration lives, asked first.
+STEPS = ("home", "commands", "docs", "store")
+
+#: The homes ``home:location`` offers, the default first (ADR-020 D1, D4).
+HOMES = ("store", "repo")
+
+#: What each home is, as the question offers it (ADR-020 D4).
+HOME_DESCRIPTIONS = {
+    "store": (
+        "outside the repository, in a store on this machine; nothing of "
+        "invariant's is committed"
+    ),
+    "repo": (
+        "committed in the repository: shared with teammates, CI and "
+        "pull-request review"
+    ),
+}
 
 #: The named sources a question's choices may come from (D1).
 CHOICE_SOURCES = (
@@ -459,6 +475,8 @@ class _Resolver:
         self.level = level
 
     def questions(self, section: str, entry: Entry) -> list[Question]:
+        if entry.id == "home":
+            return [home_question(self.manifest, section)]
         if entry.id == "commands":
             return self._commands(section)
         if entry.id == "docs":
@@ -569,6 +587,40 @@ class _Resolver:
         if source == "privacy_patterns":
             return tuple(PATTERNS)
         return RECORD_LOCATIONS[str(entry.key).split(".", 1)[1]]
+
+
+def home_of(manifest: Manifest) -> str:
+    """Where ``manifest``'s configuration lives, as the report shows it:
+    ``store:<name> (<path>)`` or ``repo (<file>)`` (ADR-020 D4)."""
+    store = manifest.store
+    if store is not None:
+        return f"{store.label} ({store.root})"
+    try:
+        spelled = manifest.path.relative_to(manifest.root).as_posix()
+    except ValueError:
+        spelled = str(manifest.path)
+    return f"repo ({spelled})"
+
+
+def home_question(manifest: Manifest, section: str = "home") -> Question:
+    """``home:location`` resolved against ``manifest`` (ADR-020 D4): where its
+    configuration lives now. A step, not a key: the config levels answer it
+    (ADR-014 D1), so it writes none."""
+    store = manifest.store
+    return Question(
+        id="home:location",
+        section=section,
+        key=None,
+        kind="choice",
+        prompt="Where does this project's invariant configuration live?",
+        choices=HOMES,
+        placeholders=(),
+        default="store" if store is not None else "repo",
+        provenance=store.label if store is not None else "default",
+        current=None,
+        set_at_target=False,
+        allowed=(),
+    )
 
 
 # -- routing (D4) ----------------------------------------------------------------
@@ -932,16 +984,20 @@ def core_report(catalogue: Catalogue, manifest: Manifest) -> list[Question]:
     return rows
 
 
-def render_report(rows: Sequence[Question]) -> str:
-    """The text `init` prints after its report (D9)."""
-    width = max((len(str(q.key)) for q in rows), default=0)
+def render_report(rows: Sequence[Question], after: Sequence[str] = ()) -> str:
+    """The text `init` prints after its report (D9). A row over no key, the
+    ``home`` step's (ADR-020 D4), is named by its section; ``after`` are the
+    lines between the rows and the closing one."""
+    names = [q.key or q.section for q in rows]
+    width = max((len(name) for name in names), default=0)
     values = [shown(q.default) for q in rows]
     value_width = max((len(v) for v in values), default=0)
     lines = ["configuration (core questions):"]
     lines += [
-        f"  {q.key:<{width}}  {value:<{value_width}}  {q.provenance}"
-        for q, value in zip(rows, values, strict=True)
+        f"  {name:<{width}}  {value:<{value_width}}  {q.provenance}"
+        for name, q, value in zip(names, rows, values, strict=True)
     ]
+    lines.extend(after)
     lines.append("run 'invariant configure' to change them")
     return "\n".join(lines)
 

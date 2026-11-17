@@ -53,6 +53,7 @@ class Backend(Protocol):
     ) -> None: ...
     def taken_ids(self) -> dict[str, Path]: ...
     def next_id(self, item_type: str, title: str = "") -> str: ...
+    def field_refusal(self, name: str) -> str | None: ...
 
 
 #: The markup an item body is written in: what ``item migrate`` compares to
@@ -97,6 +98,14 @@ class _Store:
 
     def save(self, item: Item) -> None:  # pragma: no cover - overridden
         raise NotImplementedError
+
+    def field_refusal(self, name: str) -> str | None:
+        """Why this store cannot hold ``name`` as an item field, if it cannot.
+
+        ``item set`` asks before it writes (DEC_ADR_023_D1). A file store holds
+        any plain name; a format with names of its own says so.
+        """
+        return None
 
     def taken_ids(self) -> dict[str, Path]:
         """Every id already spent, and the store that holds it.
@@ -267,6 +276,18 @@ ROLE_RE = re.compile(r"^:[\w.+-]+(?::[\w.+-]+)*:`")
 
 _RESERVED = ("id", "status", "residue")
 _INDENT = "   "
+
+#: The options the need directive itself owns. Written as an item field, one
+#: would not be a field: ``hide`` hides the need, ``delete`` drops it, ``tags``
+#: and ``links`` are sphinx-needs' own. The docs project's ``conf.py`` never
+#: declares them as fields for the same reason.
+_DIRECTIVE_OPTIONS = frozenset(
+    {
+        "tags", "links", "collapse", "delete", "hide", "jinja_content", "layout",
+        "style", "template", "pre_template", "post_template", "constraints",
+        "title_from_content",
+    }
+)
 
 #: The line that opens an entry's history: a reStructuredText comment inside
 #: the directive body, its rows the indented YAML under it (BUG_073). It must
@@ -741,6 +762,14 @@ class SphinxNeedsBackend(_Store):
     def save(self, item: Item) -> None:
         self._store(item)
 
+    def field_refusal(self, name: str) -> str | None:
+        if name in _DIRECTIVE_OPTIONS:
+            return (
+                f":{name}: is an option of the need directive itself, not an item "
+                "field; sphinx-needs would act on it"
+            )
+        return None
+
     def add(
         self, item: Item, section: str | None = None, after: str | None = None
     ) -> None:
@@ -805,11 +834,14 @@ class SphinxNeedsBackend(_Store):
         else:
             had = _wanted_options(entry.item())
             wanted = _wanted_options(item)
+            # A field the item no longer holds must read back absent too: a
+            # removal is a change like any other (DEC_ADR_023_D2).
+            gone = [n for n in had if n not in wanted and n not in _RESERVED]
             wrong = [
                 name
                 for name in ["status", *item.fields]
                 if name in wanted and had.get(name) != wanted[name]
-            ]
+            ] + gone
             if entry.title != _one_line(item.title):
                 wrong.insert(0, "title")
             if entry.history != item.history:
@@ -1009,6 +1041,9 @@ class NullBackend:
 
     def taken_ids(self) -> dict[str, Path]:
         return {}
+
+    def field_refusal(self, name: str) -> str | None:
+        return None
 
     def next_id(self, item_type: str, title: str = "") -> str:
         raise UsageError("the work-item domain is disabled")

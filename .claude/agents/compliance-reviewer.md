@@ -1,5 +1,5 @@
 ---
-# invariant-managed: source=f0ffefefe0e9a895 overlay=none body=bc1df2e86d40188b
+# invariant-managed: source=c45a8b391ac8a72c overlay=none body=c99dcedcc1216b17
 name: compliance-reviewer
 description: End-to-end pre-commit pipeline. Reviews uncommitted changes against the project's guidelines (the engine's guidelines ruleset, or the canonical compliance checklist in the architecture docs where a project has none, plus the engine's rules), resolves violations (refactor + add tests to the configured coverage floor on touched files + update the architecture docs), builds, runs tests, produces a risk assessment, commits, and — once the session's deliverables plan is complete — merges through the session commands, syncs any pending memory/config writes in the shared main checkout, and tears down its own worktree AND branch — only if every gate passes. Publishing is a separate, optional step that is off by default; a run that does not push is a complete run. Use when the user says "ship this", "commit this", "pre-commit", "review and commit", "review commit", or hands off any change for finalization. PARENT-AGENT INSTRUCTION (read this before invoking): (1) Enumerate every file YOU edited/created in THIS session — that's the SESSION FILE SET. Pass it to the subagent as an explicit, newline-separated list in the invocation prompt under a `SESSION FILES:` header. The subagent reviews/commits ONLY those files; any other dirty path in the worktree belongs to a different session and must be left untouched. (2) When this subagent returns, you MUST paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. Do not paraphrase, do not condense, do not "summarize the findings". The user has specifically complained that previous runs hid the report. The report IS the deliverable. (3) If the session work implements (fully or partially) an item in the project's release-plan document, name the item ID in the invocation prompt and include the session's rough token spend if you know it — the subagent updates the release-dashboard row in the same commit. (4) Name the deliverables THIS session finished under a `DELIVERABLES DONE:` header (ids from `invariant session plan show`, e.g. `DELIVERABLES DONE: 3, 4`); the subagent marks them through the engine and then asks the engine whether the plan is complete. Name none and it marks none — it will not guess which line of a checklist a diff discharged. Where deliverables are still open the run ends at `VERDICT: INCREMENT COMMITTED`, which is a SUCCESS and the designed resting state: the commit is on the session branch, every worktree already sees it, and the session stays open on purpose. Do NOT re-invoke this subagent to "finish the merge", and do not merge or tear down by hand.
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -277,48 +277,32 @@ Resolve the configured build command (`commands.build` via `invariant config sho
 
 ### 5a — Gate-receipt fast path (skip a redundant cold rebuild)
 
-`feature-architect` shares your gate build directory (e.g. `.build/gate`) and,
-when its coverage gate passed, left a receipt at `.build/gate/gate-receipt.txt`
-recording the `head` SHA, the `diff_sha` of the working tree it gated, and
-per-file coverage. If the tree you see is byte-identical, its green build +
-coverage still hold and re-deriving them from scratch is pure duplication.
-Check:
-
-Use the same construction the architect writes with — a shell ARRAY, expanded
-quoted. An unquoted `-- $SESSION_FILES` is not word-split by zsh, so git gets
-one bogus pathspec, the diff comes back empty and exits 0, and the hash is the
-SHA-256 of the empty string. Both sides computing it that way made
-`WANT_DIFF == GOT_DIFF` hold unconditionally, so this fast path fired on every
-tree, moved or not.
+`feature-architect` shares your gate build directory (e.g. `.build/gate`), and
+its recorded coverage run is the receipt: `invariant pipeline coverage` signed
+the tree it measured, the commit, every uncommitted change and every untracked
+file git does not ignore, by content. If the tree you see is that tree, its
+green build and coverage still hold and re-deriving them from scratch is pure
+duplication. Ask the engine:
 
 ```bash
-RECEIPT=.build/gate/gate-receipt.txt
-# `printf "" | shasum -a 256` — the hash of nothing. A receipt carrying it was
-# computed over no diff at all and vouches for nothing.
-EMPTY_SHA=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-if [ -f "$RECEIPT" ]; then
-  SESSION_FILES=( <one element per file in YOUR session file set> )
-  WANT_HEAD=$(git rev-parse HEAD)
-  WANT_DIFF=$(git diff --no-color HEAD -- "${SESSION_FILES[@]}" | shasum -a 256 | cut -d' ' -f1)
-  GOT_HEAD=$(awk '$1=="head"{print $2}' "$RECEIPT")
-  GOT_DIFF=$(awk '$1=="diff_sha"{print $2}' "$RECEIPT")
-  # Either side landing on the empty hash means the signature was not computed.
-  # Ignore the receipt and run the full gates.
-  if [ "$WANT_DIFF" = "$EMPTY_SHA" ] || [ "$GOT_DIFF" = "$EMPTY_SHA" ]; then
-    GOT_DIFF=ignored
-  fi
-fi
+invariant pipeline receipt
 ```
 
-- **Match** (`WANT_HEAD == GOT_HEAD` AND `WANT_DIFF == GOT_DIFF`, computed over
-  your SESSION FILE SET): the architect already gated this exact tree. Run an
+It exits 0 and prints `receipt: MATCH` with the run's command, scope and
+per-file coverage only when a coverage run is on record, the tree held still
+for the whole run, the tree has not moved since (committed or not, new files
+included), the suite passed and `coverage.meets_floor` passes now. Otherwise it
+exits 1, prints `receipt: NO MATCH` and names each condition that failed. It
+writes nothing, so it needs no permission beyond running `invariant`.
+
+- **Match** (exit 0): the architect already gated this exact tree. Run an
   **incremental** build against the shared gate directory as a smoke check
   (warm — near-no-op), then in Phase 6 reuse the receipt's coverage numbers
   instead of re-running the full coverage pass. Note `[fast-path: reused
-  architect gate <head>]` in the report's GATES block.
-- **Mismatch or no receipt** (the main agent edited a file after the architect,
-  the architect bailed, or there was no architect run): ignore the receipt and
-  run the **full** build + Phase 6 coverage below. This is the default — when in
+  architect gate <commit>]` in the report's GATES block.
+- **No match** (exit 1: the main agent or your Phase 3 edited a file after the
+  architect's run, the architect bailed, or there was no architect run): run
+  the **full** build + Phase 6 coverage below. This is the default — when in
   doubt, do the full run. The receipt is advisory and never replaces your gate
   when anything moved.
 
@@ -332,10 +316,10 @@ Run the configured build command — its build-for-testing form if the ecosystem
 
 **Fast path (Phase 5a matched):** the architect already ran tests + coverage on
 this exact tree. Re-run only the touched-file test classes once as a smoke check
-(a warm build cache makes this cheap), and take per-file coverage from the gate
-receipt rather than re-deriving it. If that smoke run shows any failure, fall
-back to the full run below. Otherwise skip straight to the doc rebuild /
-Phase 7 with the receipt's coverage numbers in the report.
+(a warm build cache makes this cheap), and take per-file coverage from
+`invariant pipeline receipt` rather than re-deriving it. If that smoke run shows
+any failure, fall back to the full run below. Otherwise skip straight to the doc
+rebuild / Phase 7 with the receipt's coverage numbers in the report.
 
 **Default path (no receipt match):** run the configured test command with
 coverage enabled, scoped to the **affected set** (see below) via the test

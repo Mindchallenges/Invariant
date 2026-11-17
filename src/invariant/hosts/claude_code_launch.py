@@ -11,8 +11,9 @@ What Claude Code offers, and what it does not, decides the shape. Its CLI names
 a session (``--name``), enables Remote Control on it (``--remote-control
 [name]``) and takes the first prompt as a positional argument. It has no flag
 for the working directory and none for a new window, so those two are this
-module's: a shell line that changes into the project's main checkout and runs
-``claude``, typed into a new Terminal window by AppleScript.
+module's: a launch file that changes into the project's main checkout and runs
+``claude``, started by a shell line typed into a new Terminal window by
+AppleScript.
 
 **Quoting happens twice, and each layer has one owner.** The shell line is built
 with ``shlex`` — every argument quoted for a POSIX shell, so a note carrying
@@ -59,39 +60,55 @@ signals a process.
 line into the new window's tty before its shell has started line editing, and
 a tty in canonical mode holds at most ``MAX_CANON`` bytes of one line — 1024
 on macOS — so a long note was cut mid-quote and no ``claude`` ever ran. The
-plan writes a *launch file* instead: a three-line ``/bin/sh`` script holding
+plan writes a *launch file* instead: a short ``/bin/sh`` script holding
 the whole ``claude`` command, in a private directory outside the project
 (``launch_dir``, mode 0700, the file 0600). The typed line only names it —
-``cd <main> && exec env -u … INVARIANT_HANDOFF=<token> /bin/sh <launch file>``
+``exec env -u … INVARIANT_HANDOFF=<token> /bin/sh <launch file>``
 — so its length no longer depends on the note, and ``plan_launch`` refuses a
 line that would still not fit rather than let the tty cut it. The script
-removes itself first and then runs ``claude``, so the note is gone from disk
+removes itself first, enters the main checkout and then runs ``claude``, so
+the note is gone from disk
 the moment the successor holds it, and the note stays ONE positional argument
 quoted by ``shlex`` exactly as before. It is a file ``/bin/sh`` reads, not
 syntax the window's shell parses, so the line means the same in zsh, bash or
 fish. A file nobody ran — a launch that failed — is removed by the CLI, and
 any older than ``LAUNCH_FILE_TTL_SECONDS`` is swept on the next staging.
 
+**The launch file enters the checkout; the typed line carries no ``cd``
+(BUG_129, ADR-005 D8).** ``do script`` types the line before the window's
+shell has started, so a start-up step that reads the terminal (oh-my-zsh's
+update prompt runs ``read -r -k 1``) can eat its first characters. The line
+once began ``cd <main> &&``; with the ``c`` eaten, zsh ran oh-my-zsh's ``d``
+(``dirs``), which succeeds without moving, and ``claude`` started in the
+home directory. The line now begins with ``exec``, so one missing any of
+``exec`` names no command and runs nothing, and one missing more either
+fails or runs the launch file, whose ``cd -- <main> || …`` alone decides
+the directory. A checkout it cannot enter prints ``LAUNCH_NO_CHECKOUT`` and
+exits 1 without running ``claude``.
+
 **The window ends with Claude (IDEA_035).** The typed line ``exec``-s the
 launch shell, so the tab's own shell is replaced and nothing is left at a
 prompt once Claude exits: the window closes, or shows itself finished, by the
-user's Terminal profile. A ``cd`` that fails stops before the ``exec``, and
-that window keeps its prompt. The launch file runs ``claude`` as its child
+user's Terminal profile. The launch file runs ``claude`` as its child
 rather than ``exec``-ing it, so it can still speak after Claude: on a failure
 — a non-zero exit up to 128, not an ending by a signal such as the closer's
 SIGTERM — and only at a terminal, it prints ``LAUNCH_PAUSE`` and waits for
-Return, so a start-up error stays readable. Every path then exits 0, which a
-default profile ("close if the shell exited cleanly") reads as a window to
-close. The successor watch is unchanged: it finds ``claude`` by its flags,
-and the shell's own argv carries none. The by-hand line is never ``exec``-ed,
-because it is pasted into a shell that is already up.
+Return, so a start-up error stays readable. Every path that ran ``claude``
+then exits 0, which a default profile ("close if the shell exited cleanly")
+reads as a window to close. The successor watch finds ``claude`` by its
+flags, and the shell's own argv carries none. The by-hand line is never
+``exec``-ed, because it is pasted into a shell that is already up.
 
 **A launch counts only once a successor is seen alive.** Terminal accepting
 the script proves nothing about what the window then runs, so the CLI asks a
 ``SuccessorWatch`` — a third seam, beside the launcher and the closer — for a
 NEW process whose argv carries ``--name <slug>`` and ``--remote-control
-<slug>``, still alive ``SUCCESSOR_GRACE_SECONDS`` after it was first seen.
-Without one the handoff fails, and the launching host is never signalled.
+<slug>``, still alive ``SUCCESSOR_GRACE_SECONDS`` after it was first seen,
+and running in the main checkout (BUG_129): ``process_cwd`` reads its
+directory and ``same_directory`` compares it. One elsewhere, or one whose
+directory cannot be read, raises ``SuccessorNotPlaced``; it is named by its
+pid and left running, never signalled (ADR-005 D8). Without a placed
+successor the handoff fails, and the launching host is never signalled.
 
 **Three callers, one plan (ADR-009 D16).** ``session handoff``, the oracle
 dashboard's terminal step and ``oracle start-session`` all build their window
@@ -234,6 +251,10 @@ SUCCESSOR_POLL_SECONDS = 0.5
 #: Return (IDEA_035). ``%s`` is the exit status.
 LAUNCH_PAUSE = "claude exited with status %s. Press Return to close this window."
 
+#: What the launch file prints when it cannot enter the main checkout, and so
+#: runs no ``claude`` (BUG_129). ``%s`` is the checkout's path.
+LAUNCH_NO_CHECKOUT = "invariant: cannot enter the main checkout %s; claude was not started."
+
 
 @dataclass(frozen=True)
 class LaunchPlan:
@@ -252,10 +273,11 @@ class LaunchPlan:
     argv: tuple[str, ...]
     #: The directory the new session starts in — the main checkout.
     cwd: str
-    #: The line typed into the new window: ``cd <cwd> && exec env -u <marker>
-    #: ... [NAME=value ...] /bin/sh <launch_file>``, quoted for a POSIX shell.
-    #: It carries no note, so its length does not grow with one, and it
-    #: replaces the window's shell, so the window ends with Claude (IDEA_035).
+    #: The line typed into the new window: ``exec env -u <marker> ...
+    #: [NAME=value ...] /bin/sh <launch_file>``, quoted for a POSIX shell.
+    #: It carries no note, so its length does not grow with one; it replaces
+    #: the window's shell, so the window ends with Claude (IDEA_035); and it
+    #: carries no ``cd``, which the launch file does (BUG_129).
     shell_line: str
     #: The script ``osascript`` runs to type ``shell_line`` into a new window.
     applescript: str
@@ -423,23 +445,31 @@ def sweep_launch_files(path: Path, now: float | None = None) -> list[Path]:
     return removed
 
 
-def launch_script(launch_file: str, argv: tuple[str, ...]) -> str:
-    """The launch file: remove itself, run ``claude``, pause only on a failure.
+def launch_script(launch_file: str, argv: tuple[str, ...], cwd: Path | str) -> str:
+    """The launch file: remove itself, enter ``cwd``, run ``claude``, pause only on a failure.
 
     ``rm`` comes first, so the note leaves the disk before ``claude`` starts;
     ``/bin/sh`` already holds the file open and reads the rest from that open
-    file. The note is one ``shlex``-quoted positional argument, exactly as on
-    the typed line before BUG_075. ``claude`` is the shell's child, not its
-    replacement (IDEA_035): a non-zero exit up to 128, at a terminal, prints
-    :data:`LAUNCH_PAUSE` and waits for Return, so the window that ends with
-    Claude does not take a start-up error with it. A status above 128 is an
-    ending by a signal (the closer's SIGTERM, a closed window) and never
-    waits. The file always exits 0.
+    file. The file then changes into ``cwd`` ITSELF (BUG_129): the typed line
+    carries no ``cd``, so where ``claude`` starts never depends on that line
+    arriving whole. A ``cd`` that fails prints :data:`LAUNCH_NO_CHECKOUT` and
+    exits 1 without running ``claude``; the non-zero status is what keeps the
+    window and its message under a default Terminal profile. The note is one
+    ``shlex``-quoted positional argument, exactly as on the typed line before
+    BUG_075. ``claude`` is the shell's child, not its replacement (IDEA_035):
+    a non-zero exit up to 128, at a terminal, prints :data:`LAUNCH_PAUSE` and
+    waits for Return, so the window that ends with Claude does not take a
+    start-up error with it. A status above 128 is an ending by a signal (the
+    closer's SIGTERM, a closed window) and never waits. Every path that ran
+    ``claude`` exits 0.
     """
+    where = str(cwd)
+    refusal = shlex.quote(LAUNCH_NO_CHECKOUT % where)
     return "\n".join(
         [
             "#!/bin/sh",
             f"rm -f -- {shlex.quote(launch_file)}",
+            f"cd -- {shlex.quote(where)} || {{ printf '%s\\n' {refusal} >&2; exit 1; }}",
             shlex.join(argv),
             "status=$?",
             'if [ "$status" -ne 0 ] && [ "$status" -le 128 ] && [ -t 0 ]; then',
@@ -488,10 +518,19 @@ def plan_launch(
     means the same in whichever shell the window opens, and an unset name is
     not an error.
 
+    The typed line starts with ``exec`` and carries no ``cd`` (BUG_129): the
+    launch file enters ``cwd`` itself. ``do script`` types the line before the
+    window's shell has started, so a start-up step that reads the terminal
+    (an update prompt, a ``read`` in an rc file) can eat its first
+    characters; a line that has lost any of ``exec`` names no command and
+    runs nothing, where ``d <main> && …`` once ran ``claude`` in the home
+    directory. The by-hand line still starts with ``cd``: it is pasted into a
+    shell that is already up, where nothing eats it.
+
     ``stage`` writes the launch file. ``False`` builds a preview that writes
     nothing and names a file a real run would create. A typed line over
-    ``MAX_CANON`` — only a very long main-checkout path can make one now — is
-    refused before anything is written.
+    ``MAX_CANON`` — only a very long launch-directory path can make one now —
+    is refused before anything is written.
     """
     if note:
         require_prompt_is_not_a_flag(note)
@@ -500,11 +539,11 @@ def plan_launch(
     env = ((HANDOFF_ENV, token),) if token else ()
     unset = "".join(f"-u {marker} " for marker in LAUNCH_UNSET)
     assign = "".join(f"{key}={shlex.quote(value)} " for key, value in env)
-    into = f"cd {shlex.quote(str(cwd))} && "
-    by_hand = f"{into}env {unset}{assign}" + shlex.join(argv)
+    by_hand = f"cd {shlex.quote(str(cwd))} && env {unset}{assign}" + shlex.join(argv)
     # The typed line replaces the window's shell (IDEA_035); the by-hand line
-    # runs in a shell somebody is still using, so it never does.
-    prefix = f"{into}exec env {unset}{assign}"
+    # runs in a shell somebody is still using, so it never does. The typed
+    # line enters no directory: the launch file does (BUG_129).
+    prefix = f"exec env {unset}{assign}"
 
     # The preview path is exactly as long as the one ``mkstemp`` returns (its
     # random part is eight characters), so the length check below runs before
@@ -514,8 +553,8 @@ def plan_launch(
     if typed > MAX_CANON:
         raise InvariantError(
             f"the line typed into the new window would be {typed} bytes, and a "
-            f"terminal accepts {MAX_CANON}; the main checkout path is too long "
-            f"to launch from. Run it by hand:\n    {by_hand}"
+            f"terminal accepts {MAX_CANON}; the launch directory's path is too "
+            f"long to launch from. Run it by hand:\n    {by_hand}"
         )
     if stage:
         # mkstemp creates the file 0600 and exclusively: nobody else can have
@@ -524,11 +563,11 @@ def plan_launch(
             prefix="handoff-", suffix=".sh", dir=_private_launch_dir()
         )
         launch_file = Path(raw)
-        script = launch_script(raw, argv)
+        script = launch_script(raw, argv, cwd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(script)
     else:
-        script = launch_script(str(launch_file), argv)
+        script = launch_script(str(launch_file), argv, cwd)
     shell_line = prefix + shlex.join((LAUNCH_SHELL, str(launch_file)))
 
     applescript = "\n".join(
@@ -1304,21 +1343,70 @@ def successor_pids(table: str, name: str) -> set[int]:
     return found
 
 
+def same_directory(found: str, expected: Path | str) -> bool:
+    """Whether the directory ``found`` is ``expected``, the same one on disk.
+
+    Compared as files, so a symbolic link, ``/private/var`` against ``/var``
+    and a path spelled in another letter case on a case-insensitive volume
+    all count as the place they name. A path that cannot be read is compared
+    by its resolved spelling instead, which a missing directory never matches
+    an existing one by.
+    """
+    try:
+        return os.path.samefile(found, expected)
+    except OSError:
+        return os.path.realpath(found) == os.path.realpath(str(expected))
+
+
+class SuccessorNotPlaced(InvariantError):
+    """A live successor was found, but not proven to run in the main checkout (BUG_129).
+
+    ``where`` is the directory it runs in, or ``None`` when that could not be
+    read. Either way the launch has not succeeded: a successor counts only
+    where it was asked to start. Nothing is done to the process; ``pid``
+    names it so the person can find its window.
+    """
+
+    def __init__(self, pid: int, where: str | None, cwd: str) -> None:
+        self.pid = pid
+        self.where = where
+        self.cwd = cwd
+        if where is None:
+            what = (
+                f"a claude started (pid {pid}), but its working directory could "
+                f"not be read, so it is not proven to run in the main checkout {cwd}"
+            )
+        else:
+            what = (
+                f"a claude started (pid {pid}) in {where}, not in the main "
+                f"checkout {cwd}"
+            )
+        super().__init__(
+            f"{what}. It was left running: close its window if it is not where "
+            f"you want it."
+        )
+
+
 class SuccessorWatch(Protocol):
     """The seam that proves a successor started. A test passes a stub."""
 
     def running(self, name: str) -> set[int]: ...
 
-    def wait_for(self, name: str, exclude: set[int]) -> int | None: ...
+    def wait_for(self, name: str, exclude: set[int], *, cwd: str) -> int | None: ...
 
 
 class ProcessTableWatch:
-    """Finds the successor in the process table, by the flags it was given.
+    """Finds the successor in the process table, by its flags and its directory.
 
     ``running`` is read BEFORE the launch, so a session of the same name that
     was already up is never mistaken for the one just launched. ``wait_for``
     polls for a new one until ``timeout``, then waits ``grace`` and reads
-    again: only a process seen both times is a live successor.
+    again: only a process seen both times is a live successor. It then counts
+    only in ``cwd``, the main checkout (BUG_129): ``cwd_of`` (else
+    :func:`process_cwd`, looked up when asked) reads where it runs, and
+    :func:`same_directory` compares. A live successor elsewhere, or one whose
+    directory cannot be read, raises :class:`SuccessorNotPlaced`, so the
+    launch fails closed and nothing reads it as a handoff that worked.
     """
 
     def __init__(
@@ -1328,12 +1416,14 @@ class ProcessTableWatch:
         poll: float = SUCCESSOR_POLL_SECONDS,
         clock=time.monotonic,
         sleep=time.sleep,
+        cwd_of=None,
     ) -> None:
         self.timeout = timeout
         self.grace = grace
         self.poll = poll
         self.clock = clock
         self.sleep = sleep
+        self.cwd_of = cwd_of
 
     def table(self) -> str:
         try:
@@ -1350,7 +1440,7 @@ class ProcessTableWatch:
     def running(self, name: str) -> set[int]:
         return successor_pids(self.table(), name)
 
-    def wait_for(self, name: str, exclude: set[int]) -> int | None:
+    def wait_for(self, name: str, exclude: set[int], *, cwd: str) -> int | None:
         deadline = self.clock() + self.timeout
         while True:
             seen = self.running(name) - set(exclude)
@@ -1361,4 +1451,12 @@ class ProcessTableWatch:
             self.sleep(self.poll)
         self.sleep(self.grace)
         alive = seen & self.running(name)
-        return min(alive) if alive else None
+        if not alive:
+            return None
+        read = self.cwd_of if self.cwd_of is not None else process_cwd
+        places = {pid: read(pid) for pid in sorted(alive)}
+        for pid, where in places.items():
+            if where is not None and same_directory(where, cwd):
+                return pid
+        pid = min(places)
+        raise SuccessorNotPlaced(pid, places[pid], str(cwd))

@@ -202,6 +202,7 @@ class TestAgentRoleGates:
         "bugfix": {"agents.design_agent_ran", "agents.review_agent_ran"},
         "spec-first": {"agents.design_agent_ran", "agents.review_agent_ran"},
         "docs": {"agents.design_agent_ran", "agents.review_agent_ran"},
+        "docs-project": {"agents.design_agent_ran", "agents.review_agent_ran"},
         "chore": {"agents.review_agent_ran"},
         "none": set(),
     }

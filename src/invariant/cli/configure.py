@@ -84,9 +84,14 @@ def heading(question: questionnaire.Question) -> str:
     )
 
 
-def ask_level(prompter: Prompter, manifest: Manifest) -> str:
-    """D3.1: the level the answers go to, offered as the project has them."""
-    options = [(t, LEVEL_DESCRIPTIONS[t]) for t in questionnaire.targets(manifest)]
+def ask_level(prompter: Prompter, manifest: Manifest, exclude: Iterable[str] = ()) -> str:
+    """D3.1: the level the answers go to, offered as the project has them,
+    less ``exclude``: `init`'s store home does not offer `repo`, a pointer it
+    does not write (ADR-020 D4)."""
+    left = set(exclude)
+    options = [
+        (t, LEVEL_DESCRIPTIONS[t]) for t in questionnaire.targets(manifest) if t not in left
+    ]
     return prompter.choose(LEVEL_QUESTION, options, questionnaire.default_target(manifest))
 
 

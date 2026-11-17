@@ -1,5 +1,5 @@
 ---
-# invariant-managed: source=da141f2c130e7ec2 overlay=none body=5d4cffcfba207992
+# invariant-managed: source=64d5798f862d94ae overlay=none body=8707a2c2b1c77a3a
 name: feature-architect
 description: Design-and-build pipeline. Use this agent PROACTIVELY at the START of any coding task — designing a new feature, extending existing code, refactoring a subsystem, fixing a non-trivial bug, or writing code in general. Takes the task, reads the authoritative architecture docs FIRST (the docs-first gate, `docs.read_architecture`), plans the change against the dependency diagrams (not by file search), enforces the Boy-Scout rule on touched files (if you touch it you own it — refactor any pre-existing violation of the project's guidelines: the engine's ruleset, or the compliance checklist where there is none), drives the implementation with TDD to the configured coverage floor (`methodology.gates.coverage_min`) on every touched source file, and updates the architecture docs to keep the diagrams accurate. Bails early with a STOP report when the task needs UI design (a design-handoff prompt), an ADR-worthy decision, a cross-cutting refactor the user must scope, or a schema migration that needs explicit confirmation. DO NOT use for: trivial single-line edits the user has explicitly described in full, pure exploration / Q&A about the codebase, or post-coding pre-commit gating (use `compliance-reviewer` for that). PARENT-AGENT INSTRUCTION (read this before invoking): when this subagent returns, paste its final report block VERBATIM into the chat — wrapped in a fenced code block — before any summary of your own. The report IS the deliverable; the user wants to see the design decisions and the coverage numbers, not your paraphrase.
 tools: Bash, Read, Edit, Write, Grep, Glob
@@ -273,46 +273,34 @@ If a touched file is below the floor and doesn't match an exclusion: loop back t
 
 You and `compliance-reviewer` share one gate build directory (e.g. `.build/gate`
 under the repo — keep it out of version control), so its build is incremental on
-top of yours instead of a cold rebuild. Once coverage passes, write a receipt
-recording exactly what you gated so the reviewer can detect whether anything
-changed after you (e.g. the main agent edited a file post-handoff) and reuse
-your green build+coverage when nothing did.
+top of yours instead of a cold rebuild. What lets it also skip re-running your
+tests and coverage is the receipt, and the receipt is the engine's record of
+your coverage run: there is nothing for you to write.
 
-Build the file set as a shell ARRAY and expand it quoted. This is not a style
-preference: **zsh does not word-split an unquoted parameter**, so
-`-- $SESSION_FILES` hands git ONE bogus pathspec, the diff comes back empty,
-and `diff_sha` becomes the SHA-256 of the empty string whatever you changed.
-`git diff` exits 0 on a pathspec that matches nothing and prints no
-diagnostic, so nothing anywhere signals the failure. An array is correct in
-both bash and zsh and does not depend on knowing which shell the host runs.
+`invariant pipeline coverage` signs the tree it measures, before the run and
+after it: the commit, every uncommitted change and every untracked file git
+does not ignore, by content, so new, modified and deleted files all count.
+`invariant pipeline receipt` checks that record against the tree as it is now.
+It matches only when the coverage run is on record, the tree held still for the
+whole run, the tree has not moved since, the suite passed and
+`coverage.meets_floor` passes. It names each condition that does not hold.
+
+So make the recorded coverage run your last act on the tree. Every edit comes
+first, the Phase 7 doc changes and any `invariant docs decision new` page
+included; an edit after the run moves the tree and costs the reviewer its full
+run. Then confirm:
 
 ```bash
-SESSION_FILES=( <one touched source/test/doc file per element> )
-DIFF_SHA=$(git diff --no-color HEAD -- "${SESSION_FILES[@]}" | shasum -a 256 | cut -d' ' -f1)
-
-# A receipt over a non-empty file set with a zero-line diff is suspicious on
-# its face. This constant is `printf "" | shasum -a 256` — the hash of nothing.
-EMPTY_SHA=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-if [ "$DIFF_SHA" = "$EMPTY_SHA" ] && [ ${#SESSION_FILES[@]} -gt 0 ]; then
-  echo "NOT writing a receipt: the diff over ${#SESSION_FILES[@]} changed file(s) hashed empty"
-else
-  {
-    echo "head $(git rev-parse HEAD)"
-    echo "diff_sha $DIFF_SHA"
-    echo "coverage <File1>=<pct> <File2>=<pct> ..."
-  } > .build/gate/gate-receipt.txt
-fi
+invariant pipeline coverage
+invariant pipeline receipt
 ```
 
-`diff_sha` is the signature compliance-reviewer compares against. If the tree it
-sees is byte-identical (same `head` + same `diff_sha`), it trusts these coverage
-numbers and runs only an incremental smoke build. If it differs, the receipt is
-ignored and the reviewer runs its full build+test+coverage. The receipt is
-advisory — never a substitute for the reviewer's own gates when anything moved.
-
-Never write a receipt you could not compute. A receipt whose signature is the
-empty-string hash matches every other broken receipt, so the fast path fires on
-a tree that has moved — which is the one case the receipt exists to detect.
+Under a sweep cadence (Phase 5), the run is the scoped one, `invariant pipeline
+coverage --selector <the touched files' tests>`; the receipt reads whichever
+run is on record. A NO MATCH here is a finding: fix what it names (an edit
+after the run means running coverage again) rather than handing off a receipt
+the reviewer will refuse. Never stage, intent-to-add or otherwise touch the
+index to make a file count: an untracked file is already signed by its content.
 
 ---
 
@@ -336,6 +324,13 @@ If no structural change occurred (pure behavior tweak inside an existing compone
 3. Release: `invariant docs unlock`. It refuses a unit with uncommitted changes. `store.docs_lock_released` holds the move out of design until every unit is released.
 
 If you bail at Phase 3, release the units with no change. If the code later shows the design was wrong, lock the unit again, read it again and update it under the new span. In a project whose docs are in its repository, none of this applies, and this phase stays after the code.
+
+**Then the recorded coverage run, again if this phase edited the tree.** The
+Gate receipt step of Phase 6 is your last act on the tree, so an edit made here
+after your Phase 6 run (a doc, a diagram, an `invariant docs decision new` page)
+means running `invariant pipeline coverage` and then
+`invariant pipeline receipt` now. Hand off only on a MATCH: a run taken before
+these edits no longer matches the tree, and the reviewer pays a full run for it.
 
 ---
 

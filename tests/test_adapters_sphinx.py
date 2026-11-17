@@ -281,6 +281,40 @@ class TestConfFacts:
         ) / "conf.py"
         assert conf_facts(conf).narrowing == ()
 
+    def test_needs_types_directives_are_read_in_order(self, tmp_path):
+        conf = tree(
+            tmp_path,
+            {
+                "conf.py": (
+                    "needs_types = [\n"
+                    "    {'directive': 'req', 'prefix': 'REQ_'},\n"
+                    "    {'title': 'Port', 'directive': 'port', 'prefix': 'PORT_'},\n"
+                    "]\n"
+                )
+            },
+        ) / "conf.py"
+        assert conf_facts(conf).needs_directives == ("req", "port")
+
+    def test_no_needs_types_is_an_empty_answer(self, tmp_path):
+        conf = tree(tmp_path, {"conf.py": "project = 'x'\n"}) / "conf.py"
+        assert conf_facts(conf).needs_directives == ()
+        assert conf_facts(tmp_path / "absent.py").needs_directives is None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "needs_types = load()\n",
+            "needs_types = [{'directive': 'a'}]\nneeds_types += [{'directive': 'b'}]\n",
+            "needs_types = [make('a')]\n",
+            "needs_types = [{'prefix': 'A_'}]\n",
+            "needs_types = [{'directive': name}]\n",
+            "needs_types = [{**base}]\n",
+        ],
+    )
+    def test_needs_types_that_are_no_plain_literal_cannot_be_told(self, tmp_path, body):
+        conf = tree(tmp_path, {"conf.py": body}) / "conf.py"
+        assert conf_facts(conf).needs_directives is None
+
 
 # -- reading a run -----------------------------------------------------------------------
 
@@ -508,7 +542,7 @@ class TestInit:
         subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
         monkeypatch.setenv("INVARIANT_HOME", str(tmp_path / "home"))
         monkeypatch.chdir(root)
-        assert main(["init", "--host-install", "--root", str(root)]) == 0
+        assert main(["init", "--home", "repo", "--host-install", "--root", str(root)]) == 0
         body = yaml.safe_load((root / ".claude" / "invariant.yaml").read_text())
         assert body["project"]["ecosystems"] == ["sphinx"]
         assert body["vars"] == {"srcdir": "source"}
@@ -529,7 +563,7 @@ class TestInit:
         root = tree(tmp_path / "proj", {"doc/conf.py": "", "source/conf.py": ""})
         subprocess.run(["git", "init", "-q", "-b", "master"], cwd=root, check=True)
         monkeypatch.setenv("INVARIANT_HOME", str(tmp_path / "home"))
-        assert main(["init", "--host-install", "--root", str(root), "--dry-run"]) == 0
+        assert main(["init", "--home", "repo", "--host-install", "--root", str(root), "--dry-run"]) == 0
         assert "set vars.srcdir" in capsys.readouterr().out
 
 

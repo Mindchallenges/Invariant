@@ -1,9 +1,15 @@
+import re
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
 
-from invariant.core.privacy import PrivacyScanner
+from invariant.core.privacy import (
+    AttributionTrailer,
+    PrivacyScanner,
+    attribution_lines,
+    trailer_block,
+)
 
 
 def patterns(findings):
@@ -1431,3 +1437,68 @@ class TestBUG110ManifestValueGuards:
             {"privacy": {"patterns": ["ip_addresses"], "allow": ["192.0.2."]}}
         )
         assert self.found(m, "192.0.2.10", m.path) == []
+
+
+class TestAttributionTrailers:
+    """DEC_ADR_024_D1: a host-declared trailer is skipped in a commit
+    message's trailer block and read everywhere else."""
+
+    TRAILER = AttributionTrailer("Host-Session", re.compile(r"https://host\.example/s/[a-z0-9]+"))
+    LINE = "Host-Session: https://host.example/s/abc123"
+
+    def test_a_key_that_is_no_trailer_token_is_refused(self):
+        with pytest.raises(ValueError, match="trailer token"):
+            AttributionTrailer("Host Session", re.compile("x"))
+
+    def test_admits_compares_the_token_exactly_and_the_value_whole(self):
+        assert self.TRAILER.admits("Host-Session", "https://host.example/s/abc123")
+        assert not self.TRAILER.admits("host-session", "https://host.example/s/abc123")
+        assert not self.TRAILER.admits("HOST-SESSION", "https://host.example/s/abc123")
+        assert not self.TRAILER.admits("Host-Session", "https://host.example/s/abc123/x")
+        assert not self.TRAILER.admits("Other", "https://host.example/s/abc123")
+
+    def test_the_block_is_the_last_paragraph_after_trailing_blank_lines(self):
+        lines = ["subject", "", "body", "", "A: 1", "B: 2", "", ""]
+        assert trailer_block(lines) == range(4, 6)
+
+    def test_no_block_in_an_empty_or_one_paragraph_message(self):
+        assert trailer_block([]) == range(0)
+        assert trailer_block(["", "A: 1"]) == range(0)
+
+    def test_a_line_of_anything_else_unmakes_the_block(self):
+        assert trailer_block(["subject", "", "A: 1", "  continued"]) == range(0)
+        assert trailer_block(["subject", "", "A:1"]) == range(0)
+
+    def test_no_declared_trailer_admits_nothing(self):
+        assert attribution_lines(["subject", "", self.LINE], ()) == set()
+
+    def test_only_the_admitted_lines_of_the_block_are_named(self):
+        lines = ["subject", "", "Other: https://host.example/s/abc123", self.LINE]
+        assert attribution_lines(lines, [self.TRAILER]) == {4}
+
+    def test_scan_message_skips_the_admitted_line_and_reads_the_rest(self):
+        text = f"subject\n\nwritten at https://host.example/s/abc123\n\n{self.LINE}\n"
+        found = PrivacyScanner().scan_message(text, [self.TRAILER])
+        assert [(f.pattern, f.line) for f in found] == [("links", 3)]
+
+    def test_scan_message_without_trailers_reads_as_scan_text(self):
+        text = f"subject\n\n{self.LINE}\n"
+        scanner = PrivacyScanner()
+        assert scanner.scan_message(text) == scanner.scan_text(text)
+        assert [f.line for f in scanner.scan_message(text)] == [3]
+
+    @pytest.mark.parametrize(
+        "separator", ["\r", "\x0b", "\x0c", "\x1c", "\x85", "\u2028", "\u2029"]
+    )
+    def test_a_line_break_git_does_not_honour_admits_nothing(self, separator):
+        """splitlines() cuts where git does not: the trailer would look whole
+        on a line that, in the history, carries more after it."""
+        text = f"subject\n\n{self.LINE}{separator}Other: tail\n"
+        assert attribution_lines(text.splitlines(), [self.TRAILER], text) == set()
+        found = PrivacyScanner().scan_message(text, [self.TRAILER])
+        assert ("links", 3) in [(f.pattern, f.line) for f in found]
+
+    def test_crlf_line_endings_are_lines_git_honours(self):
+        text = f"subject\r\n\r\nbody\r\n\r\n{self.LINE}\r\n"
+        assert attribution_lines(text.splitlines(), [self.TRAILER], text) == {5}
+        assert PrivacyScanner().scan_message(text, [self.TRAILER]) == []

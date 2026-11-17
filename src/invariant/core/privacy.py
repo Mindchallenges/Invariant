@@ -297,6 +297,101 @@ _MIDNIGHT_HEAD = re.compile(r"(?<![\d.:])24:$")
 _FLOW_PUNCTUATION = "\"'`,]})"
 
 
+#: A git trailer token: what may stand before the colon of a trailer line.
+_TRAILER_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+
+#: One trailer line, spelled the one way git writes it: the token hard against
+#: its colon, then the value. A continuation line, or a separator git can be
+#: configured to accept, makes no line of this shape, so a block holding one
+#: is no trailer block here: narrower than git, on the noisy side.
+_TRAILER_LINE = re.compile(r"([A-Za-z0-9][A-Za-z0-9-]*):[ \t]+(\S.*?)[ \t]*")
+
+
+@dataclass(frozen=True)
+class AttributionTrailer:
+    """A commit trailer an agent host asks for, as that host declares it.
+
+    ``key`` is the trailer's token and ``value`` the whole shape of the value
+    the host writes after it, matched in full. A host names its own; nothing
+    in this module knows any host's (DEC_ADR_024_D1). The declaration reaches
+    a commit message's scan only as an argument of
+    :meth:`PrivacyScanner.scan_message`.
+    """
+
+    key: str
+    value: Pattern[str]
+
+    def __post_init__(self) -> None:
+        if not _TRAILER_KEY.fullmatch(self.key):
+            raise ValueError(f"{self.key!r} is not a git trailer token")
+
+    def admits(self, key: str, value: str) -> bool:
+        """Whether ``key: value`` is this trailer: the token spelled exactly as
+        declared, and the value the declared shape whole.
+
+        Git compares a trailer's token without case; this does not. A host
+        writes its token one way, so another spelling is not what it wrote,
+        and the difference falls on the noisy side (DEC_ADR_024_D2).
+        """
+        return key == self.key and self.value.fullmatch(value) is not None
+
+
+def trailer_block(lines: Sequence[str]) -> range:
+    """The 0-based indices of a commit message's trailer block, or an empty
+    range when it has none.
+
+    The block is the message's last paragraph, after the trailing blank lines,
+    when every line of it is a trailer line and it is not the first paragraph:
+    the subject is never trailers. A paragraph with one line of anything else
+    is no block at all, and nor is one followed by more text.
+    """
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    start = end
+    while start and lines[start - 1].strip():
+        start -= 1
+    if start == end or not any(line.strip() for line in lines[:start]):
+        return range(0)
+    if not all(_TRAILER_LINE.fullmatch(lines[i]) for i in range(start, end)):
+        return range(0)
+    return range(start, end)
+
+
+def _git_lines(text: str) -> list[str]:
+    """``text`` cut into lines where git cuts it: at a newline alone, a
+    carriage return before one dropped. :meth:`str.splitlines` also cuts at a
+    lone carriage return, a vertical tab, a form feed and the Unicode line and
+    paragraph separators, none of which ends a line for git."""
+    lines = text.replace("\r\n", "\n").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def attribution_lines(
+    lines: Sequence[str], trailers: Iterable[AttributionTrailer], text: str | None = None
+) -> set[int]:
+    """The 1-based numbers of the trailer-block lines a declared trailer admits.
+
+    ``text``, when given, is the message ``lines`` were cut from. If git would
+    cut it into other lines, nothing is admitted: a line separator git does not
+    honour could otherwise make the host's trailer look whole on a line that,
+    to git and to every reader of the history, carries more after it.
+    """
+    declared = tuple(trailers)
+    if not declared:
+        return set()
+    if text is not None and _git_lines(text) != list(lines):
+        return set()
+    admitted: set[int] = set()
+    for index in trailer_block(lines):
+        match = _TRAILER_LINE.fullmatch(lines[index])
+        if match and any(t.admits(match.group(1), match.group(2)) for t in declared):
+            admitted.add(index + 1)
+    return admitted
+
+
 #: The keys a path-scoped allow entry may carry.
 _ALLOW_KEYS = ("paths", "patterns", "values", "reason")
 
@@ -481,10 +576,30 @@ class PrivacyScanner:
         is compared with, so text with no path — a commit message, a note —
         is reached only by the plain values.
         """
+        return self._scan_lines(text.splitlines(), path, set())
+
+    def scan_message(
+        self, text: str, trailers: Iterable[AttributionTrailer] = ()
+    ) -> list[Finding]:
+        """Every finding in the commit message ``text``.
+
+        A message is text with no path, scanned as :meth:`scan_text` scans
+        one, except for the lines of its trailer block that one of
+        ``trailers`` admits: the attribution a host asks agents to write
+        (DEC_ADR_024_D1). Such a line is skipped whole, and only there: the
+        same text in the body, after the block, under another token or in
+        another shape is read as any other line is. A message git would cut
+        into other lines than :meth:`str.splitlines` does admits nothing.
+        """
+        lines = text.splitlines()
+        return self._scan_lines(lines, None, attribution_lines(lines, trailers, text))
+
+    def _scan_lines(
+        self, lines: list[str], path: Path | None, skipped: set[int]
+    ) -> list[Finding]:
         findings: list[Finding] = []
         rel = self._relative(path)
-        lines = text.splitlines()
-        exempt = self._exempt_lines(lines)
+        exempt = self._exempt_lines(lines) | skipped
         for lineno, line in enumerate(lines, start=1):
             if lineno in exempt:
                 continue

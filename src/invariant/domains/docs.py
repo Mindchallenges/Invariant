@@ -70,7 +70,7 @@ import yaml
 
 from ..adapters import get_adapter
 from ..adapters.sphinx import HOMES as SPHINX_HOMES
-from ..adapters.sphinx import diagnostics
+from ..adapters.sphinx import conf_facts, diagnostics
 from ..core import git, mdconvert
 from ..core import guidelines as guidelines_reader
 from ..core import needs as needs_reader
@@ -347,8 +347,6 @@ def _naming_texts(manifest: Manifest, texts: dict[str, str]) -> dict[str, str]:
     srcdir = needs_reader.srcdir_of(manifest)
     if srcdir is None:
         return texts
-    from ..adapters.sphinx import conf_facts
-
     extensions = conf_facts(srcdir / "conf.py").extensions
     if extensions is None or "sphinx_needs" not in extensions:
         return texts
@@ -557,6 +555,92 @@ class Starter:
         return written
 
 
+#: Where a ``conf.py`` is the repository's own content (ADR-018 D13).
+_CONTENT_NOTE = (
+    "If it is the repository's own content, its docs project is ADR-018 "
+    "D13's (increment 8): point paths.docs at a directory whose parent holds "
+    "no conf.py, then run 'invariant init --force'."
+)
+
+
+def _vocabulary_note(manifest: Manifest, facts: Any) -> str:
+    """How a hand-built sphinx-needs project is adopted: as it stands, its
+    vocabulary described in the three ``docs.needs`` settings, with the
+    directives ``conf.py`` declares beyond the configured types.
+
+    None of the three is derived from ``conf.py`` (DEC_ADR_018_B128): which
+    role a directive plays, which statuses are a decision's and which links
+    a decision owes are the project's judgement.
+    """
+    if facts.needs_directives is None:
+        declared = "; its conf.py builds needs_types at run time, so read it there"
+    else:
+        known = {kind.directive for kind in needs_reader.types_of(manifest)}
+        extra = [d for d in facts.needs_directives if d not in known]
+        declared = (
+            f"; its conf.py declares {', '.join(extra)} beyond the configured types"
+            if extra
+            else ""
+        )
+    return (
+        "If it is this project's docs project, it is adopted as it stands: set "
+        "docs.format: sphinx, and the project stays migrating, so the docs gates "
+        "warn. Its vocabulary is described in the manifest, never derived from "
+        f"conf.py: docs.needs.types maps its directives to roles{declared}; "
+        "docs.needs.decision_statuses lists its decisions' statuses; "
+        "docs.needs.require_links names the links its decisions and bugs owe. "
+        "Then 'invariant docs build', and docs.needs_traceable names each need "
+        "the three do not hold, by the setting that settles it."
+    )
+
+
+def _existing_project(manifest: Manifest, srcdir: Path, spelled: str) -> str:
+    """Why no starter is written over ``srcdir``'s ``conf.py``, and what then:
+    a sphinx-needs project there may be this project's docs project, built by
+    hand before it adopted invariant (:func:`_vocabulary_note`)."""
+    facts = conf_facts(srcdir / "conf.py")
+    if facts.extensions is None or "sphinx_needs" not in facts.extensions:
+        return (
+            f"{spelled}/conf.py exists, so {spelled}/ is a Sphinx project already and "
+            f"the docs starter was not written over it. " + _CONTENT_NOTE
+        )
+    return (
+        f"{spelled}/conf.py loads sphinx_needs, so {spelled}/ is a sphinx-needs "
+        f"project already and the docs starter was not written over it. "
+        + _vocabulary_note(manifest, facts)
+        + " "
+        + _CONTENT_NOTE
+    )
+
+
+def adoption_note(manifest: Manifest, *, base: Path, docs: str) -> str | None:
+    """What `init` says where ``docs`` (``paths.docs``) already exists inside a
+    hand-built sphinx-needs project and the configuration being written does
+    not read it as one (BUG_128); ``None`` otherwise.
+
+    The project is the nearest ``conf.py`` at or above ``docs`` strictly below
+    ``base`` (D3's default rule) that loads ``sphinx_needs``. A configuration
+    with ``docs.format: sphinx`` already has its docs gates, which name each
+    setting themselves, so it is told nothing here.
+    """
+    if manifest.get("docs.format") == "sphinx":
+        return None
+    srcdir = needs_reader.default_srcdir(Path(base), project_relative(docs) or docs)
+    if srcdir is None:
+        return None
+    facts = conf_facts(srcdir / "conf.py")
+    if facts.extensions is None or "sphinx_needs" not in facts.extensions:
+        return None
+    spelled = srcdir.relative_to(Path(base)).as_posix()
+    return (
+        f"{spelled}/conf.py loads sphinx_needs, so {spelled}/ is a sphinx-needs "
+        f"project already, and {docs} is read inside it. "
+        + _vocabulary_note(manifest, facts)
+        + " "
+        + _CONTENT_NOTE
+    )
+
+
 def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> Starter:
     """The starter for ``docs`` (``paths.docs``, relative to ``base``).
 
@@ -580,12 +664,7 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
     srcdir = Path(base) / PurePosixPath(*parts[:-1])
     spelled = PurePosixPath(*parts[:-1]).as_posix()
     if (srcdir / "conf.py").exists():
-        raise StarterNotWritten(
-            f"{spelled}/conf.py exists, so {spelled}/ is a Sphinx project already and "
-            f"the docs starter was not written over it; the docs project for this "
-            f"one is ADR-018 D13's (increment 8). Point paths.docs at a directory "
-            f"whose parent holds no conf.py, then run 'invariant init --force'."
-        )
+        raise StarterNotWritten(_existing_project(manifest, srcdir, spelled))
     types = needs_reader.types_of(manifest)
     element = needs_reader.type_of_role(types, "element")
     rule = needs_reader.type_of_role(types, "rule")
@@ -1815,6 +1894,19 @@ def adoption_drift(manifest: Manifest) -> Drift | None:
 VENV = ".venv"
 VENV_HASH = "invariant-requirements.sha256"
 REQUIREMENTS = "requirements.txt"
+#: Where a requirements file that is not fully pinned is resolved to, inside
+#: the environment, before the sync (BUG_124, DEC_ADR_018_B124).
+VENV_LOCK = "invariant-requirements.lock.txt"
+#: How many of ``uv pip check``'s lines a refusal quotes.
+_CHECK_LINES = 5
+#: Option lines that pull requirements from elsewhere: a file holding one is
+#: not a complete pinned set on its own. The short forms also take their
+#: argument joined (``-rmore.txt``, ``-e.``).
+_INCLUDES = ("-r", "--requirement", "-c", "--constraint", "-e", "--editable")
+#: ``name [extras] == version`` (or ``===``), the only pinned form.
+_PINNED = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(\s*\[[^\]]*\])?\s*===?\s*[A-Za-z0-9.+!_-]+"
+)
 #: Where the strict build writes its HTML, under the state root (D3, D5).
 BUILD_OUTPUT = Path("docs") / "build" / "html"
 #: How long a second build waits for one already running before refusing.
@@ -1906,12 +1998,83 @@ def venv_state(srcdir: Path) -> VenvState:
     )
 
 
-def sync_venv(srcdir: Path, *, run=None, uv: str | None = "") -> VenvState:
-    """Create ``<srcdir>/.venv`` if absent, ``uv pip sync`` it to the pinned
-    ``requirements.txt``, and record the file's hash there (D4).
+def fully_pinned(text: str) -> bool:
+    """Whether a requirements file pins every package it names with ``==``.
 
-    The hash is written only after a sync that succeeded, so a failed one
-    leaves the environment reading out of sync.
+    Such a file is synced exactly as written (D4). Ranges, unpinned names,
+    URLs and includes (``-r``, ``-c``, ``-e``) are not; other option lines
+    (an index, ``--hash``) are neither. A file naming nothing is not pinned.
+    """
+    named = False
+    for raw in text.replace("\\\n", " ").splitlines():
+        line = re.sub(r"(^|\s)#.*", "", raw).strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            option = line.split()[0].split("=", 1)[0]
+            if option in _INCLUDES or option[:2] in _INCLUDES:
+                return False
+            continue
+        line = re.sub(r"\s--hash[=\s]\S+", "", line).split(";", 1)[0].strip()
+        if not _PINNED.fullmatch(line):
+            return False
+        named = True
+    return named
+
+
+def _said(done: subprocess.CompletedProcess) -> str:
+    return (done.stderr or done.stdout or "").strip()
+
+
+def _check_venv(srcdir: Path, venv: Path, uv: str, run, pinned: bool) -> None:
+    """Refuse an environment that cannot build: a package missing what it
+    depends on (``uv pip check``), or ``sphinx-build`` that does not run."""
+    done = run([uv, "pip", "check", "--python", str(venv / "bin" / "python")], srcdir)
+    if done.returncode != 0:
+        lines = [
+            ln for ln in f"{done.stdout or ''}\n{done.stderr or ''}".splitlines()
+            if ln.strip() and not ln.startswith(("Using ", "Checked ", "Found "))
+        ]
+        quoted = "; ".join(lines[:_CHECK_LINES])
+        more = f" (and {len(lines) - _CHECK_LINES} more)" if len(lines) > _CHECK_LINES else ""
+        if pinned:
+            fix = (
+                f"{REQUIREMENTS} pins every package with == and is synced exactly "
+                "as written, so it must pin what they depend on too: add them "
+                "(uv pip compile writes such a file), or write ranges and let "
+                "'invariant docs venv' resolve them"
+            )
+        else:
+            fix = f"what {REQUIREMENTS} resolved to does not install cleanly; fix the file"
+        raise UsageError(
+            f"the environment built from {srcdir / REQUIREMENTS} is missing what "
+            f"its packages need: {quoted}{more}. {fix}, then run 'invariant docs venv' again."
+        )
+    sphinx_build = venv / "bin" / "sphinx-build"
+    if not sphinx_build.is_file():
+        raise UsageError(
+            f"the environment built from {srcdir / REQUIREMENTS} has no sphinx-build: "
+            f"the file does not install Sphinx. Add sphinx to it, then run "
+            "'invariant docs venv' again."
+        )
+    done = run([str(sphinx_build), "--version"], srcdir)
+    if done.returncode != 0:
+        raise UsageError(
+            f"the environment built from {srcdir / REQUIREMENTS} cannot run "
+            f"sphinx-build (exit {done.returncode}): {_said(done)}. Fix the file, "
+            "then run 'invariant docs venv' again."
+        )
+
+
+def sync_venv(srcdir: Path, *, run=None, uv: str | None = "") -> VenvState:
+    """Create ``<srcdir>/.venv`` if absent, sync it to ``requirements.txt``,
+    check it can build, and record the file's hash there (D4, B124).
+
+    A fully pinned file is ``uv pip sync``-ed exactly as written; any other is
+    first resolved with ``uv pip compile`` into ``.venv``'s lock, which is
+    synced. Then ``uv pip check`` and ``sphinx-build --version`` must pass.
+    The hash is removed before the first step and written only after the
+    last, so a failed or refused sync leaves the environment out of sync.
     """
     run = run or _run
     uv = _uv() if uv == "" else uv
@@ -1920,7 +2083,8 @@ def sync_venv(srcdir: Path, *, run=None, uv: str | None = "") -> VenvState:
     if not requirements.is_file():
         raise UsageError(
             f"no {REQUIREMENTS} in {srcdir}: the docs environment is built from "
-            f"its pins (ADR-018 D4). Write one with every package pinned with ==."
+            f"its pins (ADR-018 D4). Write one, preferably pinning every package "
+            "with == (ranges are resolved first, B124)."
         )
     if not uv:
         raise UsageError(
@@ -1929,18 +2093,25 @@ def sync_venv(srcdir: Path, *, run=None, uv: str | None = "") -> VenvState:
             "'invariant docs venv' again."
         )
     venv = srcdir / VENV
+    python = str(venv / "bin" / "python")
+    (venv / VENV_HASH).unlink(missing_ok=True)
+    expected = _sha_file(requirements)
+    pinned = fully_pinned(requirements.read_text(encoding="utf-8", errors="replace"))
+    synced = requirements if pinned else venv / VENV_LOCK
     steps = []
     if not (venv / "bin" / "python").is_file():
         steps.append([uv, "venv", str(venv)])
-    steps.append([uv, "pip", "sync", "--python", str(venv / "bin" / "python"), str(requirements)])
+    if not pinned:
+        steps.append([uv, "pip", "compile", "--python", python, str(requirements),
+                      "-o", str(synced)])
+    steps.append([uv, "pip", "sync", "--python", python, str(synced)])
     for argv in steps:
         done = run(argv, srcdir)
         if done.returncode != 0:
-            said = (done.stderr or done.stdout or "").strip()
             raise UsageError(
-                f"{' '.join(argv[1:3])} failed (exit {done.returncode}): {said}"
+                f"{' '.join(argv[1:3])} failed (exit {done.returncode}): {_said(done)}"
             )
-    expected = _sha_file(requirements)
+    _check_venv(srcdir, venv, uv, run, pinned)
     (venv / VENV_HASH).write_text(f"{expected}\n", encoding="utf-8")
     return venv_state(srcdir)
 

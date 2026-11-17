@@ -136,12 +136,87 @@ Setup
 ::
 
    invariant init [--ecosystem <id>] [--host claude_code] [--profile <name>]
-                  [--host-install]
-       Write a manifest, create the state root, and add the state root to
-       .gitignore; install the hook shims, the host settings wiring and the
-       library agents only when the user says so (below). Refuses to clobber an
-       existing manifest without --force; prints a diff of what it would change
-       with --dry-run.
+                  [--home store|repo] [--store <path>] [--host-install]
+       Make the project's configuration home and write its configuration
+       there: by default a store outside the repository, created or linked,
+       with nothing written to the repository's working tree; or, with
+       `--home repo`, a manifest in the repository, the state root created and
+       added to .gitignore (ADR-020 D1, D4; below). Install the hook shims,
+       the host settings wiring and the library agents only when the user
+       says so (below). Refuses to clobber an existing manifest, or an
+       existing store project's block, without --force; prints what it would
+       write with --dry-run.
+
+       Built (ADR-020 D1, D4, D5 and D9's question; its increment 3, the
+       switch; DEC_ADR_020_I3). The store is init's default home, in every
+       mode. The first core section of the questionnaire is `home`, and its
+       step, `home:location`, is asked first, before the level:
+       "Where does this project's invariant configuration live?", `store`
+       (the default: outside the repository, in a store on this machine;
+       nothing of invariant's is committed) or `repo` (committed in the
+       repository: shared with teammates, CI and pull-request review).
+       `--home store|repo` and `--store <path>` answer it and the store step
+       as `--profile` answers its question: checked like a typed answer, a
+       refused one exits 2 before anything is written, and `--store` alone
+       means the store home. The store is planned before anything is written
+       (`core/stores.plan_home_store`): `--store`'s path, or the store step's
+       answer, links a store there that lists this repository, and gets a new
+       one in an empty or absent directory; with neither, the default parent
+       under the invariant home, named by `store_naming` (ADR-014 D2, ruling
+       14), where a name already holding a store for this repository is
+       linked and a taken name falls back to the URL form, saying so.
+       `--set home:location=repo` waits for ADR-017's scripted flags.
+
+       Under `store`, init writes a store project. The store is created or
+       linked first among the writes, its privacy hooks installed as `store
+       init` installs them (ADR-014 D8). A store it created gets the
+       project, and the profile where nothing was asked, at its own level;
+       this repository's block gets `records` explicitly (every data and
+       policy record `store`, `hooks` and `agents` `local`;
+       `core/storemigrate.STORE_HOME_RECORDS`, the layout `store migrate
+       --to store` makes), `paths.docs`, the adapters' settings and the
+       starter's, in one write. The docs starter is written at
+       `invariant-docs/` in the store (ADR-020 D8). The repository's working
+       tree gains nothing: no `.claude/`, no `.gitignore` line; its local git
+       config gains `invariant.id` (ADR-014 D4) and its runtime state is in
+       the git common directory. The store's files are left uncommitted, for
+       review in the store, and the report says so.
+
+       A home not available is said, never silently replaced. Outside a git
+       repository or below its top level there is no store, and the home is
+       `repo`. Where a `conf.py` at the repository root would read
+       `invariant-docs/` without excluding it (`core/storemigrate.
+       conf_readers`, the rule `store migrate --to repo` refuses on), `repo`
+       is not offered. An existing project keeps its home (ADR-020 D2):
+       `--force` over an in-repo manifest is `repo`, and over a store
+       project (found by `Manifest.locate` at this root) it links that store
+       again and writes init's settings into its block, its records kept;
+       `store migrate` is the one route between the homes. An interactive
+       run says which home it took and why, instead of asking.
+
+       Under `store` the level question offers `user`, `store` and
+       `store-repo`, with `store-repo` the default: the repository's own
+       level would be the pointer, which init does not write. The answers
+       are asked over the store as planned (`_PlannedStore`), so every
+       default, check and provenance label reads `store:` as it will once
+       written. The docs step's location offer arises where the docs
+       directory exists in the home, the store's or the repository's, and
+       offers `reuse` or another path within that home. The `host:install`
+       question stays last, default no, in both homes (D9's question); a yes
+       under `store` wires `local`.
+
+       The configuration report opens with a `home` row, its value
+       `store:<name> (<path>)` or `repo (.claude/invariant.yaml)` and its
+       provenance `default`, `--home`, `--store` or `kept`, and after the
+       rows a line naming the other route: under `--dry-run`, `invariant init
+       --home repo` (or `--home store`) and, later, `invariant store migrate
+       --to repo` (or `--to store`); a written run names only `store
+       migrate`. Where one home was not offered, the line says why instead.
+       `--json` carries `home`: {"location", "store", "reason"}, `reason`
+       non-null only when one home was not offered, and the `configuration`
+       list opens with the `home:location` row. `--dry-run` names the store
+       it would create or link and lists the files it would write there,
+       writing nothing: no store, no user-level link, no `invariant.id`.
 
        Built (ADR-020 D9, with ADR-014 increment 3; DEC_ADR_014_I3): the
        `host:install` question. Last, init asks "Install invariant's hooks and
@@ -191,20 +266,18 @@ Setup
        replaces it with a scripted prompter rather than faking a terminal.
        End of input answers each question's default.
 
-         1. Where `paths.docs` exists (empty included), init names what is
-            there and offers `reuse` (the default: today's result, nothing
-            written), `path` (another repo-relative directory, written as
-            `paths.docs` in `.claude/invariant.yaml`) or `store`. The store
-            choice runs ADR-014's `store init` (no path, or a path holding no
-            store) or `store link` (a path holding one), then writes
-            `records.docs: store` and a store-relative `paths.docs` into the
-            store's `store.repos.<identity>` block. An in-repo manifest
-            cannot carry a `store` record (manifest.md, "Records and their
-            locations"), so this choice writes NO `.claude/invariant.yaml`:
-            the project becomes a store project. A store it created gets
-            init's `project` and `enforcement.profile` at its own level; a
-            store it linked keeps its own policy, and only this repository's
-            block changes. The store file is rewritten whole and left
+         1. Where `paths.docs` exists (empty included) in the home, init
+            names what is there and offers `reuse` (the default: today's
+            result, nothing written) or `path` (another directory within the
+            home: repo-relative, written as `paths.docs` in
+            `.claude/invariant.yaml`, or store-relative, written in the
+            store's block). Since ADR-020 increment 3 the docs step offers no
+            `store` of its own: the store is the home's, chosen first
+            (above), and under `repo` an in-repo manifest cannot name a store
+            (manifest.md, "Records and their locations"). A store the home
+            created gets init's `project` and `enforcement.profile` at its own
+            level; a store it linked keeps its own policy, and only this
+            repository's block changes. The store file is rewritten whole and left
             uncommitted for review in the store, unless it holds a comment
             (a `#` opening a line or after whitespace): a rewrite would drop
             it, so init writes nothing to that file, prints the exact YAML
@@ -214,10 +287,7 @@ Setup
             "reason", "yaml"}`, null when everything was written). A store
             init itself created holds no comment, so it is always written.
             Until the block is added, the project resolves as the store's
-            file says, so the assessment reads the docs that file names. The store
-            is not offered, and the offer says why, outside a git repository,
-            below its top level, or in an in-repo project (`store migrate
-            --to store`, ADR-014 increment 7a). A path that climbs out with `..` or is
+            file says. A path that climbs out with `..` or is
             absolute is asked again. The existing directory is never written;
             the starter goes to the chosen location when it is absent.
          2. The assessment (`invariant docs assess`) runs on the chosen
@@ -233,8 +303,9 @@ Setup
             does; otherwise it records nothing and says to commit its files,
             then run `invariant docs assess --plan`. init still never commits.
 
-       Non-interactive init (ruling H) writes exactly the files it always did
-       and asks nothing. It prints the assessment after its report, and under
+       Non-interactive init (ruling H) asks nothing and offers nothing; since
+       ADR-020's switch it writes the default home's files, the store
+       project above, and `--home repo` the files it always did. It prints the assessment after its report, and under
        `--json` carries it as `docs_assessment`, the `docs assess --json`
        document (`{"error"}` when it could not run: reported, never a failed
        init). `--dry-run` assesses the manifest it would write over the tree as
@@ -242,12 +313,15 @@ Setup
 
        Built (ADR-017, increment 1): the configuration report. A
        non-interactive `init` (no prompter: `--dry-run`, `--json`, or no
-       terminal) writes exactly the files it wrote before, byte for byte, and
-       after everything else it reports, the assessment included, lists each
-       core question's resolved value and provenance, then the line naming
+       terminal) writes exactly the files it wrote before, byte for byte
+       (with `--home repo` since ADR-020's switch), and after everything
+       else it reports, the assessment included, lists the home (ADR-020 D4,
+       above), each core question's resolved value and provenance, the line
+       naming the other home's route, then the line naming
        `invariant configure`:
 
          configuration (core questions):
+           home                            repo (.claude/invariant.yaml)  --home
            project.ecosystems              [python]           repo:.claude/invariant.yaml
            commands.test                   pytest             adapter:python
            commands.test_one               pytest {selector}  adapter:python
@@ -256,6 +330,7 @@ Setup
            methodology.gates.coverage_min  85                 user:~/.invariant/config.yaml
            paths.docs                      docs/architecture  default
            docs.onboarding                 off                default
+         to keep the configuration out of the repository instead: invariant store migrate --to store
          run 'invariant configure' to change them
 
        The rows are the core sections of `core/questionnaire`'s catalogue
@@ -275,9 +350,10 @@ Setup
        Built (ADR-017, increment 2): interactive `init` asks the core
        questions. The catalogue is data (`data/questionnaire/catalogue.yaml`,
        `core/questionnaire`), and `cli/configure` asks it through the same
-       `Prompter`. First the target level: `user` (`defaults:` in
-       `~/.invariant/config.yaml`) or `repo`, default `repo`; a fresh project has
-       no store yet, so `store` and `store-repo` are not offered. Then the core
+       `Prompter`. First the home (ADR-020 D4, above), then the target level:
+       under `repo`, `user` (`defaults:` in `~/.invariant/config.yaml`) or
+       `repo`, default `repo`; under `store`, `user`, `store` and `store-repo`,
+       default `store-repo`. Then the core
        sections in catalogue order, each question shown with its default and
        where that comes from, "(now standard, from default)": the ecosystems
        (pre-filled from the adapters' detection, "from detected"), the commands
@@ -344,33 +420,6 @@ Setup
        that is `invariant configure` (below). Increment 1 of ADR-017 built the
        non-interactive report, 2 the interactive core, 3 builds the scripted
        flags, and 4 the advanced step and the catalogue at the levels.
-
-       Accepted, not yet built (ADR-020 D1, D4, D8, D9; its switch increment,
-       after ADR-014 increments 3 to 7). The store becomes init's default
-       home. A new first core section, `home`, asks `home:location`: `store`
-       (the default: a store on this machine, created at ADR-014 D2's
-       default path or linked where the path holds one; nothing of
-       invariant's is committed) or `repo` (the in-repo layout above, chosen
-       to share the configuration with teammates, CI and pull-request
-       review). Under `store`, init writes a store project: the
-       configuration in the store, `records` set to `store` for every data
-       and policy record and `local` for `hooks` and `agents`, and the docs
-       starter in the store; it commits nothing and writes no .gitignore
-       line. The level question then offers `user`, `store` and
-       `store-repo`, default `store-repo`. Outside a git repository, or below
-       its top level, `store` is not offered and the home is `repo`; in a
-       documentation repository whose root conf.py would read
-       invariant-docs/ without excluding it, `repo` is not offered; either
-       is said on the report's `home` row. The default holds in every mode:
-       a non-interactive init with no flags writes the store project, and
-       `--home repo` (or `--set home:location=repo`) the in-repo layout;
-       `--store <path>` answers the store step. The `host:install`
-       question, last, is already built (above); under the switch a store
-       project's yes wires `local`. The configuration report opens with a
-       `home` row and names the other route (`init --home repo`, later
-       `store migrate --to repo`); `--json` carries `home`: {"location",
-       "store", "reason"}. Until the switch, the in-repo layout stays init's
-       default.
 
        Built (ADR-020 D8, its increment 1): a new project's docs folder. With
        no `.claude/invariant.yaml` yet, `paths.docs` is
@@ -441,7 +490,17 @@ Setup
        holder and `invariant docs lock`. The starter is not written, and the project
        is left migrating with a note naming why, where the source directory
        would be the root, already holds a `conf.py`, or holds a file the
-       starter would write. Only an interactive `init` creates the docs
+       starter would write. Where that `conf.py` loads `sphinx_needs`, the
+       note is the adoption of a hand-built docs project (BUG_128,
+       DEC_ADR_018_B128): set `docs.format: sphinx` to adopt it as it stands,
+       describe its vocabulary in `docs.needs.types` (naming the directives
+       its literal `needs_types` declares beyond the configured types),
+       `docs.needs.decision_statuses` and `docs.needs.require_links`, none of
+       which `init` derives or writes, then `docs build`; a `conf.py` that is
+       the repository's own content still points to ADR-018 D13. The same
+       note is given where `paths.docs` already exists inside such a project
+       and the configuration being written, what `--force` keeps
+       included, is not `docs.format: sphinx`. Only an interactive `init` creates the docs
        environment (`docs venv`, which needs the network); a failure is
        reported and is never a failed `init`. Without a terminal, and under
        `--dry-run`, it writes (or lists) the same files and names `invariant
@@ -449,6 +508,23 @@ Setup
        "command"}` and `error` when one was met, null with no starter. The
        `docs` step still asks no format. `init --force` over an enforced
        manifest keeps the keys that make it enforced.
+
+       Fixed (BUG_147, DEC_ADR_018_B147): `init --force` over an in-repo
+       manifest also keeps the docs project's description, in any state:
+       `docs.format`, `docs.needs.srcdir`, `docs.needs.types`,
+       `docs.needs.decision_statuses` and `docs.needs.require_links`, each
+       exactly as that manifest's own file sets it (`_kept_on_force`,
+       `DESCRIBED_DOCS_KEYS`). An adopted project, still migrating, used to
+       come back `docs.format: markdown` with its hand-described vocabulary
+       gone; now it keeps them and stays migrating, and is not told to adopt
+       its docs project again. Under an enforced manifest the mandate's own
+       values come first and the description fills in the rest. Nothing is
+       read from a default or another level, so a manifest with no `docs`
+       block is rewritten byte for byte as before. Every other key of the
+       `docs` block (`diagrams`, `index`, `needs.refused_paths`, ...) is
+       rewritten as before: `--force` rewrites the manifest, and `invariant
+       configure` is the route that edits one. A store project's block is
+       rewritten in place and keeps them already.
 
        A successful, non-dry-run `init` also registers the project in the
        oracle's index (`via: init`; see "Oracle" below). A failure to register is
@@ -530,6 +606,14 @@ Setup
        file, or says none does. It informs and never fails. A user level that
        does not load fails `manifest valid`, naming the file.
 
+       Built (ADR-021 D6, D8, increment 3). The `rulings` row, shown only
+       when the configuration loosens a built-in or records a ruling, warns
+       while a loosening carries no ruling, naming each key and `invariant
+       rules carry-over`: the one release a lowering loads unruled (D8) is
+       said here, not at every load. Otherwise it lists each ruling with its
+       `by` and `date`. It never fails; a configuration the refusal stops
+       fails `manifest valid` instead.
+
        `repo identity` (ADR-014 D4), in a store project only, names the
        identity, the store and the level that named it. It warns when the
        repository was linked by its local ID and has since gained an origin,
@@ -556,37 +640,55 @@ Setup
        not invariant's, or not reached (core.hooksPath unset or naming
        somewhere else), naming `session start` and `store link`, which
        install them.
-       ADR-020 D5 adds `config home`, which informs and never fails: the
-       in-repo manifest, committed and shared; or the store, its path, that
-       a fresh clone or CI is unconfigured until it links the store, "this
-       machine only" with no store remote, and `store migrate --to repo` as
-       the way to share. It warns on an in-repo manifest that is untracked
-       or git-ignored (no session worktree holds it; `store migrate --to
-       store` keeps the configuration out of git, ADR-020 D6) and on two
-       homes, an in-repo manifest beside a user-level link or a store
-       listing the repository, naming the one `Manifest.locate` uses.
-       Built for an in-repo manifest (ADR-020 D11, amending D5 and D6):
-       `config home` reads `committed` (shared through the repository) or
-       `local` (kept out of git through .git/info/exclude; `session isolate`
-       copies it into each worktree), which pass, and warns only on a
+       Built (ADR-020 D5, as D11 amends it; the in-repo cases with D11, the
+       rest with the switch, DEC_ADR_020_I3): `config home` informs and never
+       fails. In-repo, it reads `committed` (shared through the repository)
+       or `local` (kept out of git through .git/info/exclude; `session
+       isolate` copies it into each worktree), which pass, and warns on a
        manifest git neither tracks nor ignores, naming `git add` and the
-       exclude line. The store and two-homes cases are not built.
-       ADR-020 D5 also adds `docs folder`, present only in a documentation
-       repository whose own conf.py would read invariant-docs/: it passes
-       when that conf.py excludes the folder, and otherwise warns, naming
-       the exact exclude_patterns line to add (invariant never edits it)
-       and that the docs stay in the store until then.
-       ADR-015 D2 makes the command rows follow the lanes the project's sessions
-       can run: a command is required when a selectable lane carries a gate that
-       runs it, each row names that lane and gate, and `commands.build`, which no
-       gate runs, is reported rather than required, and D5 names the measured
-       median, the budget and which side of it the project is on. It also adds
-       a `commands` command group (`commands derive`, with `--accept`,
-       `--update` and `--measure`, D3 to D5) and the rule
-       `commands.derivation_current`; this file gains their sections when they
-       are built. Increment 2 of ADR-015 builds the D2 rows, increment 3
-       `commands derive` and the rule, and increment 4 `--measure` and the D5
-       row.
+       exclude line. A store project's row names the store and its path,
+       that nothing of invariant's is committed in the repository, that a
+       fresh clone or CI is unconfigured until it links the store (`store
+       clone`), `store migrate --to repo` as the way to share, and "this
+       machine only" when the store has no remote. It warns on two homes:
+       an in-repo manifest beside a store the repository's pointer or the
+       user level's `repos:` link names for it (`core/stores.find_store`),
+       or a link that does not resolve, naming both and the one
+       `Manifest.locate` uses (the in-repo manifest), and a half-landed
+       `store migrate` session as the cause where its marker says so,
+       otherwise how to retire the one not in use.
+       `docs folder` is present only where a conf.py in the repository at or
+       above the docs project's folder would read it (`core/storemigrate.
+       confs_above`; for a store project, the folder's relative name, which
+       a move keeps): it passes when every such conf.py excludes the folder,
+       and otherwise warns, naming the exact exclude_patterns line to add
+       (invariant never edits it) and, for a store project, that the docs
+       stay in the store until then.
+       Built (ADR-015 D2, ruling 5, increment 2). The command rows follow
+       the lanes the project's sessions can run, in every project:
+       `methodology.pipeline` and every other lane `pipeline start
+       --methodology` may start, shipped or in `methodology.extra_machines`
+       (`core/machines.command_needs`), each assembled as a pipeline runs it,
+       so an injected gate counts. A command is required where such a lane
+       carries a gate that reads its run: `commands.test` for a `test.*`
+       gate, `commands.coverage` for `coverage.meets_floor`, and then only
+       while some declared adapter's coverage applies (ADR-015 D1). A gate
+       at level `off` requires nothing, nor does `coverage.meets_floor` with
+       `coverage_min` 0, which answers N/A before it reads a run. Each row
+       names the lanes and gates, the configured lane first and marked
+       `(methodology.pipeline)`, so a FAIL says which gate would have nothing
+       to run: `commands.test  unset; required by docs-project
+       (methodology.pipeline): test.all_pass; ...`. `commands.build` is read
+       by no gate, so its row passes, set or not, saying "required by
+       nothing". The rows read the flat keys, the primary ecosystem's, which
+       a whole run uses (ADR-013). Lanes that do not load fail one
+       `commands` row naming why.
+       ADR-015 D5 adds the measured median, the budget and which side of it
+       the project is on. It also adds a `commands` command group (`commands
+       derive`, with `--accept`, `--update` and `--measure`, D3 to D5) and
+       the rule `commands.derivation_current`; this file gains their
+       sections when they are built, increment 3 `commands derive` and the
+       rule, and increment 4 `--measure` and the D5 row.
 
        `coverage` (ADR-015 D1, built in ADR-018 increment 2), once per declared
        ecosystem whose adapter declares coverage not applicable, reads `not
@@ -893,6 +995,11 @@ Setup
        (`repo:.claude/invariant.yaml`, or the pointer `repo:.invariant.yaml`),
        and `env:<variable>`.
 
+       Built (ADR-021 D7, increment 3). A ruling's `by`, `date` and
+       `reason` print as `enforcement.rulings.<key>.by` and the rest, each
+       with the label of the level that recorded it; a date written as a
+       YAML date prints as its ISO text.
+
    invariant configure [section...] [--level user|store|store-repo|repo]
                        [--set <id>=<value>]... [--answers <file.yaml>] [--yes]
                        [--questions] [--dry-run] [--json]
@@ -1114,17 +1221,71 @@ Setup
        a store behind or diverged from its remote (naming `store pull`;
        nothing is pulled), into a folder that is no store and is not empty,
        and while another session holds or queues for a docs-lock unit of a
-       path it would write. `--records` is refused with --to store, which
-       moves everything.
+       path it would write.
 
-       --to repo: accepted, not yet built (increment 7b). Refused, exit 2.
-       It will write .claude/invariant.yaml with the keys the store's level
-       and this repository's block set, so `config show` resolves the same
-       values, then remove the repository from the store and the user-level
-       link; that is how a project shares its configuration. Its refusals
-       add: an in-repo project, any existing target path, and a
-       documentation repository whose root conf.py would read
-       invariant-docs/ without excluding it (naming the line).
+       --to repo: built (increment 7b, DEC_ADR_014_I7B). Run in a store
+       project's main checkout, at its top level; that is how a project
+       shares its configuration. It moves everything back: every record
+       kept in the store returns to the same relative path with its history
+       (the docs project's folder whole), and the configuration becomes
+       .claude/invariant.yaml, written with every key the store's own level
+       and this repository's block set, the block winning, less `store` and
+       `records` (each record `repo`, the load-time default) and the keys
+       only a store project may set (`sync`, `privacy.store`), which are
+       left behind and named; the output names each key copied from the
+       store's own level. `config show` then resolves the same values,
+       labelled `repo:`. The command:
+         1. starts a parked `chore`-lane session, `store-migrate-to-repo-<id>`,
+            isolated into its worktree;
+         2. lays the repository leg on its branch: the records' history carried
+            from the store with `git fast-export`, the original commits, the
+            manifest written, a committed pointer (.invariant.yaml) removed,
+            and the local wiring in its committed form (.claude/settings.json,
+            .claude/hooks/, .claude/agents/, through the same install plan;
+            a file edited in the main checkout since the local install is
+            committed as edited, and named), committed;
+         3. removes this repository's block and its records' files from the
+            store and commits that there, under the session's docs-lock
+            grants, then releases the units, which lands the store leg
+            (`landing.store`). The store's own level is never changed; a
+            store left serving no repository is kept, and the output says so.
+            Ignored files under the moved folders stay in the store, named.
+       Until the merge the main checkout finds neither home: every command
+       there refuses, naming the session and its worktree, except `session
+       merge` and `session resume`, which finish the move from the main
+       checkout and read the project from the session's worktree. Once the
+       repository leg lands, the local wiring's entries in
+       .claude/settings.local.json, its .git/info/exclude lines and its
+       receipt are removed (the files are tracked now), the user level's
+       link is removed (`store link`'s inverse), the move is recorded
+       finished and the marker removed. A repository merge that fails is
+       half-landed and finished by `session merge` or `session resume`, run
+       in the main checkout. --json carries `to`, `store`, `identity`,
+       `session`, `worktree`, `branch`, `repo_commit`, `repo_commits`,
+       `store_commit`, `landing`, `roots`, `moved`, `records`,
+       `from_store_level`, `dropped`, `wiring`, `edited`, `pointer`, `left`
+       and `serves_none`. Refused: outside a project, below the top level,
+       from a linked worktree, on a detached head, in an in-repo project
+       ("the configuration is already in the repository"), in a project its
+       pointer alone defines, with --store, with the docs project in a
+       content folder (ADR-020 D8), with a conf.py at or above the docs
+       project's folder (the repository root's among them) whose literal
+       exclude_patterns do not exclude it, or cannot be read to tell (naming
+       the line to add; invariant never edits it, ruling 6), over any path
+       the move would add that already exists in the repository, tracked,
+       untracked or ignored (it never writes over a file or merges a
+       folder), over a wiring path in the main checkout that git neither
+       tracks nor ignores, over an uncommitted pointer, over uncommitted
+       changes in the store's paths it moves or its invariant.yaml, when
+       that invariant.yaml holds comments, when another repository of the
+       store names one of the records it moves, while another session holds
+       or queues for a docs-lock unit of a path it removes, and while the
+       store is behind or diverged from its remote (naming `store pull`;
+       nothing is pulled).
+
+       --records, moving single records within a store project (ADR-020 D3),
+       is in no increment of ADR-014 or ADR-020 yet: refused in either
+       direction, exit 2, nothing written.
 
    invariant docs assess [--json]
        Print the assessment of the architecture docs (ADR-016 D1 to D3,
@@ -1241,17 +1402,30 @@ Setup
 
        Built (ADR-018 D4, D5, increment 3):
          docs venv [--check]    create `<srcdir>/.venv` with `uv venv` when it
-                                is absent, then `uv pip sync` it to the pinned
-                                `<srcdir>/requirements.txt`, and record the
-                                file's SHA-256 in
-                                `.venv/invariant-requirements.sha256`, written
-                                only after a sync that succeeded. `--check`
+                                is absent, then `uv pip sync` it to
+                                `<srcdir>/requirements.txt` when every package
+                                there is pinned with `==`; any other file
+                                (ranges, includes) is first resolved with `uv
+                                pip compile --python <.venv>` into
+                                `.venv/invariant-requirements.lock.txt`, which
+                                is synced instead (BUG_124,
+                                DEC_ADR_018_B124). Then `uv pip check`
+                                and `.venv/bin/sphinx-build --version` must
+                                pass, and only then is the file's SHA-256
+                                recorded in
+                                `.venv/invariant-requirements.sha256`, removed
+                                before the first step. `--check`
                                 creates nothing and exits 1 unless the
                                 environment is present and its recorded hash
                                 matches the file. No `uv` on `PATH`, no
-                                requirements file, or a failed step is refused,
-                                naming it. `--json` carries `srcdir`, `venv`,
-                                `present`, `in_sync` and both hashes.
+                                requirements file, a failed step, a package
+                                missing what it needs (quoted from `pip
+                                check`; a pinned file is told to pin it too)
+                                or a `sphinx-build` that is absent or does not
+                                run is refused, naming it, and leaves the
+                                environment out of sync. `--json` carries
+                                `srcdir`, `venv`, `present`, `in_sync` and both
+                                hashes.
          docs build [--force]   the strict build: `<srcdir>/.venv/bin/sphinx-build
                                 -E -W --keep-going -n -b html -D
                                 needs_build_json=1 <srcdir>
@@ -1721,6 +1895,12 @@ Session
        `session.landing`). A branch the base already contains is recorded
        as "already merged" without merging again. An in-repo merge is
        unchanged and records nothing.
+       Built (ADR-014 D12, increment 7b): while `store migrate --to repo` is
+       under way the main checkout finds neither home; `session merge`, run
+       there, reads the project from the session's worktree the marker
+       names (`<state root>/migrate.json`), and merges from the main
+       checkout as ever. A main checkout that resolves, and every other
+       move, is unchanged.
        Built (ADR-014 D7 and D8, increment 6): with `sync.push_after_landing:
        true`, once the session is `merged` the store is pushed as `store
        push` pushes it, after the same privacy screen, and its outcome is
@@ -1842,6 +2022,25 @@ Session
        sentence saying no sweep is recorded or the last measured no coverage —
        so the scoped lower bound is read beside the number the floor is held to.
 
+       Each run signs the tree it measured, before and after it (ADR-026 D1):
+       the commit, every uncommitted change and every untracked file git does
+       not ignore, by content, kept in the record as `coverage_run.tree`. That
+       record is the gate receipt `pipeline receipt` reads.
+
+   invariant pipeline receipt
+       Whether the coverage run on record still vouches for the tree (ADR-026
+       D2): compliance-reviewer's fast path. Reads the record and writes
+       nothing. MATCH, exit 0, when a coverage run is on record and signed its
+       tree, the tree held still for the whole run, the tree now has the same
+       commit and digest (new, modified and deleted files alike), the run's
+       suite passed and coverage.meets_floor passes now, acknowledgements
+       applied. It then prints the run's command, scope, suite counts and
+       per-file coverage. Otherwise NO MATCH, exit 1, naming each condition
+       that failed. The tree compared is the root the record names, so a check
+       from another directory reads the tree the run measured. --json carries
+       `match`, `reasons`, `commit`, `tree`, `root`, `command`, `scope`,
+       `executed`, `failed`, `coverage` and `floor`.
+
    invariant pipeline ack <rule> --reason "<why>"
        Record a deliberate decision to proceed against an ADVISORY gate. It then
        reports as skipped, carrying that reason, for the rest of the pipeline —
@@ -1890,6 +2089,11 @@ Session
        merge", or, when the finish stops, the reason under "still
        half-landed" and exit 1, the success line still first. --json carries
        `finished` (null when there was nothing to finish).
+
+       Built (ADR-014 D12, increment 7b): mid-way through `store migrate --to
+       repo` it runs in the main checkout, which finds neither home, reading
+       the project from the session's worktree the marker names, as `session
+       merge` does.
 
        The success line is a CONTRACT with the host adapter, which binds a host
        session by parsing `session <id> (` out of the stdout of the command that
@@ -1944,10 +2148,18 @@ Session
        the user's temporary directory, never in the project — and the line
        actually typed only runs it, carrying the claim token:
 
-           cd <main> && exec env -u CLAUDECODE -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>
+           exec env -u CLAUDECODE -u … INVARIANT_HANDOFF=<session-id>:<at> /bin/sh <launch file>
 
-       The launch file removes itself and then runs `claude --name <slug>
-       --remote-control <slug> "<note>"`, the note still the one positional
+       The launch file removes itself, changes into the main checkout, and then
+       runs `claude --name <slug> --remote-control <slug> "<note>"`. The typed
+       line carries no `cd` (BUG_129, ADR-005 D8): it is typed before the
+       window's shell has started, and a start-up step that reads the terminal
+       first, such as oh-my-zsh's update prompt, can eat its leading
+       characters. A line that has lost any of `exec` names no command and runs
+       nothing; one that lost more either fails or runs the launch file, which
+       enters the checkout itself. A checkout the file cannot enter prints
+       "invariant: cannot enter the main checkout <path>; claude was not
+       started." and exits 1 without running `claude`. The note is still the one positional
        argument and so the first prompt, whatever its length. A launch file left
        by a failed launch is removed; any older than an hour is swept on the next
        handoff. The JSON result carries `launch_file` and `by_hand`, the same
@@ -1956,14 +2168,15 @@ Session
        The window ends with Claude (IDEA_035). The typed line `exec`s the launch
        shell, so the tab's own shell is replaced and no prompt is left once
        Claude exits: the window closes, or shows itself finished, as the user's
-       Terminal profile says. A `cd` that fails stops before the `exec`, and that
-       window keeps its prompt. The launch file runs `claude` as its child, not
+       Terminal profile says. A checkout the launch file cannot enter ends it
+       with status 1, which a default profile keeps on screen with its message.
+       The launch file runs `claude` as its child, not
        by `exec`, so it can still speak afterwards: when Claude fails, a
        non-zero exit up to 128, and only at a terminal, it prints "claude exited
        with status N. Press Return to close this window." and waits, so a
        start-up error stays on screen. A status above 128 is Claude ended by a
        signal, such as the closer's SIGTERM below, and never waits. Every path
-       then exits 0, which a default profile ("close if the shell exited
+       that ran `claude` then exits 0, which a default profile ("close if the shell exited
        cleanly") takes as a window to close. The by-hand line is never
        `exec`-ed: it is pasted into a shell somebody is still using. The
        successor watch is unchanged, because it finds `claude` by its flags and
@@ -1992,11 +2205,15 @@ Session
        process — not one of that name already running — whose argv runs `claude`
        with `--name <slug>` and `--remote-control <slug>`, found within 15
        seconds (`SUCCESSOR_TIMEOUT_SECONDS`) and still running 3 seconds later
-       (`SUCCESSOR_GRACE_SECONDS`). Without one the handoff exits 1, says no
+       (`SUCCESSOR_GRACE_SECONDS`), and running in the main checkout (BUG_129,
+       ADR-005 D8): its working directory, read with `lsof`, must be the main
+       checkout on disk. Without one the handoff exits 1, says no
        successor started and prints the command to run by hand, removes the
        launch file, and leaves this session running whatever `--keep-open`
-       says. The note stays recorded. The JSON result carries `successor`:
-       `{"pid": <pid>}`.
+       says. A successor found elsewhere, or one whose directory cannot be
+       read, fails the handoff the same way: the error names its pid and where
+       it runs, and it is left running for its user to close. The note stays
+       recorded. The JSON result carries `successor`: `{"pid": <pid>}`.
 
        Once the launch has succeeded, the old session ends itself, its window
        included (IDEA_009, BUG_100). The output is printed in full; then, 20
@@ -2232,7 +2449,7 @@ Work items
    :part_of: COMP_CLI_MAIN
 
    The command group for ``invariant item``: new, list, show, transition,
-   residue and migrate; each command's contract is in this section.
+   set, residue and migrate; each command's contract is in this section.
 
 
 ::
@@ -2254,14 +2471,31 @@ Work items
    invariant item list [--type <t>] [--status <s>] [--open]
    invariant item show <id>
    invariant item transition <id> <status> [--reason <text>] [--force]
-                             [--ruling "<who, date>" --evidence <commit>]
-       --ruling and --evidence come as a pair; either alone is refused, naming
-       the missing one, and --evidence must resolve to a commit. Every history
-       row the command writes carries both. Where the machine has no direct
-       edge but exactly one state lies between, that state is recorded too, on
-       the ruling — how an ALREADY-FIXED bug goes filed -> reproduced -> fixed
-       in one command and one write (state_model.md, "An already-fixed bug
-       closes through a ruling").
+                             [--evidence <commit> [--ruling "<who, date>"]]
+       --evidence is the commit the transition rests on, given alone or with
+       a ruling (DEC_ADR_022_D1). It must resolve to a commit, or nothing is
+       written, and every history row the command writes carries its full
+       hash. --ruling needs --evidence, and is refused alone; the ruling is
+       recorded on every row beside the commit. Only a ruling walks a missing
+       edge: where the machine has no direct edge but exactly one state lies
+       between, that state is recorded too, on the ruling — how an
+       ALREADY-FIXED bug goes filed -> reproduced -> fixed in one command and
+       one write (state_model.md, "An already-fixed bug closes through a
+       ruling"). A commit alone buys no route: filed -> fixed with
+       --evidence and no --ruling is refused, naming the ruled route.
+   invariant item set <id> [--field k=v]... [--add k=v]... [--remove k=v]...
+                           [--unset k]... --reason <text> [--evidence <commit>]
+       Changes an existing item's fields (DEC_ADR_023_D1): --field replaces
+       a value, --add and --remove edit it as a comma-separated list (a field
+       --remove empties is dropped), --unset drops it. Every change is
+       checked before anything is written, then one save; each field that
+       changed gets one history row. Refused, writing nothing: no change or
+       no --reason; id, status (naming `item transition`), type, title,
+       residue (naming `item residue`) and history; a key that is not a
+       plain name or that the backend cannot hold as a field; a key under
+       two operations; a value with a line break; an empty --field value;
+       --remove of a value not held and --unset of an absent field; a commit
+       that does not resolve. Any state, terminal included (DEC_ADR_023_D3).
    invariant item residue <id> [--add <text> | --clear <text>]
    invariant item migrate --to markdown|json|sphinx_needs [--path <p>]
                           [--closed-path <p>] [--from <reader>] [--dry-run]
@@ -2311,9 +2545,28 @@ build recorded, does not hold, or when no build is recorded at all:
 and the verdict is printed on stderr as a warning. ``item transition --force --reason`` passes it, the recorded route.
 
 ``item show`` prints the history, one row per line, with its reason, ``forced``,
-the ruling and the evidence commit, and marks a row recorded on a ruling
+the ruling and the evidence commit (on a row that names a commit with no
+ruling too, IDEA_052), and marks a row recorded on a ruling
 rather than walked — which is what tells a ruled close apart from a
-``not_reproducible`` one.
+``not_reproducible`` one. A field row (``item set``) prints as ``<field>: <was>
+-> <now>``, an absent value as ``(unset)``, with its reason, date and commit.
+
+**Built (IDEA_051, :need:`DEC_ADR_023`).** ``item set`` changes the fields an
+item was filed with, which before it only a hand edit of the store could:
+``affects``, ``severity``, ``priority``, ``batch`` and the rest. Its shape and
+refusals are in the synopsis above. The text it adds, the new values and the
+reason, is asked of ``items.decisions_linked`` as ``item new``'s fields are,
+and a blocking verdict refuses the write with exit 1; there is no ``--force``.
+``--evidence`` is resolved as ``item transition``'s is (:need:`DEC_ADR_022_D1`)
+and recorded on every row; ``--ruling`` is not offered, since a field change
+has no route to buy. A ``--field`` to the value already held and an ``--add``
+of a value already listed change nothing; a command that changes nothing
+writes nothing, prints ``nothing changed`` and exits 0. The command writes the
+items store alone, through the backend, so ``items.exempt`` covers it as it
+covers ``new`` and ``transition``. ``--json`` carries the item and
+``changed``, the rows written. Each row is ``field``, ``was``, ``now``,
+``reason``, ``date`` and, when given, ``evidence``, with no ``from`` and ``to``
+(:need:`DEC_ADR_023_D2`; state_model.md, "Domain: work item").
 
 Memory
 ------
@@ -2887,7 +3140,8 @@ Rules and gates
    :part_of: COMP_CLI_MAIN
 
    The command group for listing rules, checking one, overrides and standing
-   enforcement down, and running and listing the project's own steps
+   enforcement down, running and listing the project's own steps, and
+   recording the user's ruling for a loosened built-in at a terminal
    (ADR-021); each command's contract is in this section.
 
 
@@ -3004,6 +3258,54 @@ Rules and gates
        the project declares, `step.<name>`, with its summary and where it was
        declared ("[repo:.claude/invariant.yaml]"; `provenance` under --json,
        on a step's row only). `invariant check` with no ids judges them too.
+       Built (ADR-021 D6, D8, increment 3): a rule the configuration loosens
+       ends "[ruling: by <who>, <date>]", or "[loosened with no ruling:
+       invariant rules carry-over]" during D8's release, and then a last line
+       counts the unruled loosenings, the profile and machines included.
+       --json adds `loosenings`: {key, value, source, ruling}, the ruling
+       null when none is recorded.
+
+   invariant rules loosen <key> [--to <level>] --by <who> --reason <why>
+       Built (ADR-021 D7, increment 3). Lower a built-in and record the
+       user's ruling for it in one write: the level in enforcement.rules and
+       the ruling, {by, date: today, reason}, under enforcement.rulings.
+       <key> is a registered rule (--to a level below its standard one),
+       `profile` (--to a profile that sets a rule below standard, `loose`),
+       or `machine.<name>` (no --to; its methodology.extra_machines entry is
+       already there, and only the ruling is written). It shows the file, the
+       level and the entries, and asks "Record this ruling? [y/N]" at a
+       terminal: with no terminal on stdin, or under --json, it refuses,
+       writing nothing and exiting 1, because a ruling an agent could write
+       is the agent ruling for the user (ruling 3). There is no --yes. The
+       user runs it in a terminal of their own.
+       Refused, exit 2, naming the fix: a floored rule (no ruling lowers
+       one), a level that is not below standard (raising needs nothing), a
+       level the chosen profile already holds (its `profile` ruling covers
+       it), the project's own step (D1), an id that is no rule, a profile
+       that loosens nothing, and a machine nothing shadows. It writes the
+       project's own level, the in-repo manifest or the repository's
+       `store.repos.<key>` block of the store's invariant.yaml, in place: every
+       other line, comments included, is kept, and a level's trailing comment
+       stays on its line. A file it cannot edit that way (a flow-style
+       mapping, a duplicated key; any result that would not read back as
+       exactly the settings meant) is not written, and the entries are
+       printed to add by hand. A file changed while the question was asked
+       is not written over. The configuration is loaded again after the
+       write, and a load that fails puts the file back. It loads a
+       configuration the refusal would stop, so it is also how such a one is
+       repaired.
+
+   invariant rules carry-over
+       Built (ADR-021 D8, increment 3). Write a ruling for each loosening the
+       configuration has with none: `by: carried over`, today, and as the
+       reason the comment directly above the entry that set it (its trailing
+       comment when there is none above), or "lowered before rulings were
+       recorded, carried over at the upgrade". It reads the comment from the
+       level that set the loosening and writes where `rules loosen` writes,
+       under the same terminal confirmation, and refuses the same way without
+       one. With nothing loosened it writes enforcement.rulings empty, so a
+       loosening added later is refused; once the refusal is in force with
+       nothing unruled it says "nothing to carry over" and writes nothing.
 
    invariant step run <name>        Run one of the project's steps and record it.
        Built (ADR-021 D3, D4, increment 1). It runs in the tree its point
@@ -3587,6 +3889,18 @@ Host bridge
        the first time a host starts there (`via: session-start`). It never
        changes the response: a known project costs one read, and a failure is
        swallowed.
+
+       Built (ADR-021 D7, increment 3). `config.rulings_by_user` (block in
+       every profile) is among the pre-tool-use rules: an Edit, Write or
+       MultiEdit whose result adds or changes an enforcement.rulings entry
+       in a file a config level is read from, an in-repo manifest in any
+       checkout, the project's store invariant.yaml or the user level, is
+       denied, naming `invariant rules loosen` and `invariant rules
+       carry-over`. The edit is applied to the file as it stands and both
+       are read as YAML; a ruling removed passes, and an edit that does not
+       read as YAML is denied only when it names rulings. A shell command
+       writing the file is not screened, as for every edit rule; the
+       terminal confirmation is what holds that route.
 
        Built (ADR-014 D5, increment 4b), in a store project: a path in the
        project's own store is home, attributed by the ordinary order and

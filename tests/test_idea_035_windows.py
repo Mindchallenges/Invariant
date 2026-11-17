@@ -77,7 +77,7 @@ def plan(note="hello there", cwd="/work/a dir", token=None, claude="/opt/bin/cla
 class TestTheTypedLineIsExeced:
     def test_the_window_shell_is_replaced_by_the_launch_shell(self):
         tokens = shlex.split(plan().shell_line)
-        assert tokens[:5] == ["cd", "/work/a dir", "&&", "exec", "env"]
+        assert tokens[:2] == ["exec", "env"]
 
     def test_the_by_hand_line_is_not_execed(self):
         """Pasted into a shell that is already up, ``exec`` would end that shell."""
@@ -91,13 +91,19 @@ class TestTheTypedLineIsExeced:
         with pytest.raises(launch.InvariantError, match="would be"):
             plan(cwd=tmp_path)
 
-    def test_a_cd_that_fails_execs_nothing_and_leaves_the_prompt(self, tmp_path):
-        """``cd x && exec …``: a missing checkout stops before the shell is replaced."""
-        line = plan(cwd=tmp_path / "gone").shell_line
-        proc = subprocess.run(["/bin/sh", "-c", line + "; echo still-here"],
-                              capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              check=False)
-        assert "still-here" in proc.stdout
+    def test_a_checkout_that_cannot_be_entered_runs_no_claude_and_says_so(self, tmp_path):
+        """The launch file enters the checkout itself (BUG_129); a missing one
+        ends the launch with status 1, which keeps its window and message."""
+        ran = tmp_path / "claude-ran"
+        fake = fake_claude(tmp_path, f"open({str(ran)!r}, 'w').close()")
+        gone = tmp_path / "gone"
+        staged = launch.plan_launch(str(fake), "p1-idea", "a note", gone)
+        proc = subprocess.run(["/bin/sh", "-c", staged.shell_line], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL, timeout=30, check=False)
+        assert proc.returncode == 1
+        assert launch.LAUNCH_NO_CHECKOUT % gone in proc.stderr
+        assert not ran.exists()
+        assert not Path(staged.launch_file).exists()
 
 
 class TestTheLaunchFile:
@@ -105,7 +111,8 @@ class TestTheLaunchFile:
         lines = plan().script.splitlines()
         assert lines[0] == "#!/bin/sh"
         assert shlex.split(lines[1])[:3] == ["rm", "-f", "--"]
-        assert tuple(shlex.split(lines[2])) == plan().argv
+        assert shlex.split(lines[2])[:3] == ["cd", "--", "/work/a dir"]
+        assert tuple(shlex.split(lines[3])) == plan().argv
         assert not any(line.lstrip().startswith("exec") for line in lines)
         assert lines[-1] == "exit 0"
 

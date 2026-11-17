@@ -1,0 +1,55 @@
+id: docs-project
+kind: pipeline
+description: >
+  A change to a documentation repository: a project whose own content is a
+  Sphinx project, with no unit tests and no code to measure (ADR-015 D2,
+  ruling 5).
+
+  `tdd` cannot carry it: no test could fail before a page is written, so its
+  red phase cannot be met, and a documentation build executes nothing a
+  coverage run could measure. `docs` cannot either: it lands prose with no
+  build at all, and in a documentation repository the prose IS the product,
+  so a broken reference or an invalid need would land unread.
+
+  This lane lands on the test the sphinx adapter runs, `commands.test`: a
+  link check, then sphinx-needs' validation when `conf.py` loads it, each
+  reading every source strictly (`-E -W -n`). The landing does not also run
+  `commands.build` (ruling 6): a warning that would break the strict build
+  already fails that test. What it does not reach is an HTML theme or
+  template error, which only an HTML build raises; a project that wants that
+  gated declares its own lane through `methodology.extra_machines`.
+
+  Shipped so the documentation repositories that adopt invariant do not each
+  carry a copy of it, drifting apart (ruling 5). The docs-first gates, the
+  agent gates and the rest of the landing's injected gates attach by role, as
+  on every lane.
+
+initial: drafting
+terminal: [committed, abandoned]
+
+states:
+  drafting:
+    description: >
+      Writing. The architecture docs are read here, as anywhere else, and the
+      design agent's dispatch is owed at the landing.
+    roles: [design]
+    next: [reviewing, abandoned]
+  reviewing:
+    description: >
+      Read back what was written. No entry gate: the test is owed to LAND,
+      as in `chore`, and asking for a green run to start reading back would
+      make the read-back the place a broken page is first found.
+
+      `reviewing -> drafting` is ungated. A read-back that finds more writing
+      to do is not landing anything (BUG_037).
+    roles: [review]
+    next: [committed, drafting, abandoned]
+  committed:
+    description: >
+      The strict test is green and the change is screened for privacy. No
+      separate strict build runs here (ruling 6).
+    roles: [landing]
+    entry_gates: [test.all_pass, privacy.clean]
+  abandoned:
+    description: The work was dropped. Reaching it is deliberately ungated.
+    roles: [abandon]

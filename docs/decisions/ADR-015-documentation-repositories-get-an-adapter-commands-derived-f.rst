@@ -502,3 +502,63 @@ Open questions
 
 None. The draft's four questions were ruled on 2026-11-05 (rulings 5 to 7),
 and no ruling raised a new one.
+
+As built: increment 2 (2026-11-17)
+----------------------------------
+
+D1 was built early, by :need:`ADR-018 <DEC_ADR_018>` increment 2: the
+``sphinx`` adapter, its hazards, and ``coverage.meets_floor`` answering N/A by
+name. This increment builds the rest of the row, D2, as the architecture docs
+describe it (``state_model.rst``, the ``docs-project`` machine and the shipped
+methodologies; ``cli.rst``, ``doctor``; ``overview.rst``, ``core/machines``;
+``manifest.rst``, the sphinx adapter's lane; ``oracle-panel.rst``, the lane's
+phrases). No arrow moves. Where the build settles what the text left open:
+
+.. dec:: ADR-015 increment 2 as built: the docs-project lane, and the command rows doctor reads off every selectable lane
+   :id: DEC_ADR_015_I2
+   :status: accepted
+   :part_of: DEC_ADR_015
+   :affects: COMP_MACHINE_DOCS_PROJECT, COMP_CORE_MACHINES, COMP_CMD_SETUP, COMP_ORACLE_PANEL
+
+   - **The lane.** ``data/machines/docs-project.yaml``: ``drafting`` (role
+     design), ``reviewing`` (role review), ``committed`` (role landing) and
+     ``abandoned`` (role abandon). ``committed``'s entry gates are
+     ``test.all_pass`` and ``privacy.clean``, and nothing else is written in
+     the file: the docs-first, agent, guidelines and step gates arrive by
+     role, as on every lane. ``reviewing`` has no entry gate, as in ``chore``:
+     the test is owed to land, not to start reading back, and ``reviewing ->
+     drafting`` is an ungated retreat (BUG_037). No ``red_phase``, since the
+     lane names no ``test.new_test_fails``.
+   - **Which lanes count.** Every lane ``pipeline start --methodology`` may
+     start: ``core/machines.pipeline_ids``, the shipped machines and the
+     project's ``extra_machines``. So the recommended reading of D2 holds in
+     every project: ``tdd``, ``bugfix``, ``chore``, ``spec-first`` and
+     ``docs-project`` all carry ``test.all_pass``, and ``commands.test`` is
+     required everywhere. Each lane is assembled as a pipeline runs it
+     (``load_pipeline_machine``), so a gate injected by role counts.
+   - **What requires a command.** A ``test.*`` gate reads a ``commands.test``
+     run, ``coverage.meets_floor`` a ``commands.coverage`` run. Two cases
+     D2 did not name require nothing, because the gate never asks for a run:
+     a gate at level ``off``, and ``coverage.meets_floor`` with
+     ``coverage_min`` 0, which answers N/A first. ``commands.coverage`` is
+     then required only while some declared adapter's coverage applies, as
+     D2 says; with every declared adapter declaring it not applicable the
+     row passes, naming the adapters, beside D1's ``coverage`` row.
+   - **The rows.** ``commands.build``, ``commands.test`` and
+     ``commands.coverage``, in that order, replacing the ``commands.build
+     configured`` and ``commands.test configured`` rows. Each names the
+     command (or ``unset``) and the lanes and gates requiring it, the
+     configured lane first and marked ``(methodology.pipeline)``.
+     ``commands.build`` always passes, "required by nothing". A required
+     command unset fails, naming the gates that would have nothing to run.
+     A lane that does not load fails one ``commands`` row, naming why. The
+     rows read the flat keys, the primary ecosystem's, which a whole run
+     uses (ADR-013); the commands of a further ecosystem keep no row.
+   - **Doctor in every project.** On fresh clones of invariant, Heap and
+     Dang, run with the code before and after, these rows are the only
+     differences this increment makes: invariant's and Dang's
+     ``commands.build`` FAIL becomes a pass, Heap's set build stays a pass,
+     and every project gains a ``commands.coverage`` row, which passes in all
+     three.
+   - **The oracle's phrases.** ``docs-project`` reads as the ``docs`` lane on a
+     card, "Writing docs" and "In review", since its states are the same.

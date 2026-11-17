@@ -665,6 +665,16 @@ class Manifest:
     #: repo's own. What a level itself sets, as against what resolves, is
     #: read here (ADR-017 D2, a question's current value at its target).
     levels: tuple[tuple[str, dict[str, Any]], ...] = ()
+    #: The loosenings that carry no ruling (ADR-021 D6), set by ``validate``.
+    #: Refused once a level carries ``enforcement.rulings``; until then they
+    #: load with a warning for one release (D8), which ``doctor`` and ``rules
+    #: list`` show (``core/rulings.warning``).
+    unruled: tuple[Any, ...] = ()
+    #: The profile, rule levels and provenance as configured, before the
+    #: environment's escapes (D6): what a loosening is judged on.
+    _configured: tuple[str, dict[str, Any], dict[str, str]] | None = field(
+        default=None, repr=False
+    )
     _discovery_cache: dict[str, str] = field(default_factory=dict, repr=False)
 
     # -- discovery -----------------------------------------------------
@@ -918,6 +928,15 @@ class Manifest:
             ),
         )
 
+        # What the levels configure, kept before the environment's escapes:
+        # a loosening is judged on it, never on a per-invocation route
+        # (ADR-021 D6).
+        manifest._configured = (
+            str(data["enforcement"]["profile"]),
+            dict(data["enforcement"]["rules"]),
+            dict(provenance),
+        )
+
         # Layer 6 — environment escapes.
         manifest._apply_env(env)
         try:
@@ -1036,6 +1055,16 @@ class Manifest:
                 self.data["enforcement"]["rules"][rule_id] = Level.OFF.value
                 self.provenance[f"enforcement.rules.{rule_id}"] = "env:INVARIANT_DISABLE"
 
+    def configured(self) -> tuple[str, dict[str, Any], dict[str, str]]:
+        """The profile, rule levels and provenance the levels set, without
+        ``INVARIANT_PROFILE`` or ``INVARIANT_DISABLE`` (ADR-021 D6). A
+        manifest built by hand, with no record of them, answers what it holds.
+        """
+        if self._configured is not None:
+            return self._configured
+        enforcement = self.data["enforcement"]
+        return str(enforcement["profile"]), dict(enforcement["rules"]), dict(self.provenance)
+
     def _floored(self) -> tuple[str, ...]:
         """The rules no level may set below `block` here (ADR-018 ruling 19).
 
@@ -1067,6 +1096,10 @@ class Manifest:
                 "with a reason (ADR-018 ruling 1, D10), so this rule cannot be "
                 "set below block (ruling 19)"
             )
+            rulings = self.data["enforcement"].get("rulings")
+            if isinstance(rulings, Mapping) and rule_id in rulings:
+                # A ruling never lowers a floored rule (ADR-021 ruling 1).
+                why += ", and a ruling does not lower it (ADR-021 ruling 1)"
             raise ManifestError(
                 f"enforcement.rules.{rule_id} is {level.value} (from {source}), but "
                 f"{why}. Remove the entry. To pass one change, use the recorded "
@@ -1151,6 +1184,7 @@ class Manifest:
         self._validate_docs()
         self._validate_docs_needs()
         self._validate_floor()
+        self._validate_rulings()
         self._validate_docs_assess()
         self._validate_docs_adopt()
         self._validate_agents()
@@ -1170,6 +1204,13 @@ class Manifest:
             find_machine_file(methodology, self)
         except ManifestError as exc:
             raise ManifestError(f"methodology.pipeline: {exc}") from exc
+
+    def _validate_rulings(self) -> None:
+        """Each loosening of a built-in carries a ruling, and each ruling a
+        loosening (ADR-021 D6); one release of warning first (D8)."""
+        from . import rulings
+
+        rulings.judge(self)
 
     def _validate_steps(self) -> None:
         """The project's own steps (ADR-021 D1, D2), refused at load naming

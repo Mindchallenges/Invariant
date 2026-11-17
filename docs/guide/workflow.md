@@ -174,6 +174,7 @@ recorded so a later manifest edit cannot swap a running pipeline's gates.
 | `spec-first` | designing → specified → implementing → reviewing → committed | a change whose specification is the deliverable and the implementation follows it |
 | `chore` | doing → reviewing → committed | a rename, a formatter pass, a dependency bump — green suite, no proof of red |
 | `docs` | drafting → reviewing → committed | prose, records, backlog entries — privacy still blocks, the docs are still read |
+| `docs-project` | drafting → reviewing → committed | a documentation repository's change: lands on the strict test (`test.all_pass`, the sphinx adapter's link check and needs validation) and privacy, with no red test, coverage or build step |
 | `none` | working | the escape hatch: one state, no gates; sessions and work items still apply |
 
 Pick by the *content* of the change, not its size. A one-line fix to a

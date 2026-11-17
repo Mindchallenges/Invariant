@@ -492,7 +492,7 @@ Decisions
      saying ``session isolate`` copies it. The row warns only on a manifest
      git neither tracks nor ignores, naming ``git add`` and the exclude
      line. The in-repo rows are built; the store and two-homes rows are
-     not.
+     built with increment 3 (:need:`DEC_ADR_020_I3`).
    - **Warns, two homes:** an in-repo manifest beside a user-level link, or
      beside a store listing this repository's identity. The row names both,
      and the one ``Manifest.locate`` uses (the in-repo manifest, ADR-014
@@ -1097,3 +1097,141 @@ offer of a new project and accepted for an existing one; ``init --force``
 over an existing manifest keeps ``docs/``; and this repository resolves
 ``docs/`` as its source directory, is not detected as ``sphinx`` and builds
 ``docs/`` strictly as before.
+
+As built: increment 2 (2026-11-16)
+----------------------------------
+
+D3 with ADR-014 D12, built as ADR-014's increments 7a (2026-11-15,
+:need:`DEC_ADR_014_I7A`, ``--to store``) and 7b (2026-11-16,
+:need:`DEC_ADR_014_I7B`, ``--to repo``), as the architecture docs describe
+it (``cli.rst``, ``store migrate``). Where the build settles what the text
+left open:
+
+.. dec:: ADR-020 increment 2 as built: the round trip between the two homes
+   :id: DEC_ADR_020_I2
+   :status: accepted
+   :part_of: DEC_ADR_020
+   :affects: COMP_CORE_STOREMIGRATE, COMP_CLI_MIGRATE, COMP_HOSTS_CLAUDE_CODE
+
+   - **Everything moves together, both ways.** ``--to store`` moves the
+     configuration and every data and policy record and makes the wiring
+     ``local``; ``--to repo`` moves every record kept in the store back and
+     makes the wiring committed. The configuration is in the repository only
+     while every record is (ruling 5).
+   - **The keys materialised** are the store's own level overlaid by the
+     repository's block, less ``store`` and ``records``, and less the keys an
+     in-repo manifest refuses at load, ``sync`` and ``privacy.store``, which
+     are named as left behind. ``config show`` resolves the same values,
+     labelled ``repo:``, except those store-only keys and ``sync``'s
+     defaults.
+   - **The user-level link** is written at once by ``--to store`` and
+     removed by ``--to repo`` only after its repository leg lands.
+   - **D3's refusals are built in both directions**, the root ``conf.py``
+     one read for any ``conf.py`` at or above the docs project's folder.
+     ``--records`` is in no increment and is refused in either direction.
+   - **Not built here:** ``doctor``'s ``config home`` store and two-homes
+     rows and its ``docs folder`` row (D5), which stay with the switch
+     (increment 3).
+
+The proof is ``tests/test_adr_014_migrate_to_repo.py``'s round trip, on a toy
+in-repo project with its wiring committed: ``--to store`` then ``--to repo``,
+``config show`` labelled ``store:`` then ``repo:`` with the same values,
+history intact both ways, ``invariant-docs/`` moved with no path rewritten,
+the wiring committed, local and committed again, ``git status`` clean in both
+homes, each of D3's refusals exiting 2 with nothing written, the root
+``conf.py`` one included, and a failed repository merge on ``--to repo``
+half-landed and finished by ``session resume``. ``tests/test_adr_014_migrate.py``
+is 7a's.
+
+As built: increment 3, the switch (2026-11-16)
+----------------------------------------------
+
+D1, D4, D5 and D9's question, as the architecture docs describe them
+(``cli.rst``, ``init`` and ``doctor``; ``manifest.rst``, "Records and their
+locations"; ``overview.rst``, ``core/stores``, ``core/questionnaire``,
+``cli/onboarding`` and "Where things live at rest"). Where the build settles
+what the text left open:
+
+.. dec:: ADR-020 increment 3 as built: the store home planned before it is written, and what an existing project keeps
+   :id: DEC_ADR_020_I3
+   :status: accepted
+   :part_of: DEC_ADR_020
+   :amends: DEC_ADR_020_D4, DEC_ADR_016_D4
+   :affects: COMP_CMD_SETUP, COMP_CLI_ONBOARDING, COMP_CORE_STORES, COMP_CORE_QUESTIONNAIRE, COMP_CORE_STOREMIGRATE, COMP_CLI_CONFIGURE
+
+   - **The store is planned, then written.** ``core/stores.plan_home_store``
+     names the store the home will be, writing nothing: ``--store``'s path or
+     the store step's answer (a store there that lists this repository is
+     linked, an empty or absent directory gets a new one, anything else is
+     refused), or the default parent named by ``store_naming``, where a name
+     already holding a store for this repository is linked and a taken name
+     falls back as ``store init``'s does. A repository with no origin and no
+     ``invariant.id`` is planned under a provisional local ID, which only a
+     dry run shows. Every question, the starter's plan and a dry run read the
+     configuration the planned store resolves to (``_PlannedStore``), labelled
+     ``store:`` as it will be; the writes then make it so, the store first
+     among them, its privacy hooks installed as ``store init`` installs them
+     (ADR-014 D8, which D7 makes a prerequisite of the default).
+   - **One write for the block.** ``records`` (``STORE_HOME_RECORDS``, the set
+     ``store migrate --to store`` writes), ``paths.docs``, the answers at the
+     block, the adapters' settings beneath them and the starter's settings go
+     into this repository's block in one write. The project, with the profile
+     where nothing was asked, goes to the store's own level only when init
+     created the store; answers given at the ``store`` level go there in
+     either case.
+   - **D4's offers, as built.** ``home:location`` is asked first, then the
+     level, where the store home offers ``user``, ``store`` and
+     ``store-repo`` (no ``repo``: the pointer, which init does not write).
+     The store home is not offered outside a git repository or below its
+     top level, and the repository home is not offered where a ``conf.py``
+     at the root would read ``invariant-docs/`` (the rule ``store migrate
+     --to repo`` refuses on, ``conf_readers``); where the store is not
+     offered, the repository is the home whatever a root ``conf.py`` says,
+     and ``doctor``'s ``docs folder`` row names the line. An interactive run
+     whose home is not a choice says which it took and why.
+   - **The docs step offers no store of its own** (amends ADR-016 D4.1): the
+     store is the home's, and under the ``repo`` home an in-repo manifest
+     cannot name one. The location offer arises where the docs directory
+     exists in the home and offers ``reuse`` or another path within it.
+   - **An existing project keeps its home** (D2). ``init --force`` over an
+     in-repo manifest takes ``repo`` (``kept``), naming ``store migrate --to
+     store`` as the way to move. A store project, which ``Manifest.locate``
+     finds at this root, is refused by ``init`` without ``--force``, naming
+     its store; with it, its store is linked again and init's settings are
+     merged into its block, its ``records`` kept. ``--home`` or ``--store``
+     naming another home or store is refused.
+   - **The route line.** The report's line after the rows names the other
+     home's route. A dry run names ``init --home repo`` (or ``--home store``)
+     and, later, ``store migrate``; a written run names ``store migrate``
+     alone, because re-running ``init`` cannot move a home (D2).
+   - **D9's question** stays last and default no in both homes; under the
+     store home a yes wires ``local``, through ADR-014 increment 3's plan.
+     ``host:install`` keeps its own seam and is not a catalogue question.
+   - **Not built here:** ``--set home:location=repo`` waits for ADR-017's
+     scripted flags (its increment 3), and the advanced ``records`` section's
+     home-following defaults for its increment 4: neither ``--set`` nor the
+     advanced section exists yet.
+   - **The repository home is byte for byte today's** ``init``: the manifest,
+     the ``.gitignore`` line and the state directory it always created
+     (BUG_116 stays open for that layout). The store home creates the state
+     root ``Manifest.state_root`` resolves, in the git common directory, and
+     writes no ``.gitignore`` line.
+
+The proof is ``tests/test_adr_020_switch.py``, on a toy git repository with a
+scratch ``HOME`` and the suite's scratch ``INVARIANT_HOME``: ``init`` with no
+terminal leaves ``git status`` empty, writes no ``.claude/``, ``.gitignore``
+or ``invariant-docs/`` in the repository and nothing in ``HOME``, creates and
+links the store with its privacy hooks, sets ``records`` as D1 says, writes
+the starter at ``invariant-docs/`` in the store and names the install
+commands; ``--host-install`` wires ``local`` with one entry per event, ``git
+status`` still empty, and the shims answer as the host calls them; a
+docs-lane session runs from start to merge with the doc landed in the store
+and the repository holding only its own commit; ``--home repo`` writes the
+in-repo layout; outside a git repository, and below its top level, ``init``
+takes ``repo`` and names why; a root ``conf.py`` is not offered ``repo`` and
+``doctor`` names the exclude line until it is added; the flags' refusals exit
+2 with nothing written; ``doctor``'s ``config home`` rows for a store
+project, a store remote and two homes, a half-landed move among them; the
+interactive order and offers; the catalogue's ``home`` step; and
+``plan_home_store``. The strict build of the starter in the store is behind
+``INVARIANT_TEST_SPHINX_BUILD``.

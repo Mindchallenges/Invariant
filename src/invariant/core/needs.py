@@ -456,11 +456,31 @@ def load_needs_json(path: Path) -> NeedsFile:
 # -- traceability (D6) ------------------------------------------------------------
 
 
+#: The three ``docs.needs`` settings a need problem is settled by (BUG_128):
+#: each problem names one, so a project told it has hundreds is told which
+#: setting describes each kind.
+TYPES_SETTING = "docs.needs.types"
+STATUSES_SETTING = "docs.needs.decision_statuses"
+LINKS_SETTING = "docs.needs.require_links"
+SETTINGS = (TYPES_SETTING, STATUSES_SETTING, LINKS_SETTING)
+
+
 @dataclass(frozen=True)
 class Problem:
+    """One need the configuration does not hold.
+
+    ``setting`` is the ``docs.needs`` key that settles it, ``kind`` which of
+    its checks failed (``directive``, ``prefix``, ``status``, ``link``) and
+    ``value`` what the check read: the directive, the status (``""`` for none)
+    or the link rule.
+    """
+
     need: str
     where: str
     message: str
+    setting: str = ""
+    kind: str = ""
+    value: str = ""
 
     def render(self) -> str:
         return f"{self.where} {self.need}: {self.message}"
@@ -497,6 +517,9 @@ def check(
                     where,
                     f"directive {item.type!r} is not declared in docs.needs.types; "
                     "map it to a role, or declare it with no role",
+                    TYPES_SETTING,
+                    "directive",
+                    item.type,
                 )
             )
             continue
@@ -507,13 +530,21 @@ def check(
                     where,
                     f"its id does not start with {declared.directive}'s prefix "
                     f"{declared.prefix!r}",
+                    TYPES_SETTING,
+                    "prefix",
+                    declared.directive,
                 )
             )
         if declared.role == "decision":
             if item.status is None:
                 problems.append(
-                    Problem(item.id, where, "a decision with no status; one of "
-                            + ", ".join(decision_statuses))
+                    Problem(
+                        item.id,
+                        where,
+                        "a decision with no status; one of " + ", ".join(decision_statuses),
+                        STATUSES_SETTING,
+                        "status",
+                    )
                 )
             elif item.status not in decision_statuses:
                 problems.append(
@@ -523,6 +554,9 @@ def check(
                         f"status {item.status!r} is not one of "
                         + ", ".join(decision_statuses)
                         + " (docs.needs.decision_statuses)",
+                        STATUSES_SETTING,
+                        "status",
+                        item.status,
                     )
                 )
         for rule in rules:
@@ -535,9 +569,137 @@ def check(
                         item.id,
                         where,
                         f"links to no {rule.target} need (require_links: {rule.render()})",
+                        LINKS_SETTING,
+                        "link",
+                        rule.render(),
                     )
                 )
     return problems
+
+
+def by_setting(problems: Sequence[Problem]) -> dict[str, int]:
+    """How many of ``problems`` each setting settles, in :data:`SETTINGS` order."""
+    counted = Counter(p.setting for p in problems)
+    return {setting: counted[setting] for setting in SETTINGS if counted[setting]}
+
+
+def sample(problems: Sequence[Problem], limit: int) -> list[Problem]:
+    """At most ``limit`` of ``problems``, taken in turn from each kind.
+
+    A project with 141 problems of one kind and 5 of another sees both kinds
+    among the ones named, not the first ``limit`` of the larger (BUG_128).
+    Within a kind the order is ``check``'s.
+    """
+    queues: dict[tuple[str, str], list[Problem]] = {}
+    for problem in problems:
+        queues.setdefault((problem.setting, problem.kind), []).append(problem)
+    order = sorted(
+        queues,
+        key=lambda key: (SETTINGS.index(key[0]) if key[0] in SETTINGS else len(SETTINGS), key[1]),
+    )
+    taken: list[Problem] = []
+    depth = 0
+    while len(taken) < limit and any(depth < len(queues[key]) for key in order):
+        for key in order:
+            if depth < len(queues[key]) and len(taken) < limit:
+                taken.append(queues[key][depth])
+        depth += 1
+    return taken
+
+
+def _tally(counter: Counter[str], limit: int = 8) -> str:
+    """``a (3), b (1)``: the most common first, then by name, ``limit`` at most."""
+    ranked = sorted(counter.items(), key=lambda pair: (-pair[1], pair[0]))
+    shown = ", ".join(f"{name} ({count})" for name, count in ranked[:limit])
+    rest = len(ranked) - limit
+    return shown + (f" and {rest} more" if rest > 0 else "")
+
+
+def _linked_instead(
+    problems: Sequence[Problem], read: NeedsFile, types: Sequence[NeedType], rule: LinkRule
+) -> str:
+    """What the needs failing ``rule`` link to through its options, by the
+    target's role (its directive where it maps to none) and the option."""
+    by_directive = {t.directive: t for t in types}
+    by_id = read.by_id()
+    reached: Counter[str] = Counter()
+    bare = 0
+    for problem in problems:
+        item = by_id.get(problem.need)
+        if item is None:
+            continue
+        options = rule.via or tuple(item.links)
+        found = False
+        for option in options:
+            for target in item.links.get(option, ()):
+                other = by_id.get(target)
+                declared = by_directive.get(other.type) if other is not None else None
+                if declared is not None and declared.role is not None:
+                    kind = declared.role
+                elif other is not None:
+                    kind = f"directive {other.type}"
+                else:
+                    kind = "another project's need"
+                reached[f"{kind} via {option}"] += 1
+                found = True
+        bare += 0 if found else 1
+    said = []
+    if reached:
+        said.append("they link to " + _tally(reached, 4))
+    if bare:
+        said.append(f"{bare} link to nothing" + (" through its options" if rule.via else ""))
+    return "; ".join(said)
+
+
+def advise(
+    problems: Sequence[Problem],
+    read: NeedsFile,
+    types: Sequence[NeedType],
+    rules: Sequence[LinkRule],
+    decision_statuses: Sequence[str],
+) -> tuple[str, ...]:
+    """What to do about ``problems``: one line per kind, naming the setting
+    that settles it and what the project's needs carry (BUG_128).
+
+    Each line offers both ways out, fixing the needs or describing the
+    project in the setting, and chooses neither: which one is right is the
+    project's judgement, and a setting written to fit the needs as they
+    stand would hide exactly the problems the check exists to name.
+    """
+    lines: list[str] = []
+    directives = Counter(p.value for p in problems if p.kind == "directive")
+    if directives:
+        lines.append(
+            f"declare the directive(s) {_tally(directives)} in {TYPES_SETTING}, each "
+            "with its prefix and a role, or with no role as an extension type (a "
+            "list replaces the baseline whole, so it maps every role)"
+        )
+    prefixes = Counter(p.value for p in problems if p.kind == "prefix")
+    if prefixes:
+        lines.append(
+            f"give each need of {_tally(prefixes)} its type's prefix, or set the "
+            f"type's prefix in {TYPES_SETTING}"
+        )
+    statuses = Counter(p.value or "no status" for p in problems if p.kind == "status")
+    if statuses:
+        lines.append(
+            f"decisions carry {_tally(statuses)}: list the project's decision statuses "
+            f"in {STATUSES_SETTING} (now {', '.join(decision_statuses)}), or give each "
+            "decision one of them"
+        )
+    for rule in rules:
+        failing = [p for p in problems if p.kind == "link" and p.value == rule.render()]
+        if not failing:
+            continue
+        instead = _linked_instead(failing, read, types, rule)
+        lines.append(
+            f"{len(failing)} {rule.source} need(s) link to no {rule.target} need "
+            f"({rule.render()})"
+            + (f"; {instead}" if instead else "")
+            + f": link each to one, or set {LINKS_SETTING} to the links the project "
+            "requires"
+        )
+    return tuple(lines)
 
 
 @dataclass(frozen=True)

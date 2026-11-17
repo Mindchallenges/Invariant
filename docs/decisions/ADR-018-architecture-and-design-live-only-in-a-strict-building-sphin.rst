@@ -1520,6 +1520,153 @@ freeze lifts here (ruling 15). What the migration settled is one decision:
      ``docs/architecture/*.md``, ``docs/backlog/``, ``docs/index.md`` and
      the Markdown checklist. Their history stays in git.
 
+As fixed: BUG_128 (2026-11-16)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+D6 says what ``docs.needs_traceable`` checks, and D11 what ``init`` writes
+for a new project; neither said what a docs project built by hand before it
+adopted invariant is checked against. dang is the case: 141 decisions of
+status ``agreed``, decisions linked to requirements through ``satisfies``,
+and five directives beyond the baseline (``port``, ``instr``, ``wp``,
+``issue``, ``inc``), checked against the baseline ``docs.needs`` and reported
+as some 263 problems under one fix line naming only ``docs.needs.types``.
+Where the fix settles what the text left open:
+
+.. dec:: A hand-built project's vocabulary is described in docs.needs, never derived from conf.py, and each problem names the setting that settles it
+   :id: DEC_ADR_018_B128
+   :status: accepted
+   :part_of: DEC_ADR_018
+   :amends: DEC_ADR_018_D6, DEC_ADR_018_D11
+   :affects: COMP_CORE_NEEDS, COMP_CORE_RULES, COMP_DOMAINS_DOCS, COMP_ADAPTERS_SPHINX
+
+   - **Not derived.** Adoption does not write ``docs.needs`` from a project's
+     ``conf.py``, for three reasons read in dang's. ``needs_types`` names
+     directives and prefixes, never roles, so which role ``port`` or
+     ``screen`` plays is a judgement a derivation would guess, and a wrong
+     guess moves every role rule. A status ``enum`` in ``needs_fields`` is
+     one list for every type (D6 item 4), so dang's 18 values, ``filed``,
+     ``open`` and ``done`` among them, would all become decision statuses.
+     And ``needs_links`` names link options, never which ones a decision
+     owes; a ``require_links`` written to fit how the needs link today would
+     hold by construction and hide every decision that links nowhere it
+     should. A ``conf.py`` is also a program (dang's computes its fields from
+     a file), and invariant reads it only through ``ast``.
+   - **Each problem names its setting.** ``core/needs.check`` tags every
+     problem with the setting that settles it (``docs.needs.types`` for an
+     undeclared directive or a prefix, ``docs.needs.decision_statuses`` for
+     a status, ``docs.needs.require_links`` for a link) and what it read.
+     ``docs.needs_traceable``'s message counts the problems by setting, its
+     detail names twenty taken in turn from each kind, so the largest kind
+     never hides the others, and it gives one fix line per kind present,
+     naming the setting and what the needs carry: the directives and how many
+     needs each holds, the statuses decisions carry, and what the needs
+     failing a link rule link to instead, by role and link option. Each line
+     offers both ways out, fixing the needs or describing the project in the
+     setting, and picks neither.
+   - **Adoption names the settings.** Where ``init`` finds a ``conf.py`` that
+     loads ``sphinx_needs`` above ``paths.docs`` (the starter refused over it,
+     or ``paths.docs`` already there inside it while the configuration being
+     written, the mandate it keeps included, is not ``docs.format: sphinx``),
+     its note says the project is adopted as it stands with ``docs.format:
+     sphinx``, still migrating, and names the three settings, with the
+     directives ``conf.py``'s literal ``needs_types`` declares beyond the
+     configured types (read by the ``sphinx`` adapter's ``conf_facts``). A
+     ``conf.py`` whose content is the repository's own still points to D13.
+     ``init`` writes none of the three.
+
+The proof is ``tests/test_bug_128_repro.py``, unchanged but for its
+expected-failure marker: against the baseline, a needs.json with an
+``agreed`` decision linked only through ``satisfies`` to a requirement and an
+undeclared ``wp`` directive draws all three kinds, and the fix lines name
+``docs.needs.types``, ``docs.needs.decision_statuses`` and ``require_links``.
+
+As fixed: BUG_124 (2026-11-17)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+D4 calls ``==`` pins *recommended* and notes that dang's file uses ``>=``, so
+a range file is accepted input; but it fills the environment with ``uv pip
+sync``, which installs exactly the packages a file names and none of what
+they depend on. That is right only for a complete pinned set, like the
+starter's. Over dang's four ranges it left an environment without
+``docutils``, recorded it in sync, and ``sphinx-build`` died on import.
+Where the fix settles what the text left open:
+
+.. dec:: docs venv syncs a pinned file as written, resolves any other first, and records nothing until the environment checks and runs sphinx-build
+   :id: DEC_ADR_018_B124
+   :status: accepted
+   :part_of: DEC_ADR_018
+   :amends: DEC_ADR_018_D4
+   :affects: COMP_DOMAINS_DOCS, COMP_CMD_SETUP
+
+   - **A fully pinned file is synced as written.** A file whose every
+     requirement is ``name==version`` (extras, markers, hashes and index
+     options allowed; no include, editable, URL or wildcard) is ``uv pip
+     sync``-ed exactly as today, so the starter's environment, and
+     invariant's, is the same set it always was.
+   - **Any other file is resolved first.** ``uv pip compile --python <.venv>``
+     writes the file's resolution to ``.venv/invariant-requirements.lock.txt``
+     and that lock is synced, so the environment holds what the ranges need
+     and nothing left over from an earlier sync. Nothing is written in the
+     project's tree. A later ``docs venv`` resolves again, so a range still
+     lets a new release move the build's warnings: that is D4's reason to
+     recommend pins, unchanged.
+   - **Recorded only when it can build.** After the sync, ``uv pip check``
+     must pass and ``<.venv>/bin/sphinx-build --version`` must run. A failure
+     is refused, quoting what is missing; a pinned file that leaves out what
+     its packages depend on is told to pin those too or to write ranges, since
+     invariant does not add unpinned packages to a set the project pinned.
+   - **Nothing reads in sync meanwhile.** The recorded hash is removed before
+     the first step and written after the last, so a refused or failed
+     re-sync of an environment that was in sync leaves it out of sync.
+     ``venv_state`` stays a read of the hash; doctor's row still runs
+     ``sphinx-build --version``.
+
+The proof is ``tests/test_bug_124_repro.py``, unchanged but for its
+expected-failure marker (and the ``pytest`` import only it used): over dang's
+four ranges, through a fake modelling how uv treats each command, the
+environment now holds ``docutils``.
+
+As fixed: BUG_147 (2026-11-17)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+D10 has ``init --force`` keep the keys that put an enforced project under the
+mandate, and B128 tells a project adopted as it stands to set ``docs.format:
+sphinx`` and describe its vocabulary by hand, still migrating. Nothing said
+what ``--force`` keeps of a migrating manifest, so it kept nothing: an adopted
+project came back ``docs.format: markdown``, its ``docs.needs`` description
+gone, and every docs reader and gate read its rST as Markdown. Where the fix
+settles what the text left open:
+
+.. dec:: init --force keeps the docs project's description its manifest sets, in any state
+   :id: DEC_ADR_018_B147
+   :status: accepted
+   :part_of: DEC_ADR_018
+   :amends: DEC_ADR_018_D10, DEC_ADR_018_B128
+   :affects: COMP_CMD_SETUP, COMP_CLI_ONBOARDING, COMP_CORE_DOCFORMAT
+
+   - **The description is kept.** Over an in-repo manifest, ``--force`` keeps
+     ``docs.format``, ``docs.needs.srcdir``, ``docs.needs.types``,
+     ``docs.needs.decision_statuses`` and ``docs.needs.require_links``: what
+     the docs project is, and the four settings B128's note names. Whatever
+     the state, so an adopted project stays adopted and migrating; under an
+     enforced one the mandate's values come first and the description fills
+     in the rest.
+   - **Only what the manifest sets.** Each is read from the manifest's own
+     file, never from a default or another level, so a manifest with no
+     ``docs`` block is rewritten as before, byte for byte, and nothing a
+     user level sets is copied into the repository.
+   - **Nothing else of the block.** ``diagrams``, ``index``,
+     ``needs.refused_paths`` and the rest are rewritten as ``--force`` always
+     rewrote them: it rewrites the manifest, and ``invariant configure`` is
+     the route that edits one. ``init`` still derives none of the
+     description from ``conf.py`` (B128). A store project's block is
+     rewritten in place and keeps them already.
+
+The proof is ``tests/test_bug_147_repro.py``, unchanged but for its
+expected-failure marker (and the ``pytest`` import only it used): a project
+adopted as B128's note says keeps ``docs.format: sphinx`` through ``init
+--force``.
+
 Alternatives rejected
 ---------------------
 
@@ -1536,6 +1683,33 @@ Alternatives rejected
 |                                  | theme, extensions and its own    |
 |                                  | fields. The engine checks the    |
 |                                  | build output instead (D6).       |
++----------------------------------+----------------------------------+
+| Derive ``docs.needs`` from a     | ``conf.py`` names no roles, its  |
+| hand-built project's ``conf.py`` | status list is every type's, and |
+| at adoption (BUG_128)            | a link rule fitted to the needs  |
+|                                  | as they stand hides the ones it  |
+|                                  | should name. The settings are    |
+|                                  | named instead (B128).            |
++----------------------------------+----------------------------------+
+| ``init --force`` keeps the whole | It would copy settings the user  |
+| ``docs`` block of a migrating    | never meant to keep through a    |
+| manifest (BUG_147)               | rewrite, against what ``--force``|
+|                                  | is for. The description is what  |
+|                                  | a wrong value misreads (B147).   |
++----------------------------------+----------------------------------+
+| Refuse a requirements file that  | D4 accepts ranges (dang's file), |
+| is not fully pinned (BUG_124)    | and a pinned file can still miss |
+|                                  | a dependency, so the refusal     |
+|                                  | alone proves nothing runs. Such  |
+|                                  | a file is resolved instead, and  |
+|                                  | every environment is checked     |
+|                                  | (B124).                          |
++----------------------------------+----------------------------------+
+| ``uv pip install -r`` for a      | It keeps whatever an earlier     |
+| ranges file (BUG_124)            | sync left, so two environments   |
+|                                  | from one file can differ. A      |
+|                                  | resolved lock synced exactly     |
+|                                  | does not (B124).                 |
 +----------------------------------+----------------------------------+
 | Parse rST for the gates          | ``needs.json`` is what           |
 |                                  | sphinx-needs itself resolved, so |

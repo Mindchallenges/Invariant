@@ -2386,3 +2386,140 @@ naming why. Where ``INVARIANT_TEST_SPHINX_BUILD`` names a ``sphinx-build``
 with sphinx-needs, a real strict build of the store's docs project passes
 and then fails on a broken reference. ``tests/test_adr_014_migrate.py`` now
 asserts the override advice is gone.
+
+As built: increment 7b (2026-11-16)
+-----------------------------------
+
+D12's ``--to repo`` with ADR-020 D3, as the architecture docs describe it
+(``cli.rst``, ``store migrate``, ``session merge`` and ``session resume``;
+``manifest.rst``, "Records and their locations" and "Finding the project";
+``overview.rst``, ``core/storemigrate``, ``cli/migrate``, ``core/stores``,
+``core/git``, ``adapters/sphinx`` and ``hosts/claude_code``;
+``state_model.rst``, the record's ``migrate``). It records ADR-020's
+increment 2 with 7a (that record's "As built: increment 2"). Where the build
+settles what the text left open:
+
+.. dec:: ADR-014 increment 7b as built: store migrate --to repo, finished from the main checkout
+   :id: DEC_ADR_014_I7B
+   :status: accepted
+   :part_of: DEC_ADR_014
+   :amends: DEC_ADR_014_I7A
+   :affects: COMP_CORE_STOREMIGRATE, COMP_CLI_MIGRATE, COMP_CORE_STORES, COMP_CORE_GIT, COMP_ADAPTERS_SPHINX, COMP_HOSTS_CLAUDE_CODE, COMP_DOMAINS_SESSION, COMP_CLI_MAIN
+
+   - **The same lane, the other way.** ``--to repo`` starts its own parked
+     ``chore``-lane session, isolates it and starts its pipeline, as
+     ``--to store`` does (:need:`DEC_ADR_014_I7A`). The repository leg is
+     laid first on the session's branch, while the store still holds the
+     records: their history carried from the store with ``git
+     fast-export`` (7a's ``transfer``, the original commits, the same
+     relative paths), ``.claude/invariant.yaml`` written, a committed
+     pointer removed and the wiring in its committed form, then one commit.
+     The store leg follows and lands at once (ruling 8): this repository's
+     block and its records' tracked files removed and committed in the
+     store, under the session's docs-lock grants taken as the main checkout
+     still resolves it, then released, which sets ``landing.store``.
+   - **The keys materialised.** ``.claude/invariant.yaml`` is the store's own
+     level overlaid by this repository's block, as ``Manifest.location``'s
+     ``level`` reads it, less ``store``, ``records`` (each record is then
+     ``repo``, the load-time default) and the keys an in-repo manifest
+     refuses at load: ``sync`` (5a) and ``privacy.store`` (6). Those stay
+     behind and are named (``dropped``), rather than writing a manifest that
+     cannot load. The output names each key copied from the store's own
+     level and not set by the block (``from_store_level``). The user level's
+     ``defaults`` are the operator's and are not copied. The manifest is
+     checked to load in the repository before anything is written.
+   - **The store's own level is never changed.** Only this repository's
+     block leaves ``store.repos``, which may be left empty: a store serving
+     no repository is kept and the output says so (``serves_none``). Only
+     tracked files leave the store; an ignored one under a moved folder
+     stays in its working tree and is named (``left``), as 7a leaves them in
+     the repository.
+   - **Mid-move, the main checkout finds neither home** (ADR-020 D3): the
+     store no longer lists the repository, and the manifest lands with the
+     merge. Every command there refuses, naming the session and its
+     worktree, which the marker now carries. The two that finish the move,
+     ``session merge`` and ``session resume``, run there all the same: they
+     read the project from the worktree the marker names, and the merge
+     runs from the main checkout as ``session.ff_merge_target`` requires.
+     Nothing else resolves through the marker, so the refusal stays the
+     rule. A failed repository merge is half-landed, recorded on the landing
+     record as 7a's is, and finished by either command.
+   - **Wiring becomes committed through the same install plan.** In the
+     session's worktree, whose manifest now wires ``repo``, ``hooks
+     install`` and ``agents install``'s own plan writes
+     ``.claude/settings.json``, the shims and the agents
+     (``ClaudeCodeHost.commit_local``), committed with ``git add --force``,
+     since the main checkout's ``.git/info/exclude`` still lists them. A
+     fast-forward replaces an ignored file at a path the branch adds (run:
+     git 2.50 overwrote one without a word), so a file edited in the main
+     checkout since the local install is committed as edited, and named
+     (``edited``), never lost. Once the repository leg lands,
+     ``retire_local`` removes the local install's settings entries and
+     granted directories from ``.claude/settings.local.json`` (the file too
+     when invariant created it and nothing else is left), its exclude lines
+     and its receipt; the files stay, tracked. A project with no local
+     install gets no wiring.
+   - **The link is removed after the merge, never before.** ``unlink_repo``
+     removes the user level's entry for the store's key and the
+     repository's identity, only where it names that store, every other key
+     kept and an emptied ``repos`` dropped. ``invariant.id`` stays in the
+     local git config (D4 writes it whatever the home).
+   - **The refusals beyond D3's list** (exit 2, nothing written): ``--store``
+     (it names a store ``--to store`` moves into); a project its pointer
+     alone defines; an uncommitted pointer, which the in-repo manifest
+     would leave stale; a store ``invariant.yaml`` holding comments the
+     rewrite would drop, or with uncommitted changes; a wiring path in the
+     main checkout that git neither tracks nor ignores, where the merge
+     would stop; and a record another repository of the store also names,
+     whose files moving out would take that repository's records too. D3's
+     root ``conf.py`` refusal reads every ``conf.py`` at or above the docs
+     project's folder, the root's among them, through the ``sphinx``
+     adapter's ``conf_excludes`` (literal ``exclude_patterns``, read with
+     Sphinx's globbing), handed in by the CLI; one it cannot read refuses
+     too, naming the line to add. D8's content-folder refusal holds in this
+     direction as well. A target path already in the repository is any
+     file, tracked, untracked or ignored, under a root the move adds, and
+     ``.claude/invariant.yaml``.
+   - **``--records`` is not 7b's.** Neither this record's 7b row nor
+     ADR-020's increment 2 row names it; ADR-020 D3 keeps it "for moving
+     single records within a store project", and no increment builds that.
+     It is refused in either direction, exit 2, naming that, and the
+     increments table carries no row for it yet.
+   - **Unchanged.** Without the command, an in-repo project and a store
+     project resolve, merge and resume exactly as before: the marker is
+     read only when a ``--to repo`` move names a worktree and the main
+     checkout does not resolve, and ``commit_only`` adds with force only
+     when asked.
+
+The proof is ``tests/test_adr_014_migrate_to_repo.py``, on 7a's toy in-repo
+project written by ``invariant init --host-install`` with its wiring
+committed. The round trip: ``store migrate --to store``, landed, resolves the
+same values labelled ``store:`` with the wiring local; ``store migrate --to
+repo`` removes the block and the records from the store (its own level
+unchanged, kept though it serves no repository), leaves the main checkout
+refusing and naming the session and its worktree, and lays the records with
+the same bytes at the same paths and their history, the materialised
+manifest and the committed wiring on the session's branch, where the
+worktree resolves ``repo:``; merged from the main checkout, the project
+resolves the same values as before the round trip, labelled ``repo:``, the
+wiring committed with no settings entry, exclude line or receipt left, the
+user level's link and the marker gone, and ``git status`` clean in the
+repository and the store. Also: a failed repository merge half-landed and
+finished by ``session resume`` run in the main checkout; an edited local
+agent committed as edited; a project with no wiring given none; a shared
+store keeping its other repository and its own level, a key copied from that
+level named; the pointer removed with the move; ``sync`` and
+``privacy.store`` left behind and named; a failure part way naming what was
+done; an abandon clearing the marker. Each refusal exits 2 with the
+repository, the user level, the stores, the sessions and the marker as they
+were: an in-repo project, outside a project, below the top level, from a
+linked worktree, a detached head, a target path in the repository, a wiring
+path git would not overwrite, an uncommitted store path, a commented and then
+an uncommitted store file, a store behind its remote, a unit another session
+holds, a record another repository shares, a root ``conf.py`` that does not
+exclude the docs project (and one that does, accepted) or cannot be read to
+tell, a ``docs/`` docs project, ``--store``, a project its pointer alone
+defines, an uncommitted pointer, and ``--records`` in either direction. ``conf_excludes``,
+``unlink_repo`` and the marker's note are tested on their own.
+``tests/test_adr_014_migrate.py`` now expects ``--to repo`` in an in-repo
+project to refuse as one.

@@ -226,35 +226,33 @@ class TestFrontmatterHelper:
 
 
 class TestTheGateReceiptCannotHashAnEmptyDiff:
-    """BUG_033 — the shipped receipt block ran
+    """BUG_033, then BUG_126 — the receipt is no longer a shell recipe.
 
-        git diff --no-color HEAD -- $SESSION_FILES | shasum -a 256
+    BUG_033: the shipped receipt block ran
+    ``git diff --no-color HEAD -- $SESSION_FILES | shasum -a 256`` and zsh does
+    not word-split an unquoted parameter, so a multi-file set hashed to the
+    SHA-256 of the empty string whatever had changed, and the reviewer's fast
+    path took a tree that had moved, every time. BUG_126: fixed for quoting,
+    the recipe still hashed ``git diff HEAD``, which leaves untracked files
+    out, and its write under ``.build/gate`` was refused by the host's
+    permissions.
 
-    and zsh does not word-split an unquoted parameter. A multi-file set
-    arrived at git as ONE bogus pathspec, the diff came back empty, and
-    `diff_sha` became the SHA-256 of the empty string whatever had changed —
-    silently, because `git diff` exits 0 on a pathspec matching nothing.
-
-    Both sides of the comparison computed it the same broken way, so
-    `WANT_DIFF == GOT_DIFF` held always and compliance-reviewer's fast path
-    took a tree that had moved, every time. The receipt's stated purpose is
-    to detect exactly that case.
-
-    This is markdown nothing here executes, which is why it needed a test at
-    all: a shipped instruction no test runs is an instrument nobody
-    self-tested.
+    Since ADR-026 the receipt is the pipeline's coverage record and the check
+    is ``invariant pipeline receipt``, so neither agent ships a hash recipe at
+    all: no shell quoting, no file set typed by the agent, no file it writes.
+    These checks keep it that way. This is still markdown nothing here
+    executes, which is why it needs a test: a shipped instruction no test runs
+    is an instrument nobody self-tested.
     """
 
-    #: `printf '' | shasum -a 256`. Recognising this constant is the only way
-    #: four separate agents caught the defect.
+    #: `printf '' | shasum -a 256`, the hash BUG_033's recipe landed on.
     EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
     RECEIPT_AGENTS = ("feature-architect", "compliance-reviewer")
 
     def shell(self, name):
-        """Only the fenced shell blocks — the prose NAMES the broken form as
-        the thing not to write, and a check that cannot tell an example from
-        an instruction would forbid documenting the defect."""
+        """Only the fenced shell blocks: the prose may name a form as the
+        thing not to do."""
         text = shipped(name)
         blocks, inside = [], False
         for line in text.splitlines():
@@ -267,28 +265,34 @@ class TestTheGateReceiptCannotHashAnEmptyDiff:
         return "\n".join(blocks)
 
     @pytest.mark.parametrize("name", RECEIPT_AGENTS)
-    def test_the_file_set_is_never_expanded_unquoted(self, name):
-        residue = self.shell(name).replace('"${SESSION_FILES[@]}"', "").replace(
-            "${#SESSION_FILES[@]}", ""
-        )
-        assert "SESSION_FILES" not in residue.replace("SESSION_FILES=(", "")
+    def test_no_agent_hashes_the_tree_itself(self, name):
+        block = self.shell(name)
+        for form in (
+            "shasum", "sha256sum", "hash-object", "openssl dgst",
+            "SESSION_FILES", "gate-receipt.txt", self.EMPTY_SHA,
+        ):
+            assert form not in block, f"{name} ships {form!r} in a shell block"
 
     @pytest.mark.parametrize("name", RECEIPT_AGENTS)
-    def test_both_sides_build_the_pathspec_the_same_way(self, name):
-        """The reviewer carried a `<SESSION FILE SET>` placeholder instead of
-        a construction, which is how it reached the same empty hash. A fix
-        that changes only the architect leaves the other free to reintroduce
-        it."""
-        text = shipped(name)
-        assert "SESSION_FILES=(" in text
-        assert '"${SESSION_FILES[@]}"' in text
+    def test_both_sides_ask_the_engine(self, name):
+        """A fix that changes only one side leaves the other free to bring a
+        recipe back."""
+        assert "invariant pipeline receipt" in self.shell(name)
+
+    def test_the_architect_records_coverage_after_its_doc_edits(self):
+        """A receipt taken before the Phase 7 doc edits never matches the tree
+        the reviewer sees, so Phase 7 sends the architect back to it."""
+        text = shipped("feature-architect")
+        phase_7 = text[text.index("## Phase 7") : text.index("## Phase 8")]
+        assert "invariant pipeline coverage" in phase_7
+        assert "invariant pipeline receipt" in phase_7
 
     @pytest.mark.parametrize("name", RECEIPT_AGENTS)
-    def test_the_empty_string_hash_is_named_as_a_refusal(self, name):
-        """Naming the constant costs one line and converts a silent match
-        into a caught one — which matters because the next way to produce an
-        empty diff will not be a quoting bug."""
-        assert self.EMPTY_SHA in shipped(name)
+    def test_no_agent_touches_the_index_to_make_a_file_count(self, name):
+        """An untracked file is signed by its content; ``git add -N`` in a
+        shared worktree changes what every later ``git diff`` and commit sees."""
+        block = self.shell(name)
+        assert "add -N" not in block and "--intent-to-add" not in block
 
 
 class TestTheReviewerAsksHowTheSessionLands:

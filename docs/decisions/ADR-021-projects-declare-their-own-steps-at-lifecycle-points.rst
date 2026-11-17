@@ -15,7 +15,8 @@ ADR-021 — Projects declare their own steps at lifecycle points
      draft, by interview. Any choice beyond a ruling is marked
      *recommended*. No question is open. Increment 1 built (2026-11-15),
      "As built: increment 1" below. Increment 2 built (2026-11-15), "As
-     built: increment 2" below.
+     built: increment 2" below. Increment 3 built (2026-11-16), "As built:
+     increment 3" below; every increment is built.
    - **Date:** 2026-11-15
    - **Supersedes:** nothing. Amends
      :need:`ADR-001 <DEC_ADR_001>` D25 (a permanent route past a built-in
@@ -519,6 +520,77 @@ build settles what the text left open:
      record). Runs at commits not containing the merge do not count, so
      twenty of them push the deciding run out, and the session reads as
      having no run: held, never released, by the record's cap.
+
+As built: increment 3 (2026-11-16)
+----------------------------------
+
+D6, D7 and D8, as the architecture docs describe them (``manifest.rst``,
+"Loosening a built-in", "Validation" and the floor; ``overview.rst``,
+``core/rulings``, ``core/manifest`` and ``core/rules``; ``cli.rst``,
+``rules loosen``, ``rules carry-over``, ``rules list``, ``config show``,
+``doctor`` and the ``pre-tool-use`` hook). Where the build settles what the
+text left open:
+
+.. dec:: ADR-021 increment 3 as built: when the refusal is in force, where a ruling is written, and what refuses an agent's
+   :id: DEC_ADR_021_I3
+   :status: accepted
+   :part_of: DEC_ADR_021
+   :affects: COMP_CORE_MANIFEST, COMP_CORE_RULINGS, COMP_CORE_RULES, COMP_CMD_RULES, COMP_HOSTS_CLAUDE_CODE
+
+   - **One module answers what loosens.** ``core/rulings`` holds the
+     loosenings, the load's judgement, the plans and the write;
+     ``Manifest.validate`` asks it at call time, after the floor. The
+     configured levels are kept before ``_apply_env`` (``configured``), so
+     ``INVARIANT_PROFILE`` and ``INVARIANT_DISABLE`` are judged by neither the
+     loosening nor the staleness of a ruling (D6). A rule a level sets no
+     lower than the chosen profile holds it at rides the profile's ruling;
+     a level below the profile's needs its own. ``ask`` is below ``block``.
+   - **When the refusal is in force (D8's "until a project runs it").** Once
+     any level of the project carries ``enforcement.rulings``, an empty
+     mapping included. ``rules loosen`` and ``rules carry-over`` write it, and
+     ``carry-over`` on a configuration that loosens nothing writes it empty
+     for that reason. Until then an unruled loosening loads, held on
+     ``Manifest.unruled``; ``doctor``'s ``rulings`` row warns and ``rules
+     list`` names it, and nothing is printed at load (a manifest is read on
+     every command). The release after this one removes the warning.
+   - **Where a ruling is written.** The project's own level: the in-repo
+     manifest, or the repository's ``store.repos.<key>`` block of the store's
+     ``invariant.yaml``, so a store serving several repositories is not
+     loosened for the others. A ruling at the user level is refused at load,
+     since the user level is every project's default and a ruling records
+     one project's decision; a loosening there is ruled in the project.
+   - **In place, or not at all.** Every configuration carries comments, and
+     the existing writers refuse a commented file. The ruling commands edit
+     the file line by line, keep every other line, keep a replaced level's
+     trailing comment, and write only a result that reads back as exactly
+     the old settings with the new entries; otherwise they print the entries
+     to add by hand. A file changed while the terminal's question was asked
+     is not written over. The configuration is loaded again after the write,
+     and a refusal, or any other failure, puts the file back. Both commands
+     load under
+     ``rulings.collecting``, so they repair a configuration the refusal
+     stops.
+   - **The terminal.** Standard input must be a terminal, as for ``store
+     clone``; ``--json`` refuses too, and there is no ``--yes``. Whether a
+     host's own shell escape (Claude Code's ``!``) gives the command a
+     terminal is the host's; where it does not, the user runs the command in
+     a terminal of their own, which the refusal says.
+   - **What refuses an agent's edit.** A registered rule,
+     ``config.rulings_by_user``, ``block`` in every profile, evaluated at
+     ``pre-tool-use`` with the rest, since ``hosts/claude_code`` decides no
+     rule. Lowering it is itself a loosening that needs a ruling. It reads
+     Edit, Write and MultiEdit on an in-repo manifest in any checkout, the
+     project's store ``invariant.yaml`` and the user level; a shell command
+     writing the file is not screened, as for every edit rule.
+   - **Surfaces.** ``config show --provenance`` prints each ruling's ``by``,
+     ``date`` and ``reason`` with its level's label, a YAML date read as its
+     ISO text so ``--json`` carries it. ``rules list`` marks each loosened
+     rule with its ruling and adds ``loosenings`` under ``--json``.
+   - **What upgrading changes.** invariant's own configuration loosens
+     nothing and reads as before. A project that lowers a rule or chooses
+     ``loose`` gains ``doctor``'s warning row and ``rules list``'s marks, and
+     loads as before. Every project gains the ``config.rulings_by_user``
+     row in ``rules list``.
 
 Consequences
 ------------

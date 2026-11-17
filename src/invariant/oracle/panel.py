@@ -314,6 +314,7 @@ _LANES: dict[str, tuple[str | None, dict[str, str]]] = {
     "spec-first": ("feature", {"designing": "Designing", "specified": "Spec written",
                                "implementing": "Building", "reviewing": "In review"}),
     "docs": ("docs", {"drafting": "Writing docs", "reviewing": "In review"}),
+    "docs-project": ("docs", {"drafting": "Writing docs", "reviewing": "In review"}),
     "none": (None, {"working": "Working"}),
 }
 

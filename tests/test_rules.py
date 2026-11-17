@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -101,6 +102,24 @@ def ctx_factory(repo):
 
     build.main = main
     build.wt = wt
+    return build
+
+
+@pytest.fixture
+def host_ctx_factory(ctx_factory):
+    """``ctx_factory`` with the host's attribution trailers on the context, as
+    the CLI's rule context carries them for the commit hook (DEC_ADR_024_D1).
+    Kept apart so no other rule test is evaluated with them."""
+    from invariant.cli.main import host_attribution_trailers
+
+    def build(*args, **kwargs):
+        ctx = ctx_factory(*args, **kwargs)
+        ctx.host_attribution_trailers = host_attribution_trailers(ctx.manifest)
+        assert ctx.host_attribution_trailers, "the fixture's host.kind declares no trailer"
+        return ctx
+
+    build.main = ctx_factory.main
+    build.wt = getattr(ctx_factory, "wt", None)
     return build
 
 
@@ -1650,6 +1669,522 @@ class TestCommitMessageForms:
         assert verdict.ok and not verdict.skipped
 
 
+class TestEveryMessageSourceIsReadOrRefused:
+    """BUG_132, DEC_ADR_024_D4: every source ``git commit`` writes a message
+    from is read, or the commit is refused; text git copies from a commit the
+    repository holds is not read. Each case below was checked against git 2.50.
+    """
+
+    LEAK = "'Reported by a.person@example.com.'"
+
+    def verdict(self, ctx_factory, command):
+        ctx = ctx_factory(cwd=ctx_factory.main, payload=bash_payload(command))
+        return only(evaluate(["privacy.clean"], ctx)).verdict
+
+    def assert_finding(self, verdict):
+        assert not verdict.ok and not verdict.skipped, (verdict.message, verdict.detail)
+        assert "emails" in (verdict.detail or ""), verdict.detail
+
+    def assert_refused(self, verdict, wording):
+        assert not verdict.ok and not verdict.skipped, (verdict.message, verdict.detail)
+        assert verdict.message == "the commit message could not be scanned"
+        assert wording in (verdict.detail or ""), verdict.detail
+        return verdict
+
+    def assert_passes(self, verdict):
+        assert verdict.ok or verdict.skipped, (verdict.message, verdict.detail)
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            pytest.param("-m 'Fix it' -m{leak}", id="attached-m"),
+            pytest.param("-am{leak}", id="attached-in-cluster"),
+            pytest.param("-m 'Fix it' --mess={leak}", id="abbreviated-long"),
+            pytest.param("-m 'Fix it' --mess {leak}", id="abbreviated-long-spaced"),
+            pytest.param("--fixup HEAD -m {leak}", id="fixup-with-m"),
+            pytest.param("--squash HEAD -m {leak}", id="squash-with-m"),
+            pytest.param("-m 'Fix it' --trailer {leak}", id="trailer"),
+            pytest.param("-m 'Fix it' -m {leak} -- docs", id="before-pathspecs"),
+            pytest.param("-m 'Fix it' --dry-run -m {leak}", id="dry-run-still-read"),
+        ],
+    )
+    def test_each_spelling_that_carries_text_is_read(self, ctx_factory, spelling):
+        verdict = self.verdict(ctx_factory, "git commit " + spelling.format(leak=self.LEAK))
+        self.assert_finding(verdict)
+
+    def test_an_attached_dash_f_file_is_read(self, ctx_factory):
+        (ctx_factory.main / "msg.txt").write_text("mail a.person@example.com\n", encoding="utf-8")
+        self.assert_finding(self.verdict(ctx_factory, "git commit -Fmsg.txt"))
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "-F absent.txt -F clean.txt",
+            "-F clean.txt -F absent.txt",
+            "-F absent.txt --no-file -m 'Fix it'",
+        ],
+    )
+    def test_every_dash_f_named_must_be_readable(self, ctx_factory, spelling):
+        """git reads the last ``-F``; every one named is read, the noisy side."""
+        (ctx_factory.main / "clean.txt").write_text("Fix it\n", encoding="utf-8")
+        self.assert_refused(
+            self.verdict(ctx_factory, f"git commit {spelling}"), "could not be read at scan time"
+        )
+
+    @pytest.mark.parametrize(
+        "spelling",
+        ["-F leaky.txt -F clean.txt", "-F clean.txt -F leaky.txt", "-F leaky.txt --no-file -m Fix"],
+    )
+    def test_every_dash_f_named_is_read(self, ctx_factory, spelling):
+        (ctx_factory.main / "clean.txt").write_text("Fix it\n", encoding="utf-8")
+        (ctx_factory.main / "leaky.txt").write_text("mail a.person@example.com\n", encoding="utf-8")
+        self.assert_finding(self.verdict(ctx_factory, f"git commit {spelling}"))
+
+    def test_a_value_no_message_drops_is_still_read(self, ctx_factory):
+        """git writes only what follows ``--no-message``; what it dropped is
+        read all the same, the noisy side."""
+        self.assert_finding(
+            self.verdict(ctx_factory, f"git commit -m {self.LEAK} --no-message -m 'Fix it'")
+        )
+
+    def test_the_trailer_block_is_read_from_what_git_writes(self, host_ctx_factory):
+        """A dropped value read on its own does not move the last paragraph."""
+        link = "https://claude.ai/code/session_01J6ymUQEkcJq6gUgJ8RMADw"
+        command = (
+            "git commit -m 'Old subject' --no-message -m 'Fix it' "
+            f"-m 'Claude-Session: {link}'"
+        )
+        ctx = host_ctx_factory(cwd=host_ctx_factory.main, payload=bash_payload(command))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped, verdict.detail
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("git commit -m 'Fix it' && echo -m {leak}", id="and-then"),
+            pytest.param("git commit -m 'Fix it'; echo -m {leak}", id="semicolon-attached"),
+            pytest.param("git commit -m 'Fix it' | grep -m {leak} x", id="pipe"),
+            pytest.param("git commit -m 'Fix it' > {leak}", id="redirect-target"),
+            pytest.param("git commit -m 'Fix it' -- -m {leak}", id="after-double-dash"),
+        ],
+    )
+    def test_words_that_are_not_the_commits_are_not_its_message(self, ctx_factory, command):
+        verdict = self.verdict(ctx_factory, command.format(leak=self.LEAK))
+        assert verdict.ok and not verdict.skipped, verdict.detail
+
+    @pytest.mark.parametrize(
+        ("spelling", "pair"),
+        [
+            pytest.param("-m 'Fix it' -F msg.txt", "-m together with -F", id="m-and-F"),
+            pytest.param("-m 'Fix it' -C HEAD", "-m together with -C", id="m-and-C"),
+            pytest.param("-m 'Fix it' -c HEAD", "-m together with -c", id="m-and-c"),
+            pytest.param("-F msg.txt -C HEAD", "-C together with -F", id="F-and-C"),
+            pytest.param("--fixup HEAD -F msg.txt", "-F together with --fixup", id="fixup-and-F"),
+            pytest.param("--squash HEAD --fixup HEAD", "--squash together with --fixup",
+                         id="squash-and-fixup"),
+            pytest.param("--fixup=amend:HEAD -m 'Fix it'", "-m together with --fixup=amend:",
+                         id="fixup-amend-and-m"),
+            pytest.param("--fixup=reword:HEAD -m 'Fix it'", "-m together with --fixup=reword:",
+                         id="fixup-reword-and-m"),
+        ],
+    )
+    def test_a_combination_git_refuses_is_refused(self, ctx_factory, spelling, pair):
+        (ctx_factory.main / "msg.txt").write_text("Fix it\n", encoding="utf-8")
+        verdict = self.assert_refused(self.verdict(ctx_factory, "git commit " + spelling), pair)
+        assert "makes no commit" in verdict.detail
+        assert verdict.fixes == ("give the message one way: -m '<message>', or -F <file>",)
+
+    @pytest.mark.parametrize(
+        ("spelling", "keeps"),
+        [
+            pytest.param("", False, id="bare"),
+            pytest.param("-m 'Fix it' -e", False, id="m-and-edit"),
+            pytest.param("-m 'Fix it' --no-edit --edit", False, id="edit-last"),
+            pytest.param("-t tmpl.txt", False, id="template"),
+            pytest.param("--amend", True, id="amend"),
+            pytest.param("-c HEAD", True, id="reedit"),
+            pytest.param("--squash HEAD", True, id="squash"),
+            pytest.param("--fixup=amend:HEAD", True, id="fixup-amend"),
+            pytest.param("--fixup HEAD -e", False, id="fixup-edit"),
+        ],
+    )
+    def test_a_message_written_in_an_editor_is_refused(self, ctx_factory, spelling, keeps):
+        verdict = self.assert_refused(
+            self.verdict(ctx_factory, f"git commit {spelling}".strip()), "opens an editor"
+        )
+        expected = ("write the message inline with -m '<message>'",)
+        if keeps:
+            expected += ("or add --no-edit to keep the message git copies as it is",)
+        assert verdict.fixes == expected
+
+    def test_a_template_git_writes_unedited_is_refused(self, ctx_factory):
+        self.assert_refused(
+            self.verdict(ctx_factory, "git commit -t tmpl.txt --no-edit --allow-empty-message"),
+            "-t names 'tmpl.txt'",
+        )
+
+    def test_a_template_beside_a_message_is_ignored_as_git_ignores_it(self, ctx_factory):
+        self.assert_finding(self.verdict(ctx_factory, f"git commit -t tmpl.txt -m {self.LEAK}"))
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "-C HEAD",
+            "--reuse-message=HEAD",
+            "-c HEAD --no-edit",
+            "--amend --no-edit",
+            "--no-edit",
+            "--fixup HEAD",
+            "--fixup=amend:HEAD --no-edit",
+            "--dry-run",
+            "--short",
+            "-h",
+            "-m 'Fix it' -e --no-edit",
+            "-m",
+        ],
+    )
+    def test_a_message_git_copies_or_never_writes_passes(self, ctx_factory, spelling):
+        self.assert_passes(self.verdict(ctx_factory, f"git commit {spelling}"))
+
+    @pytest.mark.parametrize(
+        "command",
+        ["git log --grep commit", "git log --grep commit -e x", "git -c a=b --no-pager commit --no-edit"],
+    )
+    def test_commit_that_is_not_the_subcommand_demands_no_message(self, ctx_factory, command):
+        self.assert_passes(self.verdict(ctx_factory, command))
+
+    def test_a_later_paragraph_is_read_after_git_options(self, ctx_factory):
+        command = f"git -c core.editor=true -C {ctx_factory.main} commit -m 'Fix it' -m {self.LEAK}"
+        self.assert_finding(self.verdict(ctx_factory, command))
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("message", ("message", False)),
+            ("mess", ("message", False)),
+            ("no-mess", ("message", True)),
+            ("fil", ("file", False)),
+            ("f", None),
+            ("fi", None),
+            ("", None),
+            ("nonsense", None),
+            ("verify", ("no-verify", True)),
+            ("help", ("help", False)),
+        ],
+    )
+    def test_a_long_option_resolves_as_git_resolves_it(self, name, expected):
+        from invariant.core.rules import _commit_long_option
+
+        assert _commit_long_option(name) == expected
+
+    def test_git_joins_message_values_as_paragraphs(self):
+        from invariant.core.rules import _git_joined
+
+        assert _git_joined([]) == ""
+        assert _git_joined(["a"]) == "a\n"
+        assert _git_joined(["a", "b\n", "c"]) == "a\n\nb\n\nc\n"
+
+    def test_unbalanced_quotes_read_no_words(self):
+        from invariant.core.rules import _commit_words
+
+        assert _commit_words("git commit -m 'open") == ([], False)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("git commit -m $'Reported by a.person\\x40example.com.'", id="ansi-c"),
+            pytest.param("git commit -m $'Reported by a.person\\100example.com.'",
+                         id="ansi-c-octal"),
+            pytest.param("git commit -m \"Reported by a.person@exa\\\nmple.com.\"",
+                         id="backslash-newline-double-quoted"),
+            pytest.param("git commit -m Reported-a.person@exa\\\nmple.com",
+                         id="backslash-newline-unquoted"),
+            pytest.param("(git commit -m {leak})", id="subshell"),
+            pytest.param("true;git commit -m {leak}", id="semicolon-before-git"),
+            pytest.param("true&&git commit -m 'Fix it' -m {leak}", id="and-before-git"),
+            pytest.param("git commit -m '&' -m {leak}", id="quoted-ampersand"),
+            pytest.param("git commit -m ';' -m {leak}", id="quoted-semicolon"),
+            pytest.param("git commit -m '>' -m {leak}", id="quoted-redirect"),
+            pytest.param("git commit -m \"a | b\" -m {leak}", id="quoted-pipe"),
+            pytest.param("git commit -m $(true) -m {leak}", id="substitution-before"),
+            pytest.param("git commit -m `true` -m {leak}", id="backquotes-before"),
+            pytest.param("GIT_EDITOR=true git commit -m {leak}", id="env-prefix"),
+            pytest.param("git -c user.name=x commit -m {leak}", id="git-config-pair"),
+            pytest.param("git commit -vam {leak}", id="cluster-vam"),
+            pytest.param("git commit -m 'Fix it' --file=leaky.txt --no-file", id="file-equals-dropped"),
+        ],
+    )
+    def test_a_shell_spelling_of_the_message_is_read(self, ctx_factory, command):
+        """The text bash hands git is the text read: quoting decoded, the
+        shell's operators told from the same characters quoted (BUG_132)."""
+        (ctx_factory.main / "leaky.txt").write_text("mail a.person@example.com\n", encoding="utf-8")
+        self.assert_finding(self.verdict(ctx_factory, command.format(leak=self.LEAK)))
+
+    def test_a_relative_dash_f_after_a_cd_is_refused(self, ctx_factory):
+        (ctx_factory.main / "sub").mkdir()
+        (ctx_factory.main / "sub" / "msg.txt").write_text("mail a.person@example.com\n", "utf-8")
+        (ctx_factory.main / "msg.txt").write_text("Fix it\n", encoding="utf-8")
+        verdict = self.assert_refused(
+            self.verdict(ctx_factory, "cd sub && git commit -F msg.txt"), "changes directory with cd"
+        )
+        assert verdict.fixes == (
+            "give -F an absolute path",
+            "or write the message inline with -m '<message>'",
+        )
+
+    def test_an_absolute_dash_f_after_a_cd_is_read(self, ctx_factory):
+        leaky = ctx_factory.main / "leaky.txt"
+        leaky.write_text("mail a.person@example.com\n", encoding="utf-8")
+        self.assert_finding(self.verdict(ctx_factory, f"cd /tmp && git commit -F {leaky}"))
+
+    def test_a_relative_dash_f_is_read_where_git_dash_c_runs(self, ctx_factory):
+        (ctx_factory.main / "sub").mkdir()
+        (ctx_factory.main / "sub" / "msg.txt").write_text("mail a.person@example.com\n", "utf-8")
+        (ctx_factory.main / "msg.txt").write_text("Fix it\n", encoding="utf-8")
+        self.assert_finding(self.verdict(ctx_factory, "git -C sub commit -F msg.txt"))
+
+    def test_a_cd_after_the_commit_is_not_its_directory(self, ctx_factory):
+        (ctx_factory.main / "msg.txt").write_text("Fix it\n", encoding="utf-8")
+        self.assert_passes(self.verdict(ctx_factory, "git commit -F msg.txt && cd /tmp"))
+
+    @pytest.mark.parametrize("command", ["GIT_EDITOR=true git commit", "(git commit)"])
+    def test_an_editor_reached_through_the_shell_is_refused(self, ctx_factory, command):
+        self.assert_refused(self.verdict(ctx_factory, command), "opens an editor")
+
+    def test_the_shipped_heredoc_spelling_passes(self, host_ctx_factory):
+        """compliance-reviewer's ``-m "$(cat <<'EOF' ...)"``: a lone apostrophe
+        in the body and the co-author trailer read as they did before."""
+        command = (
+            "git add -- a.py && git commit -m \"$(cat <<'EOF'\n"
+            "Area - it's fixed\n\nWhy (briefly).\n\n"
+            "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nEOF\n)\""
+        )
+        ctx = host_ctx_factory(cwd=host_ctx_factory.main, payload=bash_payload(command))
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.ok and not verdict.skipped, verdict.detail
+
+    def test_the_heredoc_spelling_is_still_read(self, ctx_factory):
+        command = (
+            "git commit -m \"$(cat <<'EOF'\nFix it\n\nmail a.person@example.com\nEOF\n)\""
+        )
+        self.assert_finding(self.verdict(ctx_factory, command))
+
+    @pytest.mark.parametrize(
+        ("words", "messages", "status_only"),
+        [
+            (["--dry-run", "--no-dry-run", "-m", "x"], ["x"], set()),
+            (["--bogus", "-m", "x"], ["x"], set()),
+            (["-m", "x", "--message"], None, None),
+        ],
+    )
+    def test_the_sources_follow_gits_option_rules(self, words, messages, status_only):
+        from invariant.core.rules import _commit_sources
+
+        sources = _commit_sources(words)
+        if messages is None:
+            assert sources is None
+        else:
+            assert (sources.messages, sources.status_only) == (messages, status_only)
+
+
+class TestTheHostsAttributionTrailerIsNarrow:
+    """DEC_ADR_024_D1: the trailer the host declares passes in a commit
+    message's trailer block, under its token, in its shape, and nowhere else."""
+
+    LINK = "https://claude.ai/code/session_01J6ymUQEkcJq6gUgJ8RMADw"
+    CO_AUTHOR = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+
+    def verdict(self, host_ctx_factory, text, **overrides):
+        msg = host_ctx_factory.main / "commit-message.txt"
+        msg.write_text(text, encoding="utf-8")
+        ctx = host_ctx_factory(cwd=host_ctx_factory.main, payload=bash_payload(f"git commit -F {msg}"))
+        for name, value in overrides.items():
+            setattr(ctx, name, value)
+        return only(evaluate(["privacy.clean"], ctx)).verdict
+
+    def message(self, *trailers, body="Explain the change.", after=""):
+        text = "Fix the widget\n\n" + body + "\n\n" + "\n".join(trailers) + "\n"
+        return text + after
+
+    def assert_links_finding(self, verdict):
+        assert not verdict.ok and not verdict.skipped, verdict.detail
+        assert "[links]" in (verdict.detail or ""), verdict.detail
+
+    def test_the_declared_trailer_passes(self, host_ctx_factory):
+        verdict = self.verdict(
+            host_ctx_factory, self.message(self.CO_AUTHOR, f"Claude-Session: {self.LINK}")
+        )
+        assert verdict.ok and not verdict.skipped, verdict.detail
+
+    @pytest.mark.parametrize("token", ["claude-session", "CLAUDE-SESSION", "Claude-session"])
+    def test_the_token_in_another_case_is_a_finding(self, host_ctx_factory, token):
+        """Git compares tokens without case; the gate admits only the
+        spelling the host writes (DEC_ADR_024_D2)."""
+        verdict = self.verdict(host_ctx_factory, self.message(f"{token}: {self.LINK}"))
+        self.assert_links_finding(verdict)
+
+    def test_crlf_line_endings_still_pass_the_declared_trailer(self, host_ctx_factory):
+        text = self.message(self.CO_AUTHOR, f"Claude-Session: {self.LINK}").replace("\n", "\r\n")
+        verdict = self.verdict(host_ctx_factory, text)
+        assert verdict.ok and not verdict.skipped, verdict.detail
+
+    @pytest.mark.parametrize(
+        "lines",
+        [
+            pytest.param(["Claude-Session: https://evil.example/s/1"], id="forged"),
+            pytest.param([f"Claude-Session: {LINK} https://evil.example/x"], id="space-then-link"),
+            pytest.param([f"Claude-Session: {LINK}\thttps://evil.example/x"], id="tab-then-link"),
+            pytest.param([f"Claude-Session: {LINK}\u00a0https://evil.example/x"], id="nbsp-then-link"),
+            pytest.param([f"Claude-Session: {LINK}\u200b"], id="zero-width-tail"),
+            pytest.param([f"Claude-Session: {LINK}", " https://evil.example/x"], id="folded"),
+            pytest.param([f"Claude-Session: {LINK}", "\thttps://evil.example/x"], id="folded-tab"),
+            pytest.param([f"Claude-Session : {LINK}"], id="space-before-colon"),
+            pytest.param([f"Claude-Sess\u0456on: {LINK}"], id="lookalike-in-token"),
+            pytest.param([f"\ufeffClaude-Session: {LINK}"], id="bom-before-token"),
+            pytest.param([f"Claude-Session: {LINK}?u=someone"], id="query-after-id"),
+            pytest.param([f"Claude-Session: {LINK}#part"], id="fragment-after-id"),
+            pytest.param([f"Claude-Session: {LINK}/more"], id="path-after-id"),
+            pytest.param(
+                ["Claude-Session: https://user@claude.ai/code/session_01J6ymUQEkcJq6gUgJ8RMADw"],
+                id="userinfo",
+            ),
+            pytest.param(
+                [f"Claude-Session: {LINK}\u2028Note: https://evil.example/x"], id="u2028-split"
+            ),
+            pytest.param([f"Claude-Session: {LINK}\x0bNote: tail"], id="vertical-tab-split"),
+            pytest.param([f"Claude-Session: {LINK}\rNote: tail"], id="lone-cr-split"),
+            pytest.param([f"Claude-Session: {LINK}\x85Note: tail"], id="nel-split"),
+        ],
+    )
+    def test_anything_but_the_declared_line_is_a_finding(self, host_ctx_factory, lines):
+        text = self.message(self.CO_AUTHOR, *lines)
+        self.assert_links_finding(self.verdict(host_ctx_factory, text))
+
+    def dash_m_verdict(self, host_ctx_factory, *values, extra=""):
+        quoted = " ".join("-m " + shlex.quote(value) for value in values)
+        ctx = host_ctx_factory(
+            cwd=host_ctx_factory.main, payload=bash_payload(f"git commit {quoted}{extra}")
+        )
+        return only(evaluate(["privacy.clean"], ctx)).verdict
+
+    def test_the_trailer_block_in_its_own_last_dash_m_passes(self, host_ctx_factory):
+        """git joins every -m as a paragraph, so the last one is the trailer
+        block (BUG_132)."""
+        verdict = self.dash_m_verdict(
+            host_ctx_factory,
+            "Fix the widget",
+            "Explain the change.",
+            f"{self.CO_AUTHOR}\nClaude-Session: {self.LINK}",
+        )
+        assert verdict.ok and not verdict.skipped, verdict.detail
+
+    def test_the_session_trailer_alone_in_the_last_dash_m_passes(self, host_ctx_factory):
+        verdict = self.dash_m_verdict(
+            host_ctx_factory, "Fix the widget", self.CO_AUTHOR, f"Claude-Session: {self.LINK}"
+        )
+        assert verdict.ok and not verdict.skipped, verdict.detail
+
+    def test_a_trailer_dash_m_with_a_later_dash_m_is_a_finding(self, host_ctx_factory):
+        verdict = self.dash_m_verdict(
+            host_ctx_factory, "Fix the widget", f"Claude-Session: {self.LINK}", "A closing paragraph."
+        )
+        self.assert_links_finding(verdict)
+
+    def test_the_trailer_as_the_only_dash_m_is_the_subject(self, host_ctx_factory):
+        self.assert_links_finding(
+            self.dash_m_verdict(host_ctx_factory, f"Claude-Session: {self.LINK}")
+        )
+
+    def test_the_trailer_given_with_dash_dash_trailer_is_a_finding(self, host_ctx_factory):
+        """A --trailer value is read as any line is (DEC_ADR_024_D4)."""
+        verdict = self.dash_m_verdict(
+            host_ctx_factory,
+            "Fix the widget",
+            extra=" --trailer " + shlex.quote(f"Claude-Session: {self.LINK}"),
+        )
+        self.assert_links_finding(verdict)
+
+    def test_crlf_with_a_forged_link_is_a_finding(self, host_ctx_factory):
+        forged = "Claude-Session: https://evil.example/code/session_01J6ymUQEkcJq6gUgJ8RMADw"
+        text = self.message(self.CO_AUTHOR, forged).replace("\n", "\r\n")
+        self.assert_links_finding(self.verdict(host_ctx_factory, text))
+
+    def test_several_trailers_skip_only_the_declared_one(self, host_ctx_factory):
+        text = self.message(
+            self.CO_AUTHOR,
+            f"Claude-Session: {self.LINK}",
+            "Ref: https://evil.example/x",
+            f"Claude-Session: {self.LINK}/../evil",
+        )
+        verdict = self.verdict(host_ctx_factory, text)
+        self.assert_links_finding(verdict)
+        # Lines 7 and 8, the other link and the longer one; line 6, the
+        # declared trailer, is the one skipped.
+        lines = sorted({part.strip().split(":")[0] for part in (verdict.detail or "").split(";")})
+        assert lines == ["7", "8"], verdict.detail
+
+    def test_a_forged_link_under_the_token_is_a_finding(self, host_ctx_factory):
+        forged = "Claude-Session: https://evil.example/code/session_01J6ymUQEkcJq6gUgJ8RMADw"
+        self.assert_links_finding(self.verdict(host_ctx_factory, self.message(forged)))
+
+    def test_the_hosts_link_with_more_after_it_is_a_finding(self, host_ctx_factory):
+        longer = f"Claude-Session: {self.LINK}/../../elsewhere?u=someone"
+        self.assert_links_finding(self.verdict(host_ctx_factory, self.message(longer)))
+
+    def test_the_link_under_another_token_is_a_finding(self, host_ctx_factory):
+        other = f"Session-Link: {self.LINK}"
+        self.assert_links_finding(self.verdict(host_ctx_factory, self.message(other)))
+
+    def test_the_trailer_line_written_in_the_body_is_a_finding(self, host_ctx_factory):
+        body = f"Claude-Session: {self.LINK}\nand then more prose."
+        self.assert_links_finding(
+            self.verdict(host_ctx_factory, self.message(self.CO_AUTHOR, body=body))
+        )
+
+    def test_a_trailer_block_followed_by_more_text_is_no_block(self, host_ctx_factory):
+        text = self.message(f"Claude-Session: {self.LINK}", after="\nA closing paragraph.\n")
+        self.assert_links_finding(self.verdict(host_ctx_factory, text))
+
+    def test_a_last_paragraph_with_prose_in_it_is_no_block(self, host_ctx_factory):
+        text = self.message(self.CO_AUTHOR, "see the session:", f"Claude-Session: {self.LINK}")
+        self.assert_links_finding(self.verdict(host_ctx_factory, text))
+
+    def test_the_subject_is_never_a_trailer_block(self, host_ctx_factory):
+        self.assert_links_finding(
+            self.verdict(host_ctx_factory, f"Claude-Session: {self.LINK}\n")
+        )
+
+    def test_another_finding_beside_the_trailer_still_blocks(self, host_ctx_factory):
+        text = self.message(
+            "Co-Authored-By: A Person <a.person@example.com>",
+            f"Claude-Session: {self.LINK}",
+        )
+        verdict = self.verdict(host_ctx_factory, text)
+        assert not verdict.ok and "[emails]" in (verdict.detail or ""), verdict.detail
+        assert "[links]" not in (verdict.detail or ""), verdict.detail
+
+    def test_with_no_host_declaration_the_trailer_is_a_finding(self, host_ctx_factory):
+        """The engine knows no host's trailer: without the CLI's injection it
+        is a link like any other."""
+        text = self.message(self.CO_AUTHOR, f"Claude-Session: {self.LINK}")
+        self.assert_links_finding(
+            self.verdict(host_ctx_factory, text, host_attribution_trailers=())
+        )
+
+    def test_the_same_text_written_into_a_doc_is_a_finding(self, host_ctx_factory):
+        doc = host_ctx_factory.main / "docs" / "architecture" / "commit.md"
+        text = self.message(self.CO_AUTHOR, f"Claude-Session: {self.LINK}")
+        ctx = host_ctx_factory(payload=edit_payload(doc, text))
+        self.assert_links_finding(only(evaluate(["privacy.clean"], ctx)).verdict)
+
+    def test_the_same_text_written_into_a_memory_is_a_finding(self, host_ctx_factory):
+        manifest = host_ctx_factory().manifest
+        memory = host_ctx_factory.main / str(manifest.get("paths.memory")) / "note.md"
+        text = self.message(self.CO_AUTHOR, f"Claude-Session: {self.LINK}")
+        ctx = host_ctx_factory(payload=edit_payload(memory, text))
+        self.assert_links_finding(only(evaluate(["privacy.clean"], ctx)).verdict)
+
+
 class TestDashFWrittenByTheSameCommand:
     """BUG_067 — the ``-F`` file is written by the command that commits.
 
@@ -1927,7 +2462,21 @@ class TestPrivacyScreensTheIndexTheCommitNames:
         self, ctx_factory, tmp_path
     ):
         """With nothing scanned at all the abstention IS the verdict, and it
-        is a skip rather than a pass (BUG_020)."""
+        is a skip rather than a pass (BUG_020). ``--no-edit`` carries no
+        message and opens no editor; a bare ``commit`` opens one, which is a
+        refusal of its own (DEC_ADR_024_D4)."""
+        other = tmp_path / "elsewhere"
+        other.mkdir()
+        run(["git", "init", "-q", "-b", "master"], other)
+        ctx = ctx_factory(
+            cwd=ctx_factory.main, payload=bash_payload(f"git -C {other} commit --no-edit")
+        )
+        verdict = only(evaluate(["privacy.clean"], ctx)).verdict
+        assert verdict.skipped and "outside the project" in verdict.message
+
+    def test_an_outside_commit_opening_an_editor_is_refused(self, ctx_factory, tmp_path):
+        """The message is still this gate's to read wherever the commit is
+        made, and an editor's is out of its sight (DEC_ADR_024_D4)."""
         other = tmp_path / "elsewhere"
         other.mkdir()
         run(["git", "init", "-q", "-b", "master"], other)
@@ -1935,7 +2484,8 @@ class TestPrivacyScreensTheIndexTheCommitNames:
             cwd=ctx_factory.main, payload=bash_payload(f"git -C {other} commit")
         )
         verdict = only(evaluate(["privacy.clean"], ctx)).verdict
-        assert verdict.skipped and "outside the project" in verdict.message
+        assert not verdict.ok and not verdict.skipped
+        assert "opens an editor" in verdict.detail
 
     def test_a_plain_commit_still_reads_the_working_directory(self, ctx_factory):
         """The no-redirection path is unchanged: BUG_027's fix keeps working."""
