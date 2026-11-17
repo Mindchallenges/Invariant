@@ -291,3 +291,16 @@ suite from a shell, not from inside a handed-off Claude window: if
 The library dogfoods what it ships: its own repository carries a manifest, and
 its architecture docs are subject to the docs-first gate it enforces on others.
 A control it will not run against itself is a control it should not ship.
+
+## License
+
+invariant is licensed under the [PolyForm Noncommercial License
+1.0.0](LICENSE): you may use, study and change it for any noncommercial
+purpose. A company or organization that employs the licensor, or engages
+the licensor as a contractor or freelancer, may also use it commercially, for
+its own internal use on the projects the licensor works on for it, while that
+work lasts. Any other commercial use needs a separate written license from
+the licensor.
+
+Versions up to and including commit `2826ca1` were published under the MIT
+License and keep it; every later version is under PolyForm Noncommercial.
