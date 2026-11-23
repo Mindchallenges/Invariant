@@ -869,6 +869,14 @@ def prefixes_of(types: Sequence[NeedType], roles: Iterable[str]) -> tuple[str, .
     )
 
 
+def directives_of(types: Sequence[NeedType], roles: Iterable[str]) -> frozenset[str]:
+    """The directives of every type mapped to one of ``roles``: what a page
+    holding a need of those roles writes (``.. dec::`` for a decision by
+    default; ADR-032 increment 3)."""
+    wanted = set(roles)
+    return frozenset(t.directive for t in types if t.role in wanted)
+
+
 def cited_ids(text: str, prefixes: Sequence[str]) -> list[str]:
     """Every need id in ``text`` carrying one of ``prefixes``, in order, once.
 

@@ -91,23 +91,75 @@ class TestThePlist:
             a_plist(interval=0)
 
 
-class TestTheSearchPath:
-    def test_git_and_osascript_come_first_then_the_system(self):
-        found = {"git": "/opt/homebrew/bin/git", "osascript": "/usr/bin/osascript"}
-        path = search_path(which=found.get)
-        assert path.split(":") == [
-            "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
-        ]
+def nowhere(program: str) -> None:
+    return None
 
-    def test_a_missing_program_still_leaves_the_system_dirs(self):
-        assert search_path(which=lambda name: None) == "/usr/bin:/bin:/usr/sbin:/sbin"
+
+def executable(directory: Path, name: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    program = directory / name
+    program.write_text("#!/bin/sh\nexit 0\n", "utf-8")
+    program.chmod(0o755)
+    return program
+
+
+class TestTheSearchPath:
+    def test_its_programs_come_first_then_the_system(self):
+        found = {"git": "/opt/homebrew/bin/git", "osascript": "/usr/bin/osascript",
+                 "claude": "/usr/local/bin/claude"}
+        found_path = search_path(which=found.get, fallback=nowhere)
+        assert found_path.path.split(":") == [
+            "/opt/homebrew/bin", "/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin",
+        ]
+        assert found_path.missing == () and found_path.fallback == {}
+
+    def test_the_watcher_needs_claude_for_the_chain_step(self):
+        # BUG_155: the chain step runs in the watcher and opens claude.
+        assert "claude" in launchd.NEEDED_PROGRAMS
+        assert launchd.AGENT_PROGRAMS[LABEL] == launchd.NEEDED_PROGRAMS
+        assert launchd.AGENT_PROGRAMS[launchd.WEB_LABEL] == launchd.WEB_PROGRAMS
+
+    def test_a_missing_program_is_named_and_leaves_the_system_dirs(self):
+        found_path = search_path(which=nowhere, fallback=nowhere)
+        assert found_path.path == "/usr/bin:/bin:/usr/sbin:/sbin"
+        assert found_path.missing == launchd.NEEDED_PROGRAMS
+
+    def test_a_program_off_this_path_is_found_in_a_well_known_directory(self):
+        found = {"git": "/usr/bin/git", "osascript": "/usr/bin/osascript"}
+        found_path = search_path(
+            which=found.get, fallback={"claude": "/usr/local/bin/claude"}.get
+        )
+        assert found_path.fallback == {"claude": "/usr/local/bin/claude"}
+        assert found_path.missing == ()
+        assert found_path.path.split(":")[:2] == ["/usr/bin", "/usr/local/bin"]
+        assert found_path.to_dict() == {
+            "path": found_path.path, "fallback": {"claude": "/usr/local/bin/claude"},
+            "missing": [],
+        }
+
+    def test_the_well_known_directories(self, tmp_path):
+        assert launchd.well_known_dirs(tmp_path) == (
+            "/opt/homebrew/bin", "/usr/local/bin",
+            str(tmp_path / ".local" / "bin"), str(tmp_path / ".claude" / "local"),
+        )
+        assert launchd.well_known_dirs()[2] == str(Path.home() / ".local" / "bin")
+
+    def test_the_default_fallback_looks_in_the_well_known_directories(
+        self, tmp_path, monkeypatch
+    ):
+        executable(tmp_path / ".claude" / "local", "claude-bug155-probe")
+        monkeypatch.setattr(launchd.Path, "home", classmethod(lambda cls: tmp_path))
+        found_path = search_path(which=nowhere, programs=("claude-bug155-probe",))
+        assert found_path.fallback == {
+            "claude-bug155-probe": str(tmp_path / ".claude" / "local" / "claude-bug155-probe")
+        }
 
     def test_the_real_one_finds_git(self):
         import shutil
 
         git = shutil.which("git")
         assert git is not None
-        assert str(Path(git).parent) in search_path().split(":")
+        assert str(Path(git).parent) in search_path().path.split(":")
 
 
 def test_the_agents_directory_is_the_users_launch_agents():
@@ -305,6 +357,48 @@ class TestStatus:
         assert ok is False and "cannot read" in detail
         assert installer.status().error
 
+    def test_a_path_that_finds_every_program_passes(self, installer, tmp_path):
+        bin_dir = tmp_path / "bin"
+        for program in launchd.NEEDED_PROGRAMS:
+            executable(bin_dir, program)
+        installer.install(plist_for(sys.executable, tmp_path / "home", 5.0,
+                                    path=str(bin_dir), pin_home=False))
+        assert installer.status().missing_programs == []
+        assert installer.programs_check() == (True, ", ".join(launchd.NEEDED_PROGRAMS))
+
+    def test_a_path_without_claude_is_named(self, installer, tmp_path):
+        # BUG_155: what the watcher's chain step would see, read from the plist.
+        bin_dir = tmp_path / "bin"
+        for program in ("git", "osascript"):
+            executable(bin_dir, program)
+        installer.install(plist_for(sys.executable, tmp_path / "home", 5.0,
+                                    path=str(bin_dir), pin_home=False))
+        assert installer.status().missing_programs == ["claude"]
+        ok, detail = installer.programs_check()
+        assert ok is False
+        assert "cannot find claude" in detail and "install it" in detail
+        assert "'invariant oracle install'" in detail
+
+    def test_a_plist_without_a_path_is_read_as_the_system_dirs(self, installer):
+        installer.plist_path.parent.mkdir(parents=True)
+        installer.plist_path.write_bytes(plistlib.dumps({"Label": LABEL}))
+        import shutil
+
+        system = ":".join(launchd.SYSTEM_PATH)
+        assert installer.status().missing_programs == [
+            p for p in launchd.NEEDED_PROGRAMS if shutil.which(p, path=system) is None
+        ]
+
+    def test_no_programs_row_without_a_readable_plist(self, installer):
+        assert installer.programs_check() is None
+        installer.plist_path.parent.mkdir(parents=True)
+        installer.plist_path.write_text("not a plist", "utf-8")
+        assert installer.programs_check() is None
+
+    def test_missing_text_says_them_for_several(self):
+        text = launchd.missing_text(["claude", "tailscale"], "invariant oracle install --web")
+        assert "cannot find claude, tailscale; install them" in text
+
     def test_a_plist_without_arguments_has_no_interpreter(self, installer):
         installer.plist_path.parent.mkdir(parents=True)
         installer.plist_path.write_bytes(plistlib.dumps({"Label": LABEL}))
@@ -403,7 +497,7 @@ class TestInstallCommand:
         assert main(["oracle", "install", "--dry-run", "--json"]) == 0
         env = last_json(capsys)["plist"]["EnvironmentVariables"]
         assert "INVARIANT_HOME" not in env
-        assert env["PATH"] == search_path()
+        assert env["PATH"] == search_path().path
 
     def test_the_interval_reaches_the_watch(self, _no_real_launchd, capsys):
         assert main(["oracle", "install", "--interval", "12", "--json"]) == 0
@@ -535,6 +629,66 @@ class TestStatusCommand:
         assert main(["oracle", "status"]) == 0
         assert "MISSING" in capsys.readouterr().out
 
+    def test_an_agent_path_without_claude_is_flagged(self, _no_real_launchd, tmp_path, capsys):
+        # BUG_155: status names the program the agent's PATH cannot find.
+        bin_dir = tmp_path / "bin"
+        for program in ("git", "osascript"):
+            executable(bin_dir, program)
+        _no_real_launchd.install(plist_for(sys.executable, tmp_path / "h", 5.0,
+                                           path=str(bin_dir), pin_home=False))
+        assert main(["oracle", "status"]) == 0
+        line = next(line for line in capsys.readouterr().out.splitlines()
+                    if line.strip().startswith("programs"))
+        assert "MISSING" in line and "claude" in line
+        assert main(["oracle", "status", "--json"]) == 0
+        assert last_json(capsys)["agent"]["missing_programs"] == ["claude"]
+
+
+class TestInstallSaysWhatThePathMisses:
+    """BUG_155: install never drops a needed program without a word."""
+
+    def test_a_program_found_nowhere_is_a_warning(self, _no_real_launchd, monkeypatch,
+                                                   capsys):
+        monkeypatch.setattr(
+            launchd, "search_path",
+            lambda **kw: launchd.AgentPath("/usr/bin:/bin", {}, ("claude",)),
+        )
+        assert main(["oracle", "install"]) == 0
+        out = capsys.readouterr().out
+        assert "warning:" in out and "cannot find claude" in out
+        assert "'invariant oracle install'" in out
+
+    def test_a_fallback_is_a_note_and_reaches_the_json(self, _no_real_launchd,
+                                                      monkeypatch, capsys):
+        monkeypatch.setattr(
+            launchd, "search_path",
+            lambda **kw: launchd.AgentPath(
+                "/usr/bin:/usr/local/bin", {"claude": "/usr/local/bin/claude"}, ()),
+        )
+        assert main(["oracle", "install", "--dry-run"]) == 0
+        out = capsys.readouterr().out
+        assert "note: claude is not on this PATH; the agent finds it in /usr/local/bin" in out
+        assert "warning" not in out
+        assert main(["oracle", "install", "--json"]) == 0
+        body = last_json(capsys)
+        assert body["programs"]["fallback"] == {"claude": "/usr/local/bin/claude"}
+        assert body["plist"]["EnvironmentVariables"]["PATH"] == "/usr/bin:/usr/local/bin"
+
+    def test_the_web_agent_names_what_it_misses(self, _no_real_web_launchd, monkeypatch,
+                                                capsys):
+        monkeypatch.setattr(
+            launchd, "search_path",
+            lambda **kw: launchd.AgentPath("/usr/bin", {}, ("claude", "tailscale")),
+        )
+        assert main(["oracle", "install", "--web", "--dry-run"]) == 0
+        out = capsys.readouterr().out
+        assert "cannot find claude, tailscale" in out
+        assert "'invariant oracle install --web'" in out
+        assert main(["oracle", "install", "--web", "--json"]) == 0
+        assert last_json(capsys)["programs"]["missing"] == ["claude", "tailscale"]
+        assert main(["oracle", "install", "--web"]) == 0
+        assert "warning:" in capsys.readouterr().out
+
 
 class TestDoctor:
     def rows(self, capsys) -> dict[str, dict]:
@@ -560,6 +714,32 @@ class TestDoctor:
         assert main(["doctor", "--json"]) == 1
         row = self.rows(capsys)["oracle agent interpreter"]
         assert row["ok"] is False and gone in row["detail"]
+
+    def test_an_agent_path_without_claude_warns(self, project, monkeypatch, capsys,
+                                                _no_real_launchd):
+        bin_dir = project / "agent-bin"
+        for program in ("git", "osascript"):
+            executable(bin_dir, program)
+        _no_real_launchd.install(plist_for(sys.executable, project / "h", 5.0,
+                                           path=str(bin_dir), pin_home=False))
+        monkeypatch.chdir(project)
+        main(["doctor", "--json"])
+        row = self.rows(capsys)["oracle agent programs"]
+        assert row["ok"] is True and row["warn"] is True
+        assert row["detail"].startswith("MISSING:") and "claude" in row["detail"]
+
+    def test_an_agent_path_with_every_program_passes(self, project, monkeypatch, capsys,
+                                                     _no_real_launchd):
+        bin_dir = project / "agent-bin"
+        for program in launchd.NEEDED_PROGRAMS:
+            executable(bin_dir, program)
+        _no_real_launchd.install(plist_for(sys.executable, project / "h", 5.0,
+                                           path=str(bin_dir), pin_home=False))
+        monkeypatch.chdir(project)
+        main(["doctor", "--json"])
+        rows = self.rows(capsys)
+        assert rows["oracle agent programs"]["warn"] is False
+        assert "oracle web programs" not in rows
 
     def test_the_check_reads_no_process_table(self, project, monkeypatch, capsys,
                                               _no_real_launchd):

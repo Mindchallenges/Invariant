@@ -1,0 +1,13 @@
+# rule-id  path  fingerprint  count  (written by invariant guidelines baseline; ADR-012 D6)
+layers.entities-depends-inward  src/invariant/core/manifest.py  a0c2b52eabd7  1
+layers.entities-depends-inward  src/invariant/core/questionnaire.py  e2d689424dbb  1
+layers.entities-depends-inward  src/invariant/core/rules.py  00fa5371c2cb  1
+layers.entities-depends-inward  src/invariant/core/rules.py  8c5cb923dbfa  1
+layers.entities-depends-inward  src/invariant/core/rules.py  8d78153d1be9  1
+layers.entities-depends-inward  src/invariant/core/rules.py  d030fde54e6a  1
+layers.entities-depends-inward  src/invariant/core/rules.py  de96c6787056  1
+layers.use-cases-depends-inward  src/invariant/domains/docs.py  1b317970da5a  1
+layers.use-cases-depends-inward  src/invariant/domains/docs.py  5275b681e5d8  1
+layers.use-cases-depends-inward  src/invariant/domains/docs.py  7c5be693baee  1
+layers.use-cases-depends-inward  src/invariant/domains/pipeline.py  5275b681e5d8  1
+layers.use-cases-depends-inward  src/invariant/domains/sweep.py  5275b681e5d8  1

@@ -112,7 +112,7 @@ class TestDocsFirstInjection:
             assert "docs.read_architecture" not in text
 
     def test_injection_targets_roles_not_names(self):
-        assert set(DOCS_FIRST_GATES) == {"design", "landing"}
+        assert set(DOCS_FIRST_GATES) == {"design", "review", "landing"}
 
     def test_a_review_state_without_a_landing_state_is_refused(self, make_manifest, tmp_path):
         """The omission this injection could otherwise make silently.
@@ -495,9 +495,13 @@ class TestBUG037ABackwardEdgeIsNotGatedByTheShipGates:
     #: Spelled as the exact expected set, not as "empty", because `drafting`
     #: carries the injected docs-first read gate and always has — the claim is
     #: that these edges owe what they owed, not that they owe nothing.
+    #: ``docs.ahead_of_code`` rides every review entry since ADR-032
+    #: increment 3. It reads a recorded snapshot and runs nothing, and is N/A
+    #: on ``chore``, which has no design state, so ``doing -> reviewing``
+    #: still costs nothing there.
     ALREADY_FREE: ClassVar[list[tuple[str, str, str, set[str]]]] = [
-        ("chore", "doing", "reviewing", set()),
-        ("docs", "drafting", "reviewing", {"docs.read_architecture"}),
+        ("chore", "doing", "reviewing", {"docs.ahead_of_code"}),
+        ("docs", "drafting", "reviewing", {"docs.read_architecture", "docs.ahead_of_code"}),
         ("bugfix", "reproducing", "not_reproducible", set()),
     ]
 

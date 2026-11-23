@@ -54,8 +54,11 @@ STARTER = sorted(
         "invariant-docs/checklist.rst",
         "invariant-docs/conf.py",
         "invariant-docs/decisions/index.rst",
+        "invariant-docs/guidelines/patterns.yaml",
         "invariant-docs/guidelines/ruleset.yaml",
         "invariant-docs/index.rst",
+        "invariant-docs/patterns.rst",
+        "invariant-docs/plan.rst",
         "invariant-docs/requirements.rst",
         "invariant-docs/requirements.txt",
         "invariant-docs/rules.rst",
@@ -274,11 +277,11 @@ class TestTheStartersFiles:
         )}
         assert links == {
             "architecture/overview", "requirements", "decisions/index", "ui",
-            "rules", "checklist", "backlog",
+            "rules", "checklist", "patterns", "backlog", "plan",
         }
 
     def test_the_generated_pages_carry_the_managed_marker(self, root):
-        for name in ("rules.rst", "checklist.rst"):
+        for name in ("rules.rst", "checklist.rst", "patterns.rst", "plan.rst"):
             assert (root / SRC / name).read_text(encoding="utf-8").startswith(
                 ".. invariant-managed: "
             )

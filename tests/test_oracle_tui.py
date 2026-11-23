@@ -136,9 +136,29 @@ def drive(app, script, size=(200, 50)):
     return app
 
 
+async def workers_done(app):
+    """Wait for the app's workers, a superseded read counting as done (BUG_081).
+
+    A read is an exclusive worker, so a refresh the timer starts while an
+    earlier read runs cancels that one, and waiting on it raises
+    ``WorkerCancelled``. The newer read is the one that matters, so the wait
+    starts again over the workers there are now. Bounded, so a timer that
+    keeps superseding its own reads fails the test rather than hanging it.
+    """
+    from textual.worker import WorkerCancelled
+
+    for _ in range(100):
+        try:
+            await app.workers.wait_for_complete()
+        except WorkerCancelled:
+            continue
+        return
+    raise AssertionError("every wait was superseded by a newer read")
+
+
 async def settle(app, pilot):
     for _ in range(3):
-        await app.workers.wait_for_complete()
+        await workers_done(app)
         await pilot.pause()
 
 
@@ -780,7 +800,7 @@ class TestItAlwaysRefreshes:
                 if len(calls) >= 2 and not app.query_one("#banner").display:
                     break
                 await pilot.pause(0.05)
-                await app.workers.wait_for_complete()
+                await workers_done(app)
             assert len(calls) >= 2
             assert "updated" in str(app.query_one("#fresh").content)
 

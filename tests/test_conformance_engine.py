@@ -52,6 +52,8 @@ GUIDELINES = (
     "guidelines.mechanical_clean",
     "guidelines.baseline_only_shrinks",
     "guidelines.verdicts_complete",
+    "guidelines.blocking_verdicts",
+    "guidelines.user_rules_ruled",
 )
 
 SHIPPED = [
@@ -118,7 +120,14 @@ def test_a_malformed_ruleset_is_the_one_refusal_at_the_landing(shipped):
     assert landing["guidelines.mechanical_clean"] == "warn"
     # Nor can it judge a verdict, and standard holds it at warn (ruling 7).
     assert landing["guidelines.verdicts_complete"] == "warn"
-    assert outcome.refusals == {"land": ("guidelines.ruleset_valid",)}
+    # The two ADR-032 increment 2 gates need the ruleset too, and fail on one
+    # that does not load at block, as every gate that needs it fails.
+    assert landing["guidelines.blocking_verdicts"] == "block"
+    assert landing["guidelines.user_rules_ruled"] == "block"
+    assert outcome.refusals == {"land": (
+        "guidelines.blocking_verdicts", "guidelines.ruleset_valid",
+        "guidelines.user_rules_ruled",
+    )}
 
 
 def test_a_ruleset_using_every_kind_lands_like_the_clean_change(shipped):
@@ -271,7 +280,8 @@ def test_a_vague_verdict_is_refused_naming_its_predicate_and_records_nothing(shi
     (diff,) = steps["outside-the-diff"].document["refused"]
     assert (diff["entry"], diff["rule"]) == (1, STABLE)
     assert result.outcome.verdicts == {"standing": {STABLE: "missing"}}
-    assert result.outcome.refusals["land"] == ("guidelines.verdicts_complete",)
+    assert result.outcome.refusals["land"] == (
+        "guidelines.blocking_verdicts", "guidelines.verdicts_complete")
     (gate,) = [g for g in steps["land"].document["gates"]
                if g["rule"] == "guidelines.verdicts_complete"]
     assert f"{STABLE}: no verdict" in gate["message"]
@@ -286,7 +296,8 @@ def test_a_judgement_fail_at_blocker_refuses_a_strict_landing_and_a_forced_one_k
     steps = labelled(result)
     assert steps["fail"].exit_code == 0
     assert result.outcome.verdicts == {"standing": {STABLE: "fail"}}
-    assert result.outcome.refusals == {"land": ("guidelines.verdicts_complete",)}
+    assert result.outcome.refusals == {"land": (
+        "guidelines.blocking_verdicts", "guidelines.verdicts_complete")}
     assert steps["forced"].exit_code == 0
     (record,) = landings(result)
     assert record["forced"] is True and record["to"] == "committed"
@@ -295,14 +306,17 @@ def test_a_judgement_fail_at_blocker_refuses_a_strict_landing_and_a_forced_one_k
         "current", "fail", True)
 
 
-def test_a_judgement_fail_at_blocker_warns_a_standard_landing_and_is_kept(shipped):
-    """The same fail under the standard profile: the gate warns, the landing
-    goes through unforced, and its record still keeps the fail."""
+def test_a_judgement_fail_at_blocker_refuses_a_standard_landing_and_is_kept(shipped):
+    """The same fail under the standard profile: verdicts_complete warns, and
+    guidelines.blocking_verdicts (ADR-032 D7, increment 2) refuses the
+    landing; the forced landing's record still keeps the fail."""
     result = shipped("judgement-fail-standard")
-    assert result.outcome.gates["committed"]["guidelines.verdicts_complete"] == "warn"
-    assert result.outcome.refusals == {}
+    gates = result.outcome.gates["committed"]
+    assert gates["guidelines.verdicts_complete"] == "warn"
+    assert gates["guidelines.blocking_verdicts"] == "block"
+    assert result.outcome.refusals == {"land": ("guidelines.blocking_verdicts",)}
     (record,) = landings(result)
-    assert record["forced"] is False
+    assert record["forced"] is True
     standing = standing_of(record, STABLE)
     assert (standing["standing"], standing["status"]) == ("current", "fail")
 
@@ -316,7 +330,8 @@ def test_a_verdict_goes_stale_when_its_cited_file_changes(shipped):
         "fresh": {STABLE: "pass"}, "edited": {STABLE: "stale"}}
     (owed,) = steps["edited"].document["owed"]
     assert [p["predicate"] for p in owed["problems"]] == ["P3"]
-    assert result.outcome.refusals == {"land": ("guidelines.verdicts_complete",)}
+    assert result.outcome.refusals == {"land": (
+        "guidelines.blocking_verdicts", "guidelines.verdicts_complete")}
 
 
 def test_the_engines_na_answers_the_rule_and_sets_a_recorded_fail_aside(shipped):
@@ -996,6 +1011,10 @@ ALLOWED_READS: dict[tuple[str, Hit], int] = {
     # The one deliberate read: _without_audit looks for the key to remove it, on
     # the way into every RuleContext, which is why no rule can see it (ruling 10).
     ("core/rules.py", Hit("_without_audit", "name", "AUDIT_KEY")): 2,
+    # DEC_ADR_030_D4, amending D1 item 2: the one fact a rule may have of the
+    # record, which agents the configured forbidden-model list forbids, derived
+    # on the way into every RuleContext before the record is removed.
+    ("core/rules.py", Hit("_forbidden_runs", "name", "AUDIT_KEY")): 1,
     # Fix text an operator reads for an edited agent copy, naming where a model
     # line belongs. Nothing looks a key up by it (A7.2).
     ("core/rules.py", Hit("AGENT_OVERLAY_FIX", "literal", "agents.tiers")): 1,
@@ -1380,6 +1399,45 @@ def test_a_rewrite_of_what_a_gate_does_read_changes_the_outcome(tmp_path):
     outcome = replay(scenario, workdir=tmp_path, run=cli).outcome
     assert outcome.gates["committed"]["agents.design_agent_ran"] == "warn"
     assert compare(scenario.expected, outcome) != []
+
+
+def _observed_on(value: str):
+    """A rewrite that permutes as the replays do, then says every agent ran on
+    ``value``: the one fact of the audit a gate may read is membership."""
+
+    def rewrite(evidence: dict, permutation: Permutation) -> None:
+        permute_evidence(evidence, permutation)
+        for entry in evidence["audit"]["agents"].values():
+            entry["models"] = [value]
+
+    return rewrite
+
+
+def test_membership_in_the_forbidden_list_is_the_one_audit_fact_a_gate_reads(
+    shipped, tmp_path
+):
+    """DEC_ADR_030_D4, amending D1 item 2: a model the configured list holds
+    changes the outcome, and a model it does not hold changes nothing. The
+    list is the host adapter's default; no model name is spelled here."""
+    from invariant.hosts.claude_code import FORBIDDEN_MODELS
+
+    scenario = load_named("clean")
+    member = f"x-{FORBIDDEN_MODELS[0].upper()}-y"
+    forbidden = replay(scenario, workdir=tmp_path / "member",
+                       run=PermutingCli(tmp_path / "member", fixed("null"),
+                                        _observed_on(member))).outcome
+    # The red proof is the first gate the forbidden work reaches, and it blocks
+    # although the scenario's standard profile holds it at warn: ruling 4's
+    # floor (DEC_ADR_030_D5). The replay stops there, refused.
+    assert forbidden.gates["green"]["test.new_test_fails"] == "block"
+    assert "test.new_test_fails" in {r for rs in forbidden.refusals.values() for r in rs}
+    assert "committed" not in forbidden.gates
+    assert compare(scenario.expected, forbidden) != []
+
+    allowed = replay(scenario, workdir=tmp_path / "other",
+                     run=PermutingCli(tmp_path / "other", fixed("null"),
+                                      _observed_on("placeholder-model"))).outcome
+    assert_same_answer("clean", scenario, shipped("clean").outcome, allowed)
 
 
 def test_a_copy_differing_only_by_its_model_line_reads_as_current(tmp_path):

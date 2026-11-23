@@ -328,9 +328,22 @@ class Adapter:
         """
         return None
 
+    #: The file suffixes this ecosystem's source files carry: the one list
+    #: :meth:`source_files` filters on and :meth:`source_globs` spells. Empty
+    #: is "this adapter knows no suffix", and every file is then a source file.
+    source_suffixes: ClassVar[frozenset[str]] = frozenset()
+
     def source_files(self, changed: list[Path]) -> list[Path]:
         """Narrow a changed-file list to this ecosystem's source files."""
-        return list(changed)
+        if not self.source_suffixes:
+            return list(changed)
+        return [p for p in changed if p.suffix in self.source_suffixes]
+
+    def source_globs(self) -> tuple[str, ...]:
+        """The project globs this ecosystem's source files match, sorted:
+        what the default guidelines apply to (ADR-032 D4). Empty where the
+        adapter knows no suffix."""
+        return tuple(f"**/*{suffix}" for suffix in sorted(self.source_suffixes))
 
     def carries_executable_code(
         self, path: Path, relative: Path | None = None

@@ -16,8 +16,11 @@ dependencies = ["PyYAML>=6.0"]
 # The oracle's dashboard, `invariant oracle tui` (IDEA_012, ADR-007 D19). An
 # extra, so the core install stays PyYAML-only: everything else the oracle
 # does — the index, the scan, the watcher, notifications, the LaunchAgent —
-# needs nothing beyond the standard library.
-oracle = ["textual>=8.0"]
+# needs nothing beyond the standard library. `cryptography` is web push
+# (ADR-027 increment 4, ruling 17): the RFC 8291 encryption and the VAPID
+# signature need P-256 and AES-GCM, which the standard library lacks. Without
+# it the Mac banner still works, and the page says why it offers no push.
+oracle = ["textual>=8.0", "cryptography>=44"]
 
 [project.urls]
 Homepage = "https://github.com/Mindchallenges/invariant"
@@ -42,7 +45,19 @@ include = ["src/invariant", "docs", "tests", "README.md"]
 # textual is here as well as in the `oracle` extra so the suite always runs
 # the dashboard's tests rather than skipping them, and uv.lock pins it for the
 # same reason: a floating TUI toolkit would move what those tests measure.
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.16", "textual>=8.0"]
+# cryptography is here for the same reason: the web push tests (ADR-027
+# increment 4) run its real encryption rather than skipping.
+#
+# pytest-xdist spreads a run over workers; the manifest's commands.* pass
+# `-n`. A bare `pytest` still runs in one process.
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-xdist>=3.6",
+    "ruff>=0.16",
+    "textual>=8.0",
+    "cryptography>=44",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

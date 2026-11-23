@@ -33,23 +33,31 @@ from ..core.manifest import (
     project_relative,
 )
 from ..core.rules import (
-    DOCTOR_ROW_RULES,
     HELD_OUT_OF_STANDDOWN,
     RuleContext,
     always_layer_summary,
     apply_acknowledgements,
     baseline_summary,
     coverage_advisory_exception,
+    design_snapshot_notice,
     evaluate,
     get_rule,
     grant_outcomes,
     guideline_gate_of,
     rules_for,
     sweep_cadence_summary,
+    user_owned_guideline,
 )
 from ..core.steps import step_name
 from ..core.store import LOCK_TIMEOUT_SECONDS, InertStore, JsonStore
-from ..domains.pipeline import PipelineDomain, audit_line, describe_run, summarise
+from ..domains.pipeline import (
+    PipelineDomain,
+    audit_line,
+    describe_run,
+    design_snapshot_taken,
+    summarise,
+    unchecked_agents,
+)
 from ..domains.session import (
     LANDING_RULE,
     Session,
@@ -364,6 +372,7 @@ class Context:
             host_instruction_files=host_instruction_files(self.manifest),
             host_agent_plan=host_agent_plan(self.manifest),
             lock_timeout=self.pipeline_lock_timeout,
+            forbidden_models=host_forbidden_models(self.manifest),
         )
 
     @property
@@ -711,6 +720,7 @@ class Context:
             host_instruction_files=host_instruction_files(self.manifest),
             host_agent_plan=host_agent_plan(self.manifest),
             host_attribution_trailers=host_attribution_trailers(self.manifest),
+            forbidden_models=host_forbidden_models(self.manifest),
         )
 
 
@@ -2051,6 +2061,10 @@ def cmd_doctor(args) -> int:
             checks.append(("rulings", True, detail))
             if warns:
                 warned.add("rulings")
+        defaults_row = _guidelines_defaults_row(ctx)
+        if defaults_row is not None:
+            checks.append(("guidelines defaults", True, defaults_row[0]))
+            warned.add("guidelines defaults")
         for home_row in (_config_home_row(ctx.manifest), _docs_folder_row(ctx.manifest)):
             if home_row is not None:
                 label, detail, warns = home_row
@@ -2094,13 +2108,17 @@ def cmd_doctor(args) -> int:
         # The docs assessment (ADR-016 D3), asked of its rule directly as the
         # guidelines rows are. Its level decides the row: `warn`, every
         # profile's, prints gaps as a warning; `block` fails the row; `off`
-        # removes it. The row above is unchanged.
-        docs_row = docs_assessment_row(ctx.manifest, ctx.rule_context())
-        if docs_row is not None:
-            label, ok, detail, warns = docs_row
-            checks.append((label, ok, detail))
-            if warns:
-                warned.add(label)
+        # removes it. The row above is unchanged. The plan page's currency
+        # (ADR-032 increment 6) is the second such row, absent where the
+        # project has no plan page to judge.
+        rule_ctx = ctx.rule_context()
+        for row in (docs_assessment_row(ctx.manifest, rule_ctx),
+                    plan_page_row(ctx.manifest, rule_ctx)):
+            if row is not None:
+                label, ok, detail, warns = row
+                checks.append((label, ok, detail))
+                if warns:
+                    warned.add(label)
         # Copy-mode drift (ADR-016 D8, ruling 3): a row only for a project
         # that adopted by copy, and one that warns and never fails, since a
         # moved original is the user's to re-copy or not.
@@ -2315,6 +2333,16 @@ def cmd_doctor(args) -> int:
         checks.append(("oracle agent interpreter", *agent))
         checks.extend(_oracle_watcher_build_check())
     checks.extend(_oracle_web_checks())
+    # Each agent's baked PATH against the programs it needs (BUG_155). It
+    # warns: an agent without claude still watches and serves.
+    for label, installer in (("oracle agent programs", _oracle_installer()),
+                             ("oracle web programs", _oracle_web_installer())):
+        programs = installer.programs_check()
+        if programs is not None:
+            checks.append((label, True, programs[1] if programs[0]
+                           else f"MISSING: {programs[1]}"))
+            if not programs[0]:
+                warned.add(label)
 
     # Machine-wide too: a live claude whose own environment inherited a
     # marker from Terminal.app (IDEA_035). It warns and never fails: the
@@ -2332,17 +2360,33 @@ def docs_assessment_row(
 ) -> tuple[str, bool, str, bool] | None:
     """`doctor`'s `docs assessment` row: (label, ok, detail, warns), or ``None``
     when `docs.assessment` is off (ADR-016 D3)."""
-    (rule_id,) = DOCTOR_ROW_RULES
+    return _doctor_rule_row(manifest, rule_ctx, "docs.assessment", "docs assessment")
+
+
+def plan_page_row(manifest: Manifest, rule_ctx) -> tuple[str, bool, str, bool] | None:
+    """`doctor`'s `plan page` row (ADR-032 increment 6): ``docs.plan_current``
+    as its level decides, or ``None`` when it is off or has no page to judge."""
+    return _doctor_rule_row(manifest, rule_ctx, "docs.plan_current", "plan page",
+                            skip_na=True)
+
+
+def _doctor_rule_row(
+    manifest: Manifest, rule_ctx, rule_id: str, label: str, *, skip_na: bool = False
+) -> tuple[str, bool, str, bool] | None:
+    """One ``DOCTOR_ROW_RULES`` rule as a row: (label, ok, detail, warns), or
+    ``None`` when the rule is off, or N/A with ``skip_na``."""
     level = manifest.rule_level(rule_id)
     if level is Level.OFF:
         return None
     verdict = get_rule(rule_id).fn(rule_ctx)
+    if verdict.skipped and skip_na:
+        return None
     gapped = not verdict.ok and not verdict.skipped
     fails = gapped and level in (Level.BLOCK, Level.ASK)
     detail = verdict.message + (f": {verdict.detail}" if gapped else "")
     if gapped:
         detail += "".join(f"; try: {fix}" for fix in verdict.fixes)
-    return ("docs assessment", not fails, detail, gapped and not fails)
+    return (label, not fails, detail, gapped and not fails)
 
 
 def _lease_host_alive(lease: dict) -> bool | None:
@@ -3219,6 +3263,58 @@ def _report_checks(
 # -- agents ------------------------------------------------------------
 
 
+#: The status line ``hooks statusline`` installs (ADR-027 ruling 10).
+STATUSLINE_COMMAND = "invariant hook statusline"
+
+
+def cmd_hooks_statusline(args) -> int:
+    """Install the status line that records the plan's usage: opt-in, never a replace.
+
+    Writes ``statusLine`` into the user's Claude Code ``settings.json``; one
+    that is already there and is not this one is refused (exit 2), so the
+    user's own status line is never lost. Nothing installs it otherwise.
+    """
+    from ..hosts.claude_code_telemetry import claude_home
+    from ..hosts.claude_code_usage import install_statusline
+
+    settings = claude_home() / "settings.json"
+    try:
+        outcome = install_statusline(settings, STATUSLINE_COMMAND)
+    except InvariantError as exc:
+        raise UsageError(str(exc)) from exc
+    text = (f"status line installed in {settings}: `{STATUSLINE_COMMAND}` records the plan's "
+            f"usage for the oracle's chain" if outcome == "installed"
+            else f"the status line in {settings} is already `{STATUSLINE_COMMAND}`")
+    return emit(args, {"outcome": outcome, "settings": str(settings),
+                       "command": STATUSLINE_COMMAND}, text)
+
+
+def _hook_statusline() -> int:
+    """``invariant hook statusline``: record the plan's usage, print the status line.
+
+    Claude Code runs it with its status-line JSON on stdin, anywhere, in a
+    project or not, so no manifest is asked for. The reading is recorded in
+    the oracle home as the host-neutral ``plan_usage`` fact; anything that
+    goes wrong prints the line without a reading and exits 0, because a
+    status line that fails shows the user an error on every refresh.
+    """
+    from ..hosts.claude_code_usage import reading_from_statusline, statusline_text
+    from ..oracle.home import oracle_home
+    from ..oracle.usage import record_usage
+
+    fact = None
+    try:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+        payload = json.loads(raw) if raw.strip() else None
+        fact = reading_from_statusline(payload, time.time())
+        if fact is not None:
+            record_usage(oracle_home(), fact, fact["read_at"])
+    except (ValueError, InvariantError, OSError):
+        pass
+    print(statusline_text(fact))
+    return EXIT_OK
+
+
 def cmd_hooks_install(args) -> int:
     """Install and wire the hook shims, touching nothing else.
 
@@ -4045,7 +4141,7 @@ def cmd_store_push(args) -> int:
             )
         root, sync = ctx.manifest.store.root, storesync.settings(ctx.manifest)
     notes = _ensure_store_hooks(root)
-    out = storesync.push(root, sync)
+    out = storesync.push(root, sync, store_attribution_trailers(root))
     emit(args, out.to_dict(), "\n".join([*notes, *out.lines()]))
     return EXIT_OK if out.published else 1
 
@@ -4074,9 +4170,10 @@ def cmd_store_hook(args) -> int:
         print("invariant: the store's privacy screen ran outside a git repository",
               file=sys.stderr)
         return 1
+    trailers = store_attribution_trailers(root)
     if args.name == "pre-push":
         remote = args.args[0] if args.args else "origin"
-        commits, screened = storescan.pre_push(root, remote, sys.stdin.read())
+        commits, screened = storescan.pre_push(root, remote, sys.stdin.read(), trailers)
         what = f"push of {len(commits)} commit(s)"
     elif storescan.relaxation(root).honoured:
         return EXIT_OK
@@ -4085,11 +4182,14 @@ def cmd_store_hook(args) -> int:
     else:
         what = "commit message"
         try:
-            text = Path(args.args[0]).read_text(encoding="utf-8", errors="replace")
+            # Bytes, so no newline translation turns a lone carriage return
+            # into a line break git does not make (ADR-024 D2).
+            raw = Path(args.args[0]).read_bytes()
         except (IndexError, OSError) as exc:
             screened = storescan.Screened(problem=f"the message could not be read ({exc})")
         else:
-            screened = storescan.scan_message(root, text)
+            text = raw.decode("utf-8", errors="replace")
+            screened = storescan.scan_message(root, text, trailers=trailers)
     if screened.clean:
         return EXIT_OK
     head = (
@@ -4357,8 +4457,25 @@ def cmd_override(args) -> int:
             f"withdrew any unspent override for {args.rule}",
         )
 
+    by = None
+    if get_rule(args.rule) is None and user_owned_guideline(ctx.rule_context(), args.rule):
+        # ADR-032 D7: only the user passes a guideline marked owner: user.
+        if not (args.by or "").strip():
+            raise UsageError(
+                f"{args.rule} is owner: user, so its grant names who gives it: add "
+                f"--by <who>, and confirm it at a terminal"
+            )
+        shown = [
+            f"override {args.rule}: a guideline only the user rules on",
+            f"  reason: {args.reason}",
+            f"  by: {args.by}",
+        ]
+        payload = {"rule": args.rule, "reason": args.reason, "by": args.by}
+        if not _confirmed(args, shown, payload, "Grant this override?"):
+            return 1
+        by = args.by.strip()
     updated = ctx.sessions.grant_override(
-        session.id, args.rule, args.reason, calls=args.calls, cwd=ctx.cwd
+        session.id, args.rule, args.reason, calls=args.calls, cwd=ctx.cwd, by=by
     )
     if get_rule(args.rule) is None:
         gate = guideline_gate_of(ctx.rule_context(), args.rule) or MECHANICAL_RULE
@@ -4866,8 +4983,28 @@ def _launch_successor(launch, plan, after: str = "") -> int:
     return pid
 
 
+def _window_model(root, chosen: str | None = None) -> tuple[str, tuple[str, ...]]:
+    """``(model, forbidden list)`` for a window opened in ``root`` (DEC_ADR_030_D6).
+
+    ``chosen`` is the person's choice at a start; blank or ``None`` takes the
+    project's ``host.window_model``, resolved at ``root`` over the user level,
+    else the host adapter's default. The forbidden list is resolved the same
+    way, and the launch refuses a model it holds. A root whose configuration
+    does not load takes the adapter's defaults, so a window is never opened
+    unchecked. The host is joined here because the oracle may not import it.
+    """
+    from ..hosts.claude_code import forbidden_models, window_model
+
+    try:
+        manifest = Manifest.locate(Path(root), required=False)
+    except (InvariantError, OSError):
+        manifest = None
+    chosen = chosen.strip() if chosen else ""
+    return chosen or window_model(manifest), forbidden_models(manifest)
+
+
 def _open_claude_window(name: str, prompt: str | None, cwd, token: str | None = None,
-                        after: str = ""):
+                        after: str = "", model: str | None = None):
     """The one way invariant opens a new Claude window: ``(plan, successor pid)``.
 
     A new macOS Terminal window in ``cwd`` running ``claude --name <name>
@@ -4878,13 +5015,16 @@ def _open_claude_window(name: str, prompt: str | None, cwd, token: str | None = 
     dashboard's terminal step and ``oracle start-session`` all come through
     here, and IDEA_029's hand-off will too, with a prepared prompt. Refused,
     with the line to run by hand, off macOS; refused without ``claude`` on
-    PATH. Nothing here records or ends anything.
+    PATH. Nothing here records or ends anything. Every window runs on
+    ``--model``: ``model`` when the person chose one, else the configured
+    window model (``_window_model``, DEC_ADR_030_D6).
     """
     from ..hosts import claude_code_launch as launch
 
+    model, forbidden = _window_model(cwd, model)
     if launch.host_platform() != "darwin":
         preview = launch.plan_launch(launch.CLAUDE_BINARY, name, prompt, cwd, token,
-                                     stage=False)
+                                     stage=False, model=model, forbidden=forbidden)
         raise InvariantError(
             "opening a Terminal window needs macOS. Run it by hand:\n"
             f"    {preview.by_hand}"
@@ -4892,7 +5032,8 @@ def _open_claude_window(name: str, prompt: str | None, cwd, token: str | None = 
     claude = launch.resolve_claude()
     if claude is None:
         raise InvariantError(f"no claude on PATH to start; {launch.CLAUDE_BINARY} was not found")
-    plan = launch.plan_launch(claude, name, prompt, cwd, token)
+    plan = launch.plan_launch(claude, name, prompt, cwd, token, model=model,
+                              forbidden=forbidden)
     return plan, _launch_successor(launch, plan, after)
 
 
@@ -5041,18 +5182,7 @@ def cmd_session_handoff(args) -> int:
         )
 
     ctx = Context(session_id=args.id)
-    explicit = args.id or os.environ.get(SESSION_ENV)
-    if explicit:
-        session = ctx.sessions.require(explicit)
-    else:
-        resolution = ctx.sessions.resolve(
-            ctx.cwd, host_session_id=ctx.host_session_id
-        )
-        session = (
-            resolution.session
-            if resolution.proven
-            else ctx.sessions.handoff_candidate(ctx.cwd, ctx.host_session_id)
-        )
+    session = _event_session(ctx, args.id)
     if session is None:
         raise UsageError(
             "no session to record a handoff on: none is registered at or above "
@@ -5072,8 +5202,10 @@ def cmd_session_handoff(args) -> int:
     main_checkout = git.main_checkout(ctx.manifest.root) or ctx.manifest.root
     claude = launch.resolve_claude()
     note = _with_debts(ctx, vetted)
+    model, forbidden = _window_model(main_checkout)
     plan = launch.plan_launch(
-        claude or launch.CLAUDE_BINARY, name, note, main_checkout, stage=False
+        claude or launch.CLAUDE_BINARY, name, note, main_checkout, stage=False,
+        model=model, forbidden=forbidden,
     )
     result = {
         "session": session.id,
@@ -5155,7 +5287,8 @@ def cmd_session_handoff(args) -> int:
     _handoff_steps(ctx, session, main_checkout, args)
     note = _with_debts(ctx, vetted)
     result["note"] = note
-    result["argv"] = list(launch.plan_launch(claude, name, note, main_checkout, stage=False).argv)
+    result["argv"] = list(launch.plan_launch(claude, name, note, main_checkout, stage=False,
+                                             model=model, forbidden=forbidden).argv)
 
     updated = ctx.sessions.record_handoff(session.id, note, name)
     token = handoff_token(updated.id, updated.handoffs[-1]["at"])
@@ -5188,6 +5321,49 @@ def cmd_session_handoff(args) -> int:
                 close_line,
             ]
         ),
+    )
+
+
+def _event_session(ctx: Context, explicit: str | None):
+    """The session an event command records on, as ``session handoff`` finds it.
+
+    ``--id`` or ``INVARIANT_SESSION_ID``, else a session the call proves, else
+    the most recently moved one at or above here, in any state (ADR-005,
+    ADR-027 D11). ``None`` when there is none.
+    """
+    explicit = explicit or os.environ.get(SESSION_ENV)
+    if explicit:
+        return ctx.sessions.require(explicit)
+    resolution = ctx.sessions.resolve(ctx.cwd, host_session_id=ctx.host_session_id)
+    if resolution.proven:
+        return resolution.session
+    return ctx.sessions.handoff_candidate(ctx.cwd, ctx.host_session_id)
+
+
+def cmd_session_report(args) -> int:
+    """Record how this session ended: done, blocked or needs-user (ADR-027 D1).
+
+    An event, as a handoff is: legal in every state, a ``reports`` entry and a
+    standstill row. The oracle reads it; nothing is started or stopped here.
+    The text never spells ``session <id> (``, the binding contract.
+    """
+    ctx = Context(session_id=args.id)
+    session = _event_session(ctx, args.id)
+    if session is None:
+        raise UsageError(
+            "no session to report on: none is registered at or above this "
+            "directory.\n"
+            "  Name one: invariant session report --outcome <outcome> --id <id>"
+        )
+    updated = ctx.sessions.record_report(session.id, args.outcome, args.note)
+    report = updated.reports[-1]
+    lines = [f"reported {args.outcome} for {updated.name} [{updated.id}], in {updated.state}"]
+    if report.get("note"):
+        lines.append(f"  note: {report['note']}")
+    return emit(
+        args,
+        {"session": updated.id, "session_name": updated.name, "report": report},
+        "\n".join(lines),
     )
 
 
@@ -5741,6 +5917,9 @@ def _land_repo(
     # failing `block` one holds teardown and the handoff through its rule
     # (ruling 2, D5). A forced landing runs none, as a forced edge runs none.
     after = [] if force else ctx.sessions.run_after_merge(merged, cwd=main)
+    # The landing's last docs write: the plan page, from the queue as the
+    # main checkout holds it once the branch is merged (ADR-032 increment 6).
+    planned = _plan_page_lines(ctx)
     verb = "already merged" if already else "merged"
     return (
         "\n".join(
@@ -5748,6 +5927,7 @@ def _land_repo(
                 *lines,
                 f"{verb} {session.branch} into {session.base} (containment verified)",
                 *moved,
+                *planned,
                 *_push_after_landing(ctx),
             ]
         ),
@@ -5772,7 +5952,7 @@ def _push_after_landing(ctx: Context) -> list[str]:
         return []
     root = ctx.manifest.store.root
     notes = _ensure_store_hooks(root)
-    out = storesync.push(root, sync)
+    out = storesync.push(root, sync, store_attribution_trailers(root))
     lines = [*notes, *out.lines()]
     if not out.published:
         lines.append(
@@ -6069,6 +6249,13 @@ def cmd_pipeline_status(args) -> int:
     audit = audit_line(pipeline.evidence)
     if audit is not None:
         text.append(f"  audit   {audit}")
+    unchecked = unchecked_agents(pipeline.evidence)
+    forbidden = host_forbidden_models(ctx.manifest)
+    if unchecked and forbidden:
+        text.append(
+            f"  models  not checked against the forbidden list ({', '.join(forbidden)}): "
+            f"{', '.join(unchecked)} ran with no model known"
+        )
     return emit(args, pipeline.to_dict(), "\n".join(text))
 
 
@@ -6135,9 +6322,20 @@ def cmd_pipeline_advance(args) -> int:
     _lift_cli_refusal(ctx, session)
     report_verdicts(verdicts, args)
     _spend_guideline_overrides(ctx, session, verdicts)
+    # Said at the advance out of design, where a missing doc is still cheap
+    # to write (ADR-032 D6).
+    snapshot = design_snapshot_taken(pipeline)
+    if snapshot is not None and not getattr(args, "json", False):
+        for line in design_snapshot_notice(snapshot):
+            print(line)
     return emit(
         args,
-        {"advanced": True, "pipeline": pipeline.to_dict(), "gates": verdicts_payload(verdicts)},
+        {
+            "advanced": True,
+            "pipeline": pipeline.to_dict(),
+            "gates": verdicts_payload(verdicts),
+            "design_snapshot": snapshot,
+        },
         f"pipeline -> {pipeline.state}  ({summarise(verdicts)})",
     )
 
@@ -6218,6 +6416,203 @@ def cmd_pipeline_test(args) -> int:
 
 
 # -- items -------------------------------------------------------------
+
+
+def _queue_domain(ctx: Context):
+    from ..domains.queue import QueueDomain
+
+    return QueueDomain(ctx.manifest, ctx.store)
+
+
+def _registered_queue(selector: str):
+    """The queue of a registered project, named as ``oracle projects remove`` names one.
+
+    ``queue add --project`` and ``queue list --project``: a session queues its
+    successor in another project (ADR-027 D8). The project's own manifest and
+    state root are used, wherever the command runs.
+    """
+    from ..domains.queue import QueueDomain
+
+    entry = _project_index().match(selector)
+    if not entry.has_manifest:
+        raise UsageError(
+            f"{entry.name} is registered, but {entry.root or 'its root'} no longer "
+            f"carries a manifest. `invariant oracle projects prune` drops it"
+        )
+    manifest = Manifest.locate(Path(entry.root))
+    return QueueDomain(manifest, JsonStore(manifest.state_root))
+
+
+def _queue_adder(args) -> str:
+    """The session ``queue add`` names as the adder, else ``user``.
+
+    With ``--project`` the command may run outside any project, and then no
+    session here can be resolved: the adder is ``user``.
+    """
+    try:
+        ctx = Context(session_id=args.id)
+    except InvariantError:
+        if getattr(args, "project", None) and not args.id:
+            return "user"
+        raise
+    explicit = args.id or os.environ.get(SESSION_ENV)
+    if explicit:
+        return ctx.sessions.require(explicit).id
+    resolution = ctx.sessions.resolve(ctx.cwd, host_session_id=ctx.host_session_id)
+    return resolution.session.id if resolution.proven and resolution.session else "user"
+
+
+def _queue_lines(queue) -> list[str]:
+    if not queue.entries:
+        return ["the queue is empty"]
+    lines = []
+    for position, entry in enumerate(queue.entries, start=1):
+        extra = f" ({entry.session})" if entry.session else ""
+        extra += f" ({entry.reason})" if entry.reason else ""
+        extra += " [proposed]" if entry.mode else ""
+        extra += f" (serves {entry.serves})" if entry.serves else ""
+        lines.append(
+            f"  {position}. {entry.id}  {entry.state:<8} {entry.ref}{extra}  "
+            f"[{entry.added_by}]"
+        )
+        if entry.brief:
+            lines.append(f"       brief: {entry.brief}")
+    return lines
+
+
+def _queue_document(domain, queue) -> dict:
+    return {
+        "path": str(domain.path),
+        "next": queue.next,
+        "entries": [entry.to_dict() for entry in queue.entries],
+    }
+
+
+def _page_notes(domain) -> None:
+    """Why an edit's render of the plan page wrote nothing, on stderr, so
+    ``--json`` output stays one document (ADR-032 increment 6)."""
+    for note in domain.notes:
+        print(note, file=sys.stderr)
+
+
+def cmd_queue_render(args) -> int:
+    """Render the plan page beside the queue now (ADR-032 D11, increment 6)."""
+    domain = (_registered_queue(args.project) if args.project
+              else _queue_domain(Context()))
+    out = domain.render()
+    if out.path is None:
+        return emit(args, {"path": None, "reason": out.reason}, f"no plan page: {out.reason}")
+    document = {"path": out.relpath, "status": out.status, "written": out.written}
+    said = {"new": "new", "current": "current, not written", "stale": "stale, written",
+            "edited": "edited by hand, written over"}
+    return emit(args, document, f"{out.relpath}: {said.get(out.status, out.status)}")
+
+
+def _plan_page_lines(ctx) -> list[str]:
+    """The landing's last docs write: the plan page rendered again from the
+    main checkout's queue once the branch is merged (ADR-032 increment 6).
+    It never fails the landing; a project with no page home says nothing."""
+    try:
+        out = _queue_domain(ctx).render()
+    except (InvariantError, OSError) as exc:
+        return [f"plan page not rendered: {exc}"]
+    if out.path is None:
+        return []
+    return [f"plan page {out.relpath}: {out.status}"]
+
+
+def cmd_queue_add(args) -> int:
+    """Put work on the project's queue (ADR-027 D2): an item id or a label.
+
+    The adder is the session the call resolves (``--id``, the variable, or a
+    proven session), else ``user``. ``--project`` queues in another registered
+    project; ``--propose`` makes the entry one the oracle offers and never
+    starts on its own (ADR-027 ruling 9).
+    """
+    adder = _queue_adder(args)
+    domain = (_registered_queue(args.project) if args.project
+              else _queue_domain(Context(session_id=args.id)))
+    entry = domain.add(args.ref, brief=args.brief, added_by=adder, at=args.at,
+                       mode="propose" if args.propose else None, serves=args.serves)
+    _page_notes(domain)
+    queue = domain.list()
+    document = {"entry": entry.to_dict(), **_queue_document(domain, queue)}
+    return emit(args, document, "\n".join([f"queued {entry.id}: {entry.ref}", *_queue_lines(queue)]))
+
+
+def cmd_queue_link(args) -> int:
+    """Say which work item an entry serves (ADR-027 ruling 18), or ``--clear`` it.
+
+    The backlog mirror skips an item a queued or started entry serves, so a
+    label such as ``ADR-029 inc 1`` keeps ``IDEA_060`` from being queued twice.
+    """
+    if (args.item is None) == (not args.clear):
+        raise UsageError("name the work item the entry serves, or give --clear; not both")
+    domain = _queue_domain(Context())
+    entry = domain.link(args.entry, None if args.clear else args.item)
+    _page_notes(domain)
+    text = (f"{entry.id} serves {entry.serves}" if entry.serves
+            else f"{entry.id} no longer serves a work item")
+    return emit(args, {"entry": entry.to_dict()}, text)
+
+
+def cmd_queue_mirror(args) -> int:
+    """Mirror the backlog onto the queue now (ADR-027 ruling 18).
+
+    What the oracle's chain step does on its own once a minute while the
+    project is idle: every open item in a mirrored state goes on the queue
+    once, by backlog rank, and a queued mirrored entry leaves when its item
+    closes or another live entry serves it. Reads the main checkout's backlog.
+    """
+    domain = (_registered_queue(args.project) if args.project
+              else _queue_domain(Context()))
+    out = domain.mirror()
+    _page_notes(domain)
+    document = {
+        "off": bool(out.get("off")),
+        "added": [{"entry": e, "ref": r} for e, r in out["added"]],
+        "removed": [{"entry": e, "ref": r} for e, r in out["removed"]],
+    }
+    if out.get("off"):
+        return emit(args, document, "oracle.chain.mirror is off: nothing was mirrored")
+    lines = [f"added {e} {r}" for e, r in out["added"]]
+    lines += [f"removed {e} {r}" for e, r in out["removed"]]
+    return emit(args, document, "\n".join(lines) or "nothing to mirror: the queue already "
+                                                    "holds the backlog")
+
+
+def cmd_queue_list(args) -> int:
+    domain = _registered_queue(args.project) if args.project else _queue_domain(Context())
+    queue = domain.list()
+    return emit(args, _queue_document(domain, queue), "\n".join(_queue_lines(queue)))
+
+
+def cmd_queue_remove(args) -> int:
+    """Take an entry off the queue. ``--if-queued-at N`` refuses, writing nothing,
+    unless it is still queued at position N: the phone's confirmed remove
+    (ADR-027 increment 3)."""
+    ctx = Context()
+    domain = _queue_domain(ctx)
+    removed = domain.remove(args.entry, expect_at=args.if_queued_at)
+    _page_notes(domain)
+    queue = domain.list()
+    document = {"removed": removed.to_dict(), **_queue_document(domain, queue)}
+    return emit(
+        args, document, "\n".join([f"removed {removed.id}: {removed.ref}", *_queue_lines(queue)])
+    )
+
+
+def cmd_queue_move(args) -> int:
+    """Put an entry at another position. ``--if-queued-at N`` refuses, writing
+    nothing, unless it is still queued at position N (ADR-027 increment 3)."""
+    ctx = Context()
+    domain = _queue_domain(ctx)
+    queue = domain.move(args.entry, args.to, expect_at=args.if_queued_at)
+    _page_notes(domain)
+    return emit(
+        args, _queue_document(domain, queue),
+        "\n".join([f"moved {args.entry} to {args.to}", *_queue_lines(queue)]),
+    )
 
 
 def _item_fields(pairs: list[str]) -> dict[str, str]:
@@ -6732,11 +7127,61 @@ def host_attribution_trailers(manifest) -> tuple:
     the oracle's gate cache need none. A host kind with no adapter declares
     none, and then a message is read line by line alike.
     """
+    return _attribution_trailers_of(manifest.get("host.kind"))
+
+
+def _attribution_trailers_of(kind: Any) -> tuple:
+    """The attribution trailers the adapter for host kind ``kind`` declares."""
     from ..hosts.claude_code import ClaudeCodeHost
 
-    if manifest.get("host.kind") == "claude_code":
+    if kind == "claude_code":
         return ClaudeCodeHost.ATTRIBUTION_TRAILERS
     return ()
+
+
+def store_attribution_trailers(root: Path) -> tuple:
+    """The host's attribution trailers for the store at ``root``'s own screen:
+    its commit hooks, its ``pre-push`` hook and the push (ADR-024 D5).
+
+    A git hook runs with no project, so the host is the one the store's own
+    level names in ``host.kind``, over the user level and the defaults, as
+    ``store push`` run in the store reads ``sync``. A repository block in the
+    store, or a pointer, naming another host is not read: the store serves
+    every repository it registers, and the screen admits only what its own
+    level declares. A level that does not load declares none, and then every
+    line of a message is read alike: the noisy side.
+    """
+    from ..core.home import load_user_config
+    from ..core.stores import read_store_manifest
+
+    try:
+        top, _repos = read_store_manifest(root)
+        user = load_user_config().defaults
+    except ManifestError:
+        return ()
+    kind = DEFAULTS["host"]["kind"]
+    for level in (user, top):
+        host = level.get("host")
+        if isinstance(host, Mapping) and "kind" in host:
+            kind = host["kind"]
+    return _attribution_trailers_of(kind)
+
+
+def host_forbidden_models(manifest) -> tuple[str, ...]:
+    """The forbidden-model list in force for ``manifest`` (DEC_ADR_030_D2).
+
+    ``host.forbidden_models`` as configured, else the host adapter's default
+    for ``host.kind``. Nothing below the CLI may import a host, so the CLI
+    supplies it as it supplies ``host_instruction_files``: on every rule
+    context it builds, to the pipeline domain, and to the oracle's gate cache.
+    A host kind with no adapter has no default, and then only a configured
+    list forbids anything.
+    """
+    from ..hosts.claude_code import forbidden_models
+
+    if manifest.get("host.kind") == "claude_code":
+        return forbidden_models(manifest)
+    return tuple(str(entry) for entry in manifest.get("host.forbidden_models") or ())
 
 
 def host_agent_plan(manifest):
@@ -6824,6 +7269,13 @@ def cmd_guidelines_render(args) -> int:
             if result.rules_relpath is not None
             else []
         )
+        if result.patterns_relpath is not None:
+            rules.append(
+                _RENDER_STATUS[result.patterns_status].format(
+                    verb=verb, rel=result.patterns_relpath
+                )
+                + " (the pattern catalogue)"
+            )
         text = "\n".join(
             [text, *rules, *(_block_line(b, verb, args.overwrite_local) for b in result.blocks)]
         )
@@ -6836,6 +7288,11 @@ def cmd_guidelines_render(args) -> int:
         "rules": None if result.rules_relpath is None else {
             "path": result.rules_relpath,
             "status": result.rules_status,
+            "written": result.written,
+        },
+        "patterns": None if result.patterns_relpath is None else {
+            "path": result.patterns_relpath,
+            "status": result.patterns_status,
             "written": result.written,
         },
         "blocks": [
@@ -6984,6 +7441,224 @@ def _submit_verdicts(args, submission) -> int:
         "state": result.state,
         "token": result.token,
     }, "\n".join(lines))
+
+
+# -- the user's rulings on a guideline, and adopt (ADR-032 D7, D8) ------------------------
+
+
+#: What a ruling command says when it may not ask (ADR-021 ruling 3, ADR-032 D7).
+_NOT_AT_A_TERMINAL = (
+    "refused: a ruling on a guideline is the user's to record (ADR-032 D7), and "
+    "this command confirms it at a terminal. Nothing was written. Run it "
+    "yourself, in a terminal of your own."
+)
+
+
+def _confirmed(args, shown: list[str], payload: dict, question: str) -> bool:
+    """Print ``shown`` and ask ``question`` at a terminal; ``False`` (with the
+    refusal printed) with no terminal, under --json, or on anything but yes."""
+    if getattr(args, "json", False) or not _stdin_is_terminal():
+        emit(args, {**payload, "written": False, "refused": "no terminal"},
+             "\n".join([*shown, _NOT_AT_A_TERMINAL]))
+        return False
+    print("\n".join(shown))
+    try:
+        answer = input(f"{question} [y/N] ")
+    except EOFError:
+        answer = ""
+    if answer.strip().lower() not in ("y", "yes"):
+        print("declined: nothing was written")
+        return False
+    return True
+
+
+def _today():
+    import datetime
+
+    return datetime.datetime.now().astimezone().date()
+
+
+def _write_ruling_edit(args, ctx: Context, edit, question: str) -> int:
+    shown = [
+        f"guidelines {edit.what}: in {edit.relpath}",
+        "  the entry written:",
+        *(f"    {line}" for line in edit.entry.splitlines()),
+    ]
+    payload = {"file": edit.relpath, "entry": edit.entry}
+    if not _confirmed(args, shown, payload, question):
+        return 1
+    if edit.after is None:
+        print(f"not written: {edit.why}. Add the entry to {edit.relpath} by hand:\n{edit.entry}")
+        return 1
+    _guidelines_domain(ctx).write_edit(edit)
+    print(f"written: {edit.relpath}. Run 'invariant guidelines render', review and commit it.")
+    return EXIT_OK
+
+
+def cmd_guidelines_except(args) -> int:
+    """Record the user's exception to a guideline, confirmed at a terminal
+    (ADR-032 D7): an agent proposes this line, the user runs it."""
+    ctx = Context(session_id=args.id)
+    edit = _guidelines_domain(ctx).plan_except(
+        args.rule, args.path, fingerprint=args.fingerprint, by=args.by,
+        reason=args.reason, today=_today(),
+    )
+    return _write_ruling_edit(args, ctx, edit, "Record this exception?")
+
+
+def cmd_guidelines_loosen(args) -> int:
+    """Lower a guideline to warn and record the user's ruling, confirmed at a
+    terminal (ADR-032 D7)."""
+    ctx = Context(session_id=args.id)
+    edit = _guidelines_domain(ctx).plan_loosen(
+        args.target, to=args.to, by=args.by, reason=args.reason, today=_today()
+    )
+    return _write_ruling_edit(args, ctx, edit, "Record this ruling?")
+
+
+def cmd_guidelines_retire(args) -> int:
+    """Retire a guideline into the ruleset's ``retired`` list with the user's
+    ruling, confirmed at a terminal (ADR-032 ruling 13)."""
+    ctx = Context(session_id=args.id)
+    edit = _guidelines_domain(ctx).plan_retire(
+        args.rule, by=args.by, reason=args.reason, today=_today()
+    )
+    return _write_ruling_edit(args, ctx, edit, "Retire this rule?")
+
+
+def _layer_map_arg(values) -> dict[str, list[str]]:
+    """``--layer <id>=<glob>``, repeatable, as the map's paths by layer id."""
+    layers: dict[str, list[str]] = {}
+    for value in values or ():
+        layer, sep, glob = value.partition("=")
+        if not sep or not layer.strip() or not glob.strip():
+            raise UsageError(f"--layer {value!r}: write it as <layer id>=<glob>")
+        layers.setdefault(layer.strip(), []).append(glob.strip())
+    return layers
+
+
+def _adopt_defaults(manifest) -> tuple[str, str]:
+    """The default set filled for this project, and the shipped catalogue."""
+    from ..core import needs as needs_reader
+    from ..domains import docs as docs_domain
+
+    backlog = manifest.get("items.path") or (
+        f"{needs_reader.docs_folder(manifest)}/{needs_reader.ITEMS_PAGE}"
+    )
+    return docs_domain.default_ruleset(manifest, str(backlog)), docs_domain.default_catalogue()
+
+
+def _adoption_lines(plan) -> list[str]:
+    head = {
+        "new": f"guidelines adopt: write the default set at {plan.relpath}",
+        "merge": f"guidelines adopt: add the defaults {plan.relpath} lacks",
+        "nothing": f"guidelines adopt: {plan.relpath}",
+    }[plan.status]
+    lines = [head]
+    if plan.rules:
+        lines.append(f"  rules added: {', '.join(plan.rules)}")
+    if plan.sections:
+        lines.append(f"  sections added: {', '.join(plan.sections)}")
+    if plan.layers:
+        lines.append("  the layer map added")
+    if plan.unmapped:
+        lines.append(
+            "  the layer map maps no files yet: --layer <id>=<glob> fills it, or map "
+            "the folders in the ruleset"
+        )
+    if plan.catalogue_rel:
+        lines.append(f"  the catalogue copied to {plan.catalogue_rel}")
+    for standing in plan.standings:
+        fix = (
+            f" (invariant guidelines adopt --update {standing.id})"
+            if standing.standing == "updatable" and standing.id != "layers" else ""
+        )
+        lines.append(f"  {standing.id}: {standing.standing}{fix}")
+    if plan.updated:
+        lines.append(f"  updated: {', '.join(plan.updated)}")
+    for key, value in (plan.settings.get("guidelines") or {}).items():
+        lines.append(f"  sets guidelines.{key}: {value}")
+    if plan.status == "nothing":
+        lines.append("  nothing to adopt: every default is here")
+    return lines
+
+
+def cmd_guidelines_adopt(args) -> int:
+    """Copy the default guidelines into this project (ADR-032 D8), confirmed at
+    a terminal; ``--dry-run`` prints the plan anywhere."""
+    ctx = Context(session_id=args.id)
+    defaults, catalogue = _adopt_defaults(ctx.manifest)
+    plan = _guidelines_domain(ctx).plan_adopt(
+        defaults, catalogue, layers=_layer_map_arg(args.layer), update=tuple(args.update or ())
+    )
+    lines = _adoption_lines(plan)
+    payload = {
+        "status": plan.status, "ruleset": plan.relpath,
+        "added": {"sections": list(plan.sections), "rules": list(plan.rules),
+                  "layers": plan.layers, "catalogue": plan.catalogue_rel},
+        "standings": [{"rule": s.id, "standing": s.standing} for s in plan.standings],
+        "updated": list(plan.updated), "settings": dict(plan.settings),
+    }
+    if plan.status == "nothing" or args.dry_run:
+        return emit(args, {**payload, "written": False}, "\n".join(lines))
+    if not _confirmed(args, lines, payload, "Adopt the defaults?"):
+        return 1
+    written = _guidelines_domain(ctx).write_adoption(plan)
+    if plan.settings:
+        _write_adoption_settings(ctx.manifest, dict(plan.settings))
+    after = Context(session_id=args.id)
+    domain = _guidelines_domain(after)
+    if plan.baseline_rules is None or plan.baseline_rules:
+        domain.baseline(mode="record", rules=plan.baseline_rules or ())
+    domain.render()
+    print("\n".join(
+        [f"written: {path}" for path in written]
+        + ["  baseline recorded and rendered. Review and commit it."]
+    ))
+    return EXIT_OK
+
+
+def _guidelines_defaults_row(ctx: Context) -> tuple[str, bool] | None:
+    """``doctor``'s ``guidelines defaults`` row (ADR-032 D8): ``None`` unless
+    the configured ruleset holds a copied default and the shipped default
+    set's origin version is newer than the newest there; then the updatable
+    defaults, warning."""
+    import yaml as _yaml
+
+    from ..core.rules import guidelines_tree, policy_relpath
+
+    manifest = ctx.manifest
+    if not manifest.get("guidelines.ruleset"):
+        return None
+    try:
+        defaults, _catalogue = _adopt_defaults(manifest)
+        standings = _guidelines_domain(ctx).default_standings(defaults)
+        rc = ctx.rule_context()
+        path = guidelines_tree(rc) / str(policy_relpath(rc, manifest.get("guidelines.ruleset")))
+        ours = _yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        theirs = _yaml.safe_load(defaults) or {}
+    except (InvariantError, OSError, UnicodeDecodeError, _yaml.YAMLError):
+        return None
+    held = _newest_origin(ours)
+    if held == 0 or _newest_origin(theirs) <= held:
+        # A ruleset holding no copied default has adopted nothing to update.
+        return None
+    updatable = [s.id for s in standings if s.standing == "updatable"]
+    return (
+        f"{len(updatable)} default rule(s) updatable"
+        + (f": {', '.join(updatable)}; invariant guidelines adopt --update <id>" if updatable
+           else "; invariant guidelines adopt adds what is new"),
+        True,
+    )
+
+
+def _newest_origin(data) -> int:
+    entries = [*(data.get("rules") or []), data.get("layers")] if isinstance(data, dict) else []
+    versions = [
+        entry["origin"].get("version") for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("origin"), dict)
+    ]
+    return max((v for v in versions if isinstance(v, int)), default=0)
 
 
 def cmd_guidelines_verdict(args) -> int:
@@ -7465,6 +8140,7 @@ def _oracle_gates():
             evaluate_row,
             instruction_files_for=host_instruction_files,
             agent_plan_for=host_agent_plan,
+            forbidden_for=host_forbidden_models,
         )
     )
 
@@ -7591,7 +8267,9 @@ def _oracle_launch_plan(step, stage: bool):
 
     name, note = terminal_request(step)
     claude = launch.resolve_claude() or launch.CLAUDE_BINARY
-    return launch.plan_launch(claude, name, note, step.cwd, stage=stage)
+    model, forbidden = _window_model(step.cwd)
+    return launch.plan_launch(claude, name, note, step.cwd, stage=stage, model=model,
+                              forbidden=forbidden)
 
 
 def _oracle_terminal(step) -> str:
@@ -7704,7 +8382,7 @@ def _oracle_names_in_use() -> set[str]:
 
 
 def _start_prepare(index, selector: str, label: str | None, prompt: str | None, now: float,
-                   project: dict | None = None):
+                   project: dict | None = None, model: str | None = None):
     """What ``oracle start-session`` would start: ``(entry, result)``, nothing launched.
 
     The one place a start is decided, for the command and the page alike
@@ -7714,6 +8392,9 @@ def _start_prepare(index, selector: str, label: str | None, prompt: str | None, 
     takes the time; a blank ``prompt`` is none, and one that reads as a flag
     is refused when the plan is built. The facts come from ``project``, one
     project of the ``assess`` document, else from a scan of this project now.
+    ``model`` is the person's choice of window model; blank takes the
+    project's configured one, and one the forbidden list holds is refused
+    (DEC_ADR_030_D6).
     """
     from ..hosts import claude_code_launch as launch
     from ..oracle import startsession
@@ -7741,13 +8422,16 @@ def _start_prepare(index, selector: str, label: str | None, prompt: str | None, 
         projects = assess(snapshots, now)["projects"]
         project = projects[0] if projects else {}
     facts = startsession.start_facts(project, startsession.checkout_changes(entry.root))
+    model, forbidden = _window_model(entry.root, model)
     preview = launch.plan_launch(
-        launch.resolve_claude() or launch.CLAUDE_BINARY, name, prompt, entry.root, stage=False
+        launch.resolve_claude() or launch.CLAUDE_BINARY, name, prompt, entry.root, stage=False,
+        model=model, forbidden=forbidden,
     )
     return entry, {
         "project": entry.to_dict(),
         "name": name,
         "label": label,
+        "model": model,
         "cwd": preview.cwd,
         "argv": list(preview.argv),
         "prompt": prompt,
@@ -7765,7 +8449,8 @@ def _start_launch(result: dict) -> tuple[dict, list[str]]:
     root. Raises when the window did not open, with the line to run by hand.
     """
     name = result["name"]
-    plan, pid = _open_claude_window(name, result["prompt"], result["project"]["root"])
+    plan, pid = _open_claude_window(name, result["prompt"], result["project"]["root"],
+                                    model=result.get("model"))
     lines = [
         f"  opened a new Terminal window in {plan.cwd}:",
         f"    {shlex.join(plan.argv)}",
@@ -7784,8 +8469,9 @@ def _oracle_starter(index):
     """
     from ..oracle.startsession import Starter
 
-    def prepare(selector: str, label: str | None, prompt: str | None, project: dict) -> dict:
-        return _start_prepare(index, selector, label, prompt, time.time(), project)[1]
+    def prepare(selector: str, label: str | None, prompt: str | None, project: dict,
+                model: str | None = None) -> dict:
+        return _start_prepare(index, selector, label, prompt, time.time(), project, model)[1]
 
     def launch(prepared: dict) -> str:
         return "\n".join(_start_launch(prepared)[1])
@@ -7810,10 +8496,10 @@ def cmd_oracle_start_session(args) -> int:
     from ..oracle import startsession
 
     entry, result = _start_prepare(_project_index(), args.project, args.name, args.prompt,
-                                   time.time())
+                                   time.time(), model=args.model)
     result["dry_run"] = bool(args.dry_run)
     head = [
-        f"start {result['name']} in {entry.name}"
+        f"start {result['name']} in {entry.name} on {result['model']}"
         + (" — dry run, nothing launched" if args.dry_run else ""),
         *(f"  {line}" for line in startsession.fact_lines(result["facts"])),
     ]
@@ -7827,6 +8513,539 @@ def cmd_oracle_start_session(args) -> int:
 
     result, opened = _start_launch(result)
     return emit(args, result, "\n".join([*head, *opened]))
+
+
+def _chain_entry(index, selector: str):
+    """The registered project ``selector`` names, refused when its manifest is gone."""
+    entry = index.match(selector)
+    if not entry.has_manifest:
+        raise UsageError(
+            f"{entry.name} is registered, but {entry.root or 'its root'} no longer "
+            f"carries a manifest. `invariant oracle projects prune` drops it"
+        )
+    return entry
+
+
+def cmd_oracle_next(args) -> int:
+    """What the oracle would start next in one project, and why (ADR-027 D3).
+
+    Reads the project's queue, its backlog and its chain settings
+    (``chain.read_inputs``), the chain ledger's pause and counts, and one scan
+    of its sessions and windows, then asks ``oracle/chain.decide``. Starts
+    nothing: the watcher's chain step acts on the same verdict. Exit 0
+    whatever it decides; an unknown project or a lost manifest exits 2.
+    """
+    from datetime import datetime, timezone
+
+    from ..core.home import load_user_config
+    from ..core.queue import QUEUED
+    from ..oracle import chain, chainstep, startsession, usage
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    index = _project_index()
+    entry = _chain_entry(index, args.project)
+    inputs = chain.read_inputs(entry.root)
+    queue, ready = inputs.queue, inputs.ready
+    now = time.time()
+    snapshots = scan_all(index, cache=_oracle_cache(), select=entry.key)
+    projects = assess(snapshots, now)["projects"]
+    project = projects[0] if projects else {}
+    live = chain.live_sessions(project)
+    windows = startsession.open_windows(project)
+    config = load_user_config()
+    reading = _oracle_plan_usage(index)()
+    ledger = chainstep.limits(index.home, entry.key, now, reading, usage.weekly_max(config))
+    live = [s for s in live if s.session_id not in ledger["released"]]
+    cap = chainstep.machine_cap(config)
+    verdict = chain.decide(
+        queue=queue,
+        ready=ready,
+        settings=inputs.settings,
+        live=live,
+        windows=windows,
+        now=datetime.fromtimestamp(now, timezone.utc).astimezone(),
+        paused=ledger["paused"],
+        resumed=ledger["resumed"],
+        started_today=ledger["started_today"],
+        machine_live=ledger["machine_live"],
+        machine_cap=cap,
+        usage_hold=ledger["usage"],
+        unreproduced=inputs.unreproduced,
+    )
+    held = {e.ref for e in queue.entries}
+    document = {
+        "project": entry.to_dict(),
+        **verdict.to_dict(),
+        "facts": {
+            "live_sessions": [
+                {"session_id": s.session_id, "name": s.name, "state": s.state,
+                 "report": s.report}
+                for s in live
+            ],
+            "open_windows": windows,
+            "queued": sum(1 for e in queue.entries if e.state == QUEUED),
+            "ready": sum(1 for item in ready if item.id not in held),
+            "paused": ledger["paused"],
+            "started_today": ledger["started_today"],
+            "daily_cap": inputs.settings.daily_cap,
+            "machine_live": ledger["machine_live"],
+            "machine_cap": cap,
+            "usage": _usage_facts(reading, usage.weekly_max(config), ledger["usage"]),
+            "released": ledger["released"],
+        },
+    }
+    head = verdict.verdict + (f" ({verdict.mode})" if verdict.mode else "")
+    candidate = verdict.candidate
+    if candidate is not None:
+        named = f"{candidate.entry} {candidate.ref}" if candidate.entry else candidate.ref
+        head += f": {named}"
+        if candidate.title:
+            head += f" — {candidate.title}"
+        if candidate.reproduce:
+            head += " (reproduce first)"
+    lines = [f"{entry.name}: {head}"]
+    if candidate is not None and candidate.brief:
+        lines.append(f"  brief: {candidate.brief}")
+    lines.append("  why:")
+    lines += [f"    - {reason}" for reason in verdict.reasons]
+    lines.append("  nothing was started: oracle next only decides; the watcher's chain step "
+                 "acts on it, and `invariant oracle chain start` starts it by hand")
+    return emit(args, document, "\n".join(lines))
+
+
+def _real_chain_hands(index):
+    """The launch and the queue's writes, for the chain step (ADR-027 D9).
+
+    The launch is ``oracle start-session``'s own two steps, so a chained
+    window is named, placed and refused exactly as one the user starts; the
+    queue's writes go through ``domains/queue`` in the project the index
+    names. The oracle imports neither.
+    """
+    from ..domains.queue import QueueDomain
+    from ..oracle.chainstep import ChainHands
+
+    def queue_of(key: str) -> QueueDomain:
+        entry = index.match(key)
+        manifest = Manifest.locate(Path(entry.root))
+        return QueueDomain(manifest, JsonStore(manifest.state_root))
+
+    def start(key: str, label: str, prompt: str) -> dict:
+        _, prepared = _start_prepare(index, key, label, prompt, time.time())
+        result, _lines = _start_launch(prepared)
+        return {"name": result["name"], "pid": (result.get("successor") or {}).get("pid")}
+
+    def begin(key: str, entry: str | None, ref: str) -> str:
+        return queue_of(key).begin(entry, ref)
+
+    def mark(key: str, entry: str, state: str, session=None, reason=None):
+        return queue_of(key).mark(entry, state, session, reason)
+
+    def fail(key: str, entry: str, reason: str, template, retry: bool) -> dict:
+        return queue_of(key).fail(entry, reason, template, retry)
+
+    def requeue(key: str, entry: str):
+        return queue_of(key).requeue(entry)
+
+    def mirror(key: str) -> dict:
+        return queue_of(key).mirror()
+
+    def reproduced(key: str, entry: str, outcome: str):
+        return queue_of(key).after_reproduce(entry, outcome)
+
+    return ChainHands(start=start, begin=begin, mark=mark, fail=fail, nudge=_chain_typer(),
+                      close=_chain_closer(index), requeue=requeue, mirror=mirror,
+                      reproduced=reproduced)
+
+
+def _real_chain_typer():
+    from ..hosts.claude_code_launch import TerminalTyper
+
+    return TerminalTyper().type
+
+
+def _chain_typer():
+    """What types the stall's "continue" into a Terminal tab (ADR-027 D7).
+
+    A seam, like ``_oracle_host_seams``: the suite replaces it where a test
+    nudges, so no test types into a terminal.
+    """
+    return _real_chain_typer()
+
+
+def _chain_closer(index):
+    """What ends a stalled chained window and its tab: close-host's own path.
+
+    The window's facts are checked again at the moment of the close
+    (``closehost.close_host``); the session it serves is the one being given
+    up, so its binding does not refuse it. A window already gone is said, not
+    refused. A seam: the close goes through ``_oracle_host_seams``.
+    """
+    from ..oracle.closehost import CloseRequest, close_host
+
+    def close(host: dict) -> list[str]:
+        pid = host.get("pid")
+        seams = _oracle_host_seams()
+        if not isinstance(pid, int) or not seams.alive(pid):
+            return ["its window had already closed"]
+        request = CloseRequest(str(host.get("host_session_id") or ""), pid,
+                               str(host.get("process_start") or ""), host.get("tty"))
+        return close_host(request, seams, lambda: None)
+
+    return close
+
+
+def _chain_hands(index):
+    """What the chain step launches and writes through. A seam, like
+    ``_handoff_launcher``: the start below it reaches the suite's inert
+    launcher and successor watch, so no test opens a window."""
+    return _real_chain_hands(index)
+
+
+def _oracle_chain_step(index, notifier):
+    """The watcher's chain step, with the machine cap from the user config."""
+    from ..core.home import load_user_config
+    from ..oracle.chainstep import ChainStep, machine_cap
+    from ..oracle.usage import weekly_max
+
+    config = load_user_config()
+    return ChainStep(index.home, _chain_hands(index), notifier,
+                     machine_cap=machine_cap(config), usage=_oracle_plan_usage(index),
+                     weekly_max=weekly_max(config))
+
+
+def _oracle_plan_usage(index):
+    """The plan's last usage reading, as the status line recorded it (ADR-027 ruling 10).
+
+    The host-neutral ``plan_usage`` fact in the oracle home, read afresh on
+    every call; the oracle reads it through this seam and nothing else.
+    """
+    from ..oracle.usage import read_usage
+
+    return lambda: read_usage(index.home)
+
+
+def _oracle_chain_reader(index):
+    """The chain as the phone reads it (ADR-027 increment 3): the ledger, each
+    project's queue and the weekly-usage hold, through the same usage seam and
+    cap the chain step is given."""
+    from ..core.home import load_user_config
+    from ..oracle.chainview import ChainReader
+    from ..oracle.usage import weekly_max
+
+    return ChainReader(index.home, usage=_oracle_plan_usage(index),
+                       cap=weekly_max(load_user_config()))
+
+
+def _chain_line(action: dict) -> str:
+    return f"  CHAIN  {action['project']}  {action['action']}: {action['detail']}"
+
+
+def cmd_oracle_chain_pause(args) -> int:
+    """Pause a project's chain by hand (ADR-027 D6): nothing starts until resume."""
+    from ..oracle import chainstep
+
+    index = _project_index()
+    entry = _chain_entry(index, args.project)
+    reason = (args.reason or "").strip() or "paused by hand"
+    if "\n" in reason or "\r" in reason:
+        raise UsageError("a pause reason is one line")
+    out = chainstep.pause(index.home, entry.key, reason, time.time())
+    return emit(args, {"project": entry.to_dict(), **out},
+                f"{entry.name}: the chain is paused: {out['paused']['reason']}")
+
+
+def cmd_oracle_chain_resume(args) -> int:
+    """Lift a project's pause. Nothing is retried: ruling 9's triage owns retries."""
+    from ..oracle import chainstep
+
+    index = _project_index()
+    entry = _chain_entry(index, args.project)
+    out = chainstep.resume(index.home, entry.key, time.time())
+    was = out["was"]
+    text = (f"{entry.name}: resumed; it was paused: {was.get('reason')}" if was
+            else f"{entry.name}: not paused; nothing to resume")
+    return emit(args, {"project": entry.to_dict(), **out}, text)
+
+
+def cmd_oracle_chain_status(args) -> int:
+    """Each project's chain: paused, the start it follows, today's starts, the caps,
+    and the plan's weekly usage with its hold (ADR-027 ruling 10)."""
+    from ..core.home import load_user_config
+    from ..oracle import chain, chainstep, usage
+
+    index = _project_index()
+    entries = [_chain_entry(index, args.project)] if args.project else index.list()
+    now = time.time()
+    ledger = chainstep.status(index.home, now)
+    rows, lines = [], []
+    for entry in entries:
+        state = ledger["projects"].get(entry.key) or {}
+        try:
+            cap = chain.ChainSettings.from_manifest(Manifest.locate(Path(entry.root))).daily_cap
+        except InvariantError:
+            cap = None
+        current = state.get("current")
+        row = {"key": entry.key, "name": entry.name, "paused": state.get("paused"),
+               "resumed": state.get("resumed"), "current": current,
+               "proposed": state.get("proposed") or [],
+               "started_today": state.get("started_today", 0), "daily_cap": cap,
+               "starts": state.get("starts") or []}
+        rows.append(row)
+        paused = (state.get("paused") or {}).get("reason")
+        following = (f"following {current.get('entry')} {current.get('ref')} as "
+                     f"{current.get('name') or 'a window not yet open'} ({current.get('state')})"
+                     if current else "following nothing")
+        lines.append(f"{entry.name}: " + (f"PAUSED: {paused}" if paused else "running")
+                     + f"; {following}; {row['started_today']} of {cap} starts today")
+        landed = state.get("landed")
+        row["landed"] = landed
+        if landed:
+            lines.append(f"  window of {landed.get('entry')} {landed.get('ref')} landed: "
+                         f"{landed.get('state')}"
+                         + (f" ({(landed.get('notice') or {}).get('why')})"
+                            if landed.get("notice") else ""))
+    config = load_user_config()
+    cap = chainstep.machine_cap(config)
+    lines.append(f"machine: {ledger['machine_live']} of {cap} chained sessions live"
+                 + (f"; {ledger['notices_owed']} notices owed" if ledger["notices_owed"] else ""))
+    most = usage.weekly_max(config)
+    reading = _oracle_plan_usage(index)()
+    held = usage.hold(reading, now, most, chainstep.greenlit(ledger))
+    facts = _usage_facts(reading, most, held.reason if held else None)
+    facts["greenlight"] = (ledger["usage"].get("greenlight") or {}).get("at")
+    shown = "?" if facts["weekly"] is None else f"{facts['weekly']:g}%"
+    lines.append(f"weekly usage: {shown} of {most:g}%"
+                 + (f"; HELD: {held.reason}" if held else "; not held")
+                 + (f"; greenlight given {facts['greenlight']}" if facts["greenlight"] else ""))
+    return emit(args, {"projects": rows, "machine_live": ledger["machine_live"],
+                       "machine_cap": cap, "notices_owed": ledger["notices_owed"],
+                       "usage": facts, "weekly_usage_max": most},
+                "\n".join(lines))
+
+
+def _usage_facts(reading, most, held: str | None) -> dict:
+    """The plan's usage as ``oracle next`` and ``chain status`` show it."""
+    return {
+        "weekly": reading.weekly if reading else None,
+        "five_hour": reading.five_hour if reading else None,
+        "read_at": reading.read_at if reading else None,
+        "weekly_usage_max": most,
+        "hold": held,
+    }
+
+
+def cmd_oracle_chain_greenlight(args) -> int:
+    """Let the chain go ahead while the plan's weekly usage cannot be read (ruling 10).
+
+    Machine-wide, as the usage is the plan's. It lasts until a fresh reading
+    arrives, which judges again. Refused (exit 2) while a fresh reading is at
+    or over ``chain.weekly_usage_max``; with nothing held, nothing is recorded.
+    """
+    from ..core.home import load_user_config
+    from ..oracle import chainstep, usage
+
+    index = _project_index()
+    out = chainstep.greenlight(index.home, time.time(), _oracle_plan_usage(index)(),
+                               usage.weekly_max(load_user_config()))
+    text = ("greenlight given: the chain goes ahead until a fresh usage reading arrives"
+            if out["greenlit"] else f"no greenlight recorded: {out['why']}")
+    return emit(args, out, text)
+
+
+def _real_chain_stalled_host(index, entry, current: dict) -> dict | None:
+    from ..oracle.recommend import assess
+    from ..oracle.scan import ROW_SESSION, scan_all
+
+    snapshots = scan_all(index, cache=_oracle_cache(), select=entry.key)
+    for project in assess(snapshots, time.time())["projects"]:
+        for row in project.get("rows") or []:
+            if row.get("kind") == ROW_SESSION and row.get("session_id") == current.get("session"):
+                hosts = [h for h in row.get("hosts") or [] if h.get("current")]
+                if hosts and hosts[0].get("alive") is True:
+                    return hosts[0]
+    return None
+
+
+def _chain_stalled_host(index, entry, current: dict) -> dict | None:
+    """The live window of a chained start's session, from a fresh scan; ``None`` when gone."""
+    return _real_chain_stalled_host(index, entry, current)
+
+
+def cmd_oracle_chain_stall(args) -> int:
+    """Continue, Retry or Close a stalled chained session (ADR-027 ruling 12).
+
+    ``continue`` types one more "continue" and re-arms the fuse; ``retry``
+    closes the window and puts the same work back at the head of the queue;
+    ``close`` closes the window and marks the work failed, with no triage.
+    Refused (exit 2) without a chained start whose stall the watcher recorded.
+    """
+    index = _project_index()
+    entry = _chain_entry(index, args.project)
+    step = _oracle_chain_step(index, _oracle_notifier())
+    current = step.current(entry.key)
+    if not current:
+        raise UsageError(f"{entry.name} has no chained start to act on")
+    host = _chain_stalled_host(index, entry, current) if current.get("session") else None
+    actions = step.stall_action(entry.key, entry.name, args.stall, host, time.time())
+    return emit(args, {"project": entry.to_dict(), "actions": actions},
+                "\n".join(_chain_line(a) for a in actions))
+
+
+def cmd_oracle_chain_consent(args) -> int:
+    """A landed session's answer to the oracle's ask (ADR-027 ruling 21).
+
+    Run by the session in the window the oracle asked: ``--close`` consents
+    to its window being closed, which the watcher's next tick does through
+    close-host's path; ``--not-yet --note TEXT`` keeps it, and the oracle asks
+    again later. The note is one line and privacy-scanned, as a handoff note
+    is. An engine record in the chain ledger: consent is never read from the
+    transcript. Refused (exit 2) when the oracle has not asked this project's
+    landed window, when the window is the user's, or when ``CLAUDE_PID``
+    names another Claude than the one asked.
+    """
+    from ..domains.session import vet_line
+    from ..hosts import claude_code_launch as launch
+    from ..oracle import chainstep
+
+    index = _project_index()
+    entry = _chain_entry(index, args.project)
+    if args.close and args.note is not None:
+        raise UsageError("--note goes with --not-yet: a consent to close needs no reason")
+    note = None
+    if args.not_yet:
+        if args.note is None:
+            raise UsageError("--not-yet needs --note \"<why, one line>\"")
+        note = vet_line(Manifest.locate(Path(entry.root)), args.note, noun="consent note",
+                        one_line="a consent note is one line, saying why the window is still "
+                                 "needed",
+                        refused="nothing was recorded", again="answer again")
+    raw = (os.environ.get(launch.HOST_PID_ENV) or "").strip()
+    pid = int(raw) if raw.isdigit() else None
+    answer = chainstep.ANSWER_CLOSE if args.close else chainstep.ANSWER_NOT_YET
+    out = chainstep.consent(index.home, entry.key, entry.name, answer, note, pid, time.time())
+    if answer == chainstep.ANSWER_CLOSE:
+        text = ("recorded: this window may close; the oracle closes it within a minute. "
+                "Nothing more to do here" if not out["already"]
+                else "already recorded: this window may close")
+    elif out["state"] == chainstep.NOTIFIED:
+        text = ("recorded: not yet. The oracle asks no more; the user decides whether this "
+                "window closes")
+    else:
+        text = "recorded: not yet. The oracle asks again later, once this window is quiet"
+    return emit(args, {"project": entry.to_dict(), **out}, text)
+
+
+def _real_oracle_landed_rows(index, entry) -> list[dict]:
+    from ..oracle.recommend import assess
+    from ..oracle.scan import scan_all
+
+    snapshots = scan_all(index, cache=_oracle_cache(), select=entry.key)
+    rows: list[dict] = []
+    for project in assess(snapshots, time.time())["projects"]:
+        rows.extend(project.get("rows") or [])
+    return rows
+
+
+def _oracle_landed_rows(index, entry) -> list[dict]:
+    """One fresh scan's rows of a project, where a landed window is looked for."""
+    return _real_oracle_landed_rows(index, entry)
+
+
+def _chain_landed_host(index, entry, landed: dict) -> dict | None:
+    """A landed window's live host, by its launched name or pid; ``None`` when gone."""
+    from ..oracle.scan import ROW_HOST, ROW_SESSION
+
+    name, pid = landed.get("name"), landed.get("pid")
+    for row in _oracle_landed_rows(index, entry):
+        if row.get("kind") not in (ROW_SESSION, ROW_HOST):
+            continue
+        for host in row.get("hosts") or []:
+            ours = (name and host.get("launched_name") == name) or (
+                pid is not None and host.get("pid") == pid)
+            if ours and host.get("alive") is True:
+                return host
+    return None
+
+
+def cmd_oracle_chain_landed(args) -> int:
+    """Close or Leave open a landed window the oracle could not settle (ADR-027 ruling 21).
+
+    ``close-window`` ends the window through close-host's path, every fact
+    checked again, and the chain goes on; ``leave-open`` keeps it: it holds
+    the project and is never asked again. Refused (exit 2) unless the
+    project's landed window waits for the user, after its notice.
+    """
+    index = _project_index()
+    entry = _chain_entry(index, args.project)
+    step = _oracle_chain_step(index, _oracle_notifier())
+    landed = step.landed(entry.key)
+    if not landed:
+        raise UsageError(f"{entry.name} has no landed window open; nothing was done")
+    host = (_chain_landed_host(index, entry, landed)
+            if args.landed == "close-window" else None)
+    actions = step.landed_action(entry.key, entry.name, args.landed, host, time.time())
+    return emit(args, {"project": entry.to_dict(), "actions": actions},
+                "\n".join(_chain_line(a) for a in actions))
+
+
+def cmd_oracle_chain_start(args) -> int:
+    """Start a project's next work now, as the user (ADR-027 ruling 4, ruling 9).
+
+    Accepts a proposal: the named ``--entry``, or the named ready backlog
+    ``--item`` no entry names (a backlog proposal, ADR-027 increment 3), else
+    the queue's first queued entry whatever its mode, else the backlog's first
+    ready item. No limit
+    holds it (D5); it is recorded as a chained start, so the chain follows
+    it. Refused (exit 2) with nothing to start, or while the project already
+    has a chained start. A launch that fails exits 1 and is triaged.
+    """
+    from ..oracle import chain
+
+    index = _project_index()
+    entry = _chain_entry(index, args.project)
+    step = _oracle_chain_step(index, _oracle_notifier())
+    following = step.current(entry.key)
+    if following:
+        raise UsageError(
+            f"{entry.name} already has a chained start, "
+            f"{following.get('name') or following.get('ref')} ({following.get('state')}); "
+            f"the chain follows one at a time. `invariant oracle start-session "
+            f"{entry.name}` opens another window by hand"
+        )
+    inputs = chain.read_inputs(entry.root)
+    if args.entry:
+        found = inputs.queue.find(args.entry)
+        if found.state != "queued":
+            raise UsageError(f"{found.id} is {found.state}; only a queued entry starts")
+        candidate = chain.entry_candidate(found)
+    elif args.item:
+        candidate = chain.backlog_candidate(inputs.queue, inputs.ready, args.item)
+        if candidate is None:
+            raise UsageError(
+                f"{args.item} is not a ready backlog item that no queue entry names in "
+                f"{entry.name}; nothing was started"
+            )
+    else:
+        candidate = chain.by_hand(inputs.queue, inputs.ready)
+    if candidate is None:
+        raise UsageError(
+            f"nothing to start in {entry.name}: no entry is queued and no backlog item is "
+            f"ready"
+        )
+    candidate = chain.reproducing(candidate, inputs.unreproduced, inputs.settings)
+    actions, opened = step.start_now(entry.key, entry.name, entry.root, candidate,
+                                     inputs.settings, time.time())
+    lines = [_chain_line(a) for a in actions]
+    if opened is None:
+        raise InvariantError("\n".join(["the start failed:", *lines]))
+    started = {"entry": candidate.entry if candidate.entry else None, "ref": candidate.ref,
+               "name": opened.get("name"), "pid": opened.get("pid")}
+    current = step.current(entry.key)
+    if current:
+        started["entry"] = current.get("entry")
+    return emit(args, {"project": entry.to_dict(), "started": started, "actions": actions},
+                "\n".join(lines))
 
 
 def cmd_oracle_tui(args) -> int:
@@ -7866,9 +9085,17 @@ def cmd_oracle_tui(args) -> int:
 
 def _real_oracle_notifier():
     from ..hosts.claude_code_launch import applescript_string
-    from ..oracle.notify import OsascriptNotifier
+    from ..oracle import push
+    from ..oracle.devices import DeviceStore
+    from ..oracle.home import oracle_home
+    from ..oracle.notify import FanOutNotifier, OsascriptNotifier
 
-    return OsascriptNotifier(quote=applescript_string)
+    channels = [("mac", OsascriptNotifier(quote=applescript_string))]
+    if push.unavailable() is None:
+        home = oracle_home()
+        channels.append(("push", push.PushNotifier(push.PushBook(home), DeviceStore(home),
+                                                   _oracle_push_post())))
+    return FanOutNotifier(channels)
 
 
 def _oracle_notifier():
@@ -7877,9 +9104,26 @@ def _oracle_notifier():
     A seam, like ``_oracle_cache``: the suite replaces it with a recorder, so
     no test posts a real notification. The oracle defines the notifier and
     imports nothing from ``hosts/``; the AppleScript quoting it needs is the
-    host launcher's, handed in here (ADR-007 D13).
+    host launcher's, handed in here (ADR-007 D13). It fans out to the Mac
+    banner and, where ``cryptography`` is installed, web push to every device
+    that turned it on (ADR-027 increment 4, ruling 17).
     """
     return _real_oracle_notifier()
+
+
+def _real_oracle_push_post():
+    from ..oracle.push import urllib_post
+
+    return urllib_post
+
+
+def _oracle_push_post():
+    """How web push reaches a push service: ``(url, body, headers, timeout) -> status``.
+
+    A seam: the suite replaces it with one that refuses, so no test reaches
+    the network; a test of the channel hands ``PushNotifier`` a recorder.
+    """
+    return _real_oracle_push_post()
 
 
 def _plural(count: int, noun: str) -> str:
@@ -7892,6 +9136,7 @@ def _oracle_tick_lines(result) -> list[str]:
         + ("" if a["notified"] else "  (not notified)")
         for a in result.alerts
     ]
+    lines += [_chain_line(a) for a in result.chain]
     lines.append(
         f"tick: {_plural(result.rows, 'row')}, {_plural(len(result.alerts), 'new alert')}, "
         f"{result.elapsed:.2f}s; snapshot {result.snapshot_path}"
@@ -7914,10 +9159,19 @@ def cmd_oracle_watch(args) -> int:
         raise UsageError(f"--interval must be positive, not {args.interval:g}")
     if not args.stuck_minutes > 0:
         raise UsageError(f"--stuck-minutes must be positive, not {args.stuck_minutes:g}")
+    from ..oracle.notify import FanOutNotifier
+
     gates = _oracle_gates()
+    index = _project_index()
+    notifier = None if args.no_notify else _oracle_notifier()
+    if isinstance(notifier, FanOutNotifier):
+        # A channel that failed while another delivered is not owed: it is
+        # said here, in the watch's own output (ruling 17, IDEA_013).
+        notifier.log = lambda message: print(f"oracle watch: {message}", file=sys.stderr,
+                                             flush=True)
     watcher = Watcher(
-        _project_index(),
-        None if args.no_notify else _oracle_notifier(),
+        index,
+        notifier,
         interval=args.interval,
         cache=_oracle_cache(),
         thresholds=Thresholds(stuck_minutes=args.stuck_minutes),
@@ -7926,6 +9180,7 @@ def cmd_oracle_watch(args) -> int:
         # the gates. The loop never does; what finishes late is the next
         # tick's.
         gate_wait=gates.timeout if args.once else 0.0,
+        chain=None if args.no_chain else _oracle_chain_step(index, notifier),
     )
     if args.once:
         result = watcher.tick()
@@ -7934,7 +9189,7 @@ def cmd_oracle_watch(args) -> int:
     def report(result) -> None:
         if getattr(args, "json", False):
             print(json.dumps(result.to_dict(), sort_keys=True, default=str), flush=True)
-        elif result.alerts:
+        elif result.alerts or result.chain:
             print("\n".join(_oracle_tick_lines(result)), flush=True)
 
     try:
@@ -8007,7 +9262,7 @@ def cmd_oracle_install(args) -> int:
     ``--dry-run`` prints the plist and the launchctl calls and changes nothing.
     """
     from ..oracle.home import HOME_ENV, oracle_home
-    from ..oracle.launchd import plist_for, search_path
+    from ..oracle.launchd import REMEDIES, plist_for, search_path
 
     if args.web:
         return _install_web(args)
@@ -8016,15 +9271,17 @@ def cmd_oracle_install(args) -> int:
     interval = 5.0 if args.interval is None else args.interval
     if not interval > 0:
         raise UsageError(f"--interval must be positive, not {interval:g}")
+    found = search_path()
     plist = plist_for(
         os.path.abspath(sys.executable),
         oracle_home(),
         interval,
-        path=search_path(),
+        path=found.path,
         pin_home=bool(os.environ.get(HOME_ENV)),
     )
     result = _oracle_installer().install(plist, dry_run=args.dry_run)
     steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    notes = _agent_path_notes(found, REMEDIES[plist["Label"]])
     if args.dry_run:
         text = (
             f"would write {result.plist_path}:\n{result.xml.decode()}\n"
@@ -8036,33 +9293,56 @@ def cmd_oracle_install(args) -> int:
             f"{verb} the oracle agent: {result.plist_path}\n{steps}\n"
             f"  watcher log: {plist['StandardOutPath']}"
         )
-    return emit(args, result.to_dict(), text)
+    return emit(args, {**result.to_dict(), "programs": found.to_dict()},
+                "\n".join([text, *notes]))
+
+
+def _agent_path_notes(found, remedy: str) -> list[str]:
+    """What ``install`` says about the agent's PATH: programs found only in a
+    well-known directory, and programs found nowhere (BUG_155)."""
+    from ..oracle.launchd import missing_text
+
+    lines = [f"  note: {program} is not on this PATH; the agent finds it in "
+             f"{os.path.dirname(where)}"
+             for program, where in found.fallback.items()]
+    if found.missing:
+        lines.append(f"  warning: the agent cannot run what needs it: "
+                     f"{missing_text(found.missing, remedy)}")
+    return lines
 
 
 def _install_web(args) -> int:
     """``oracle install --web``: the agent that keeps ``oracle web --wait`` running."""
     from ..oracle.home import HOME_ENV, oracle_home
-    from ..oracle.launchd import WEB_PROGRAMS, search_path, web_plist_for
+    from ..oracle.launchd import (
+        REMEDIES,
+        WEB_LABEL,
+        WEB_PROGRAMS,
+        search_path,
+        web_plist_for,
+    )
     from ..oracle.web import DEFAULT_PORT
 
     if args.interval is not None:
         raise UsageError("--interval is the watcher's; the web page has none")
     port = _web_port(DEFAULT_PORT if args.port is None else args.port)
     python = os.path.abspath(sys.executable)
+    # The interpreter's own directory holds the console script an action runs.
+    found = search_path(programs=WEB_PROGRAMS, extra=(os.path.dirname(python),))
     plist = web_plist_for(
         python,
         oracle_home(),
         port,
-        # The interpreter's own directory holds the console script an action runs.
-        path=search_path(programs=WEB_PROGRAMS, extra=(os.path.dirname(python),)),
+        path=found.path,
         pin_home=bool(os.environ.get(HOME_ENV)),
     )
     result = _oracle_web_installer().install(plist, dry_run=args.dry_run)
     steps = "\n".join(f"  {_argv_line(step)}" for step in result.steps)
+    notes = _agent_path_notes(found, REMEDIES[WEB_LABEL])
+    body = {**result.to_dict(), "programs": found.to_dict()}
     if args.dry_run:
-        return emit(args, result.to_dict(),
-                    f"would write {result.plist_path}:\n{result.xml.decode()}\n"
-                    f"would run:\n{steps}")
+        dry = f"would write {result.plist_path}:\n{result.xml.decode()}\nwould run:\n{steps}"
+        return emit(args, body, "\n".join([dry, *notes]))
     verb = "replaced" if result.was_loaded else "installed"
     lines = [
         f"{verb} the oracle web page agent: {result.plist_path}",
@@ -8071,11 +9351,12 @@ def _install_web(args) -> int:
          f"Tailscale when it is not up"),
         f"  web log: {plist['StandardOutPath']}",
         "  pair a device: invariant oracle web pair --name phone",
+        *notes,
     ]
     if not _oracle_installer().plist_path.exists():
         lines.append("  note: the watcher agent is not installed, so the page scans on each "
                      "refresh and nothing notifies; 'invariant oracle install' adds it")
-    return emit(args, result.to_dict(), "\n".join(lines))
+    return emit(args, body, "\n".join(lines))
 
 
 def _uninstall_text(name: str, result, dry_run: bool) -> str:
@@ -8130,7 +9411,7 @@ def cmd_oracle_status(args) -> int:
         agent_line = (
             f"installed, {'loaded' if agent.loaded else 'NOT loaded'} ({agent.plist_path})"
         )
-    lines = [f"  agent        {agent_line}", *_agent_lines(agent, "interpreter")]
+    lines = [f"  agent        {agent_line}", *_agent_lines(agent, "interpreter", "programs")]
     if not snapshot["exists"]:
         lines.append(f"  snapshot     no snapshot yet ({snapshot['path']})")
     else:
@@ -8183,13 +9464,19 @@ def _web_build(page: dict, installed) -> dict:
             "text": build_text(reported, installed, "the page")}
 
 
-def _agent_lines(agent, label: str) -> list[str]:
+def _agent_lines(agent, label: str, programs: str) -> list[str]:
+    """The interpreter line, and a programs line when the agent's PATH misses one."""
+    from ..oracle.launchd import REMEDIES, missing_text
+
     lines = []
     if agent.error:
         lines.append(f"  {label:<12} {agent.error}")
     elif agent.interpreter is not None:
         state = "ok" if agent.interpreter_exists else "MISSING"
         lines.append(f"  {label:<12} {state}  {agent.interpreter}")
+    if agent.missing_programs:
+        lines.append(f"  {programs:<12} MISSING  "
+                     f"{missing_text(agent.missing_programs, REMEDIES[agent.label])}")
     return lines
 
 
@@ -8212,7 +9499,7 @@ def _oracle_web_status(installed) -> tuple[dict, list[str]]:
     state = f"installed, {loaded}" if agent.installed else "not installed"
     port = f", port {agent.port}" if agent.port is not None else ""
     lines = [f"  web agent    {state}{port} ({agent.plist_path})"]
-    lines += _agent_lines(agent, "web python")
+    lines += _agent_lines(agent, "web python", "web programs")
     devices = (
         _plural(page["devices"], "paired device") if page["devices"] is not None
         else f"cannot read: {page['devices_error']}"
@@ -8229,12 +9516,27 @@ def _oracle_web_status(installed) -> tuple[dict, list[str]]:
     return body, lines
 
 
+def _outcome_line(outcome) -> str:
+    """One channel's result for ``notify-test``: ``Mac banner: sent``, ``push to iPhone: …``."""
+    where = "Mac banner" if outcome.channel == "mac" else (
+        f"{outcome.channel} to {outcome.target}" if outcome.target else outcome.channel)
+    detail = outcome.detail if outcome.ok is not False else f"FAILED: {outcome.detail}"
+    return f"  {where}: {detail}"
+
+
 def cmd_oracle_notify_test(args) -> int:
-    """Post one notification through the same seam the watcher uses."""
+    """Post one notification through the same seam the watcher uses.
+
+    Every channel behind it is tried and reported: the Mac banner and each
+    device with web push on (ADR-027 increment 4). Any channel that failed
+    exits 1, naming it, even when another delivered.
+    """
+    from ..oracle import push
     from ..oracle.notify import Notification, NotifyError
 
+    notifier = _oracle_notifier()
     try:
-        _oracle_notifier().notify(
+        notifier.notify(
             Notification(
                 title="invariant oracle",
                 message="notify-test: oracle alerts will reach you here",
@@ -8246,7 +9548,22 @@ def cmd_oracle_notify_test(args) -> int:
             f"  On macOS, check that notifications are allowed for the app "
             f"osascript posts as (System Settings > Notifications)."
         ) from exc
-    return emit(args, {"sent": True}, "sent one notification")
+    outcomes = list(getattr(notifier, "last", None) or [])
+    lines = ["sent one notification", *(_outcome_line(o) for o in outcomes)]
+    why = push.unavailable()
+    if outcomes and why is not None:
+        lines.append(f"  push: not available: {why}")
+    body: dict = {"sent": True}
+    if outcomes:
+        body["channels"] = [{"channel": o.channel, "target": o.target, "ok": o.ok,
+                             "detail": o.detail} for o in outcomes]
+    code = emit(args, body, "\n".join(lines))
+    failed = [o for o in outcomes if o.ok is False]
+    if failed:
+        print("invariant: not every channel delivered: " + "; ".join(
+            _outcome_line(o).strip() for o in failed), file=sys.stderr)
+        return 1
+    return code
 
 
 def _real_oracle_web_addresses():
@@ -8317,6 +9634,49 @@ def _oracle_web_wait():
     return _real_oracle_web_wait()
 
 
+def _real_oracle_talk():
+    from ..hosts.claude_code_talk import ClaudeCodeTalk
+
+    return ClaudeCodeTalk()
+
+
+def _oracle_talk():
+    """How the page reads a live Claude window's text and types into it (ADR-029 D4).
+
+    The oracle names the seam, ``SessionTalk``, and imports nothing from
+    ``hosts/``; this is where the two meet, as ``_oracle_cache`` joins the
+    probe (ADR-007 D11). Since increment 3 it also looks at a window's tab
+    and types a message into it, so the suite replaces it for every test with
+    ``oracle/talk``'s ``RecordingTalk``, which types nothing; the
+    ``osascript`` guard is the backstop.
+    """
+    return _real_oracle_talk()
+
+
+def _oracle_talker(index, talk, scan, notifier):
+    """The page's talk path (ADR-029 increment 3): ``talk`` the host's seam,
+    ``scan`` the fresh read, the audit log and the typist's lock in the
+    oracle home, the not-confirmed alert through ``notifier``, and whether a
+    device is still paired from its store."""
+    from ..oracle import panel
+    from ..oracle.devices import DeviceStore
+    from ..oracle.notify import Notification
+    from ..oracle.talk import Talker, typist
+    from ..oracle.webactions import AuditLog
+
+    devices = DeviceStore(index.home)
+
+    def alert(project: str, title: str) -> None:
+        notifier.notify(Notification(title=f"invariant: {project}" if project else "invariant",
+                                     subtitle=title, message=panel.WORDS["talk_alert"]))
+
+    def paired(device: str) -> bool:
+        return any(d.id == device for d in devices.devices())
+
+    return Talker(talk, scan, AuditLog(index.home).record,
+                  typist=lambda tty: typist(index.home, tty), alert=alert, paired=paired)
+
+
 def _web_port(port: int) -> int:
     if not 1 <= port <= 65535:
         raise UsageError(f"--port must be between 1 and 65535, not {port}")
@@ -8333,6 +9693,7 @@ def cmd_oracle_web(args) -> int:
     """
     import threading
 
+    from ..oracle import push
     from ..oracle.dashboard import load
     from ..oracle.devices import DeviceStore
     from ..oracle.tls import Certificates
@@ -8359,15 +9720,22 @@ def cmd_oracle_web(args) -> int:
             return _oracle_scan_document(index, cache, gates)
 
     remote = RemoteActions(_oracle_actions(), scan, AuditLog(index.home),
-                           starter=_oracle_starter(index))
+                           starter=_oracle_starter(index), chains=_oracle_chain_reader(index))
     certificates = Certificates(index.home, _oracle_web_certificates())
+    talk = _oracle_talk()
+    sender = _oracle_talker(index, talk, scan, _oracle_notifier())
+    # Web push (ADR-027 increment 4): the book where cryptography is installed,
+    # else the reason the page gives for offering none.
+    book = push.PushBook(index.home) if push.unavailable() is None else None
 
     def listener(bound: list[str], served=None):
         insecure = None
         if served is None and bound != [LOOPBACK]:
             insecure = _plain_http_warning(certificates.error)
         app = WebApp(devices, lambda: load(index.home, time.time(), scan), bound,
-                     remote=remote, served=served, insecure=insecure)
+                     remote=remote, served=served, insecure=insecure, push=book,
+                     push_why=None if book is not None else "extra", talk=talk,
+                     sender=sender)
         return _oracle_web_server()(app, bound, port, served=served)
 
     if args.wait:
@@ -8504,30 +9872,49 @@ def _serving_port() -> int:
 
 def cmd_oracle_web_devices(args) -> int:
     """The paired devices, and how many codes are still pending."""
+    from ..core.errors import StateError
     from ..oracle.devices import DeviceStore
     from ..oracle.home import oracle_home
+    from ..oracle.push import PushBook
 
     store = DeviceStore(oracle_home())
     devices = store.devices()
     pending = store.pending()
-    text = "\n".join(f"  {d.id}  {d.name}  paired {d.paired}" for d in devices) or (
-        "  no paired devices"
-    )
+    try:
+        subscriptions = PushBook(oracle_home()).subscriptions()
+    except StateError:
+        subscriptions = None
+    counts = {d.id: (None if subscriptions is None else
+                     sum(1 for s in subscriptions if s.get("device") == d.id))
+              for d in devices}
+    text = "\n".join(
+        f"  {d.id}  {d.name}  paired {d.paired}"
+        + ("  · notifications on" if counts[d.id] else "")
+        for d in devices) or "  no paired devices"
     if pending:
         text += f"\n  {_plural(pending, 'pairing code')} not yet used"
-    return emit(args, {"devices": [d.to_dict() for d in devices], "pending": pending}, text)
+    return emit(args, {"devices": [{**d.to_dict(), "push": counts[d.id]} for d in devices],
+                       "pending": pending}, text)
 
 
 def cmd_oracle_web_revoke(args) -> int:
     """Forget one paired device; the others keep working."""
+    from ..core.errors import StateError
     from ..oracle.devices import DeviceStore
     from ..oracle.home import oracle_home
+    from ..oracle.push import PushBook
 
     device = DeviceStore(oracle_home()).revoke(args.id)
+    # Its push subscriptions go with it; a send skips an unpaired device anyway.
+    try:
+        dropped = PushBook(oracle_home()).drop_device(device.id)
+    except StateError:
+        dropped = 0
     return emit(
         args,
-        {"revoked": device.to_dict()},
-        f"revoked {device.id} ({device.name}); its next request gets nothing",
+        {"revoked": device.to_dict(), "push_dropped": dropped},
+        f"revoked {device.id} ({device.name}); its next request gets nothing, "
+        f"and its notifications stop",
     )
 
 
@@ -8539,6 +9926,8 @@ _TOOL_EVENTS = frozenset({"pre-tool-use", "post-tool-use"})
 
 
 def cmd_hook(args) -> int:
+    if args.event == "statusline":
+        return _hook_statusline()
     from ..hosts.claude_code import (
         DEGRADED_KEY,
         HOOK_LOCK_SECONDS,
@@ -8721,9 +10110,9 @@ def _apply_signal(store, host_id: str, pid_source, signal) -> None:
     if signal.op == host.ATTENTION_WAITING:
         store.wait(host_id, signal.kind, signal.message, pid_source=pid_source)
     elif signal.op == host.ATTENTION_ANSWERED:
-        store.answered(host_id, pid_source=pid_source)
+        store.answered(host_id, pid_source=pid_source, received=signal.received)
     elif signal.op == host.ATTENTION_PROMPT:
-        store.prompt(host_id, pid_source=pid_source)
+        store.prompt(host_id, pid_source=pid_source, received=signal.received)
     elif signal.op == host.ATTENTION_TURN_STOPPED:
         store.turn_stopped(host_id, pid_source=pid_source)
     elif signal.op == host.ATTENTION_TURN_ENDED:
@@ -9260,6 +10649,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_session_handoff)
 
+    q = session.add_parser(
+        "report",
+        help="record how this session ended: done, blocked or needs-user",
+        description=(
+            "Record an outcome on this session (any state, torn down included) "
+            "for the oracle to read (ADR-027 D1). done: my part is finished; "
+            "blocked and needs-user pause the project's chain. Starts nothing."
+        ),
+        parents=[session_arg],
+    )
+    q.add_argument("--outcome", required=True, choices=["done", "blocked", "needs-user"])
+    q.add_argument("--note", default=None, help="one line saying why; privacy-scanned")
+    q.set_defaults(func=cmd_session_report)
+
     # Nested subparsers rather than `files`' flat `action` + positional: `add`
     # takes one title, three actions take an integer, and `show` takes nothing.
     # A flat shape could only accept strings, so the integer check would move
@@ -9415,6 +10818,58 @@ def build_parser() -> argparse.ArgumentParser:
     # a few lines below has carried the idiom all along.
     q.add_argument("--selector", action="append")
     q.set_defaults(func=cmd_pipeline_test)
+
+    # the queue (ADR-027 D2)
+    queue = sub.add_parser(
+        "queue", help="the project's queue of work that runs next"
+    ).add_subparsers(dest="sub", required=True)
+    q = queue.add_parser(
+        "add", help="put a work item id or a label on the queue", parents=[session_arg]
+    )
+    q.add_argument("ref", help="a work item id (it must be open) or a free label")
+    q.add_argument("--brief", default=None,
+                   help="the next session's first prompt; one line, privacy-scanned")
+    q.add_argument("--at", type=int, default=None,
+                   help="the position to put it at, counting from 1 (default: the end)")
+    q.add_argument("--propose", action="store_true",
+                   help="offer it only: the oracle never starts it on its own; "
+                        "`oracle chain start` does")
+    q.add_argument("--project", default=None,
+                   help="queue it in another registered project, by its key, root or name")
+    q.add_argument("--serves", default=None, metavar="ITEM",
+                   help="the open work item this entry serves; the backlog mirror then "
+                        "skips that item while the entry is queued or started")
+    q.set_defaults(func=cmd_queue_add)
+    q = queue.add_parser("link", help="say which work item an entry serves")
+    q.add_argument("entry", help="the entry's id, Q<n>")
+    q.add_argument("item", nargs="?", default=None, help="an open work item id")
+    q.add_argument("--clear", action="store_true", help="it serves no work item")
+    q.set_defaults(func=cmd_queue_link)
+    q = queue.add_parser(
+        "mirror", help="put every open backlog item on the queue now, by backlog rank")
+    q.add_argument("--project", default=None,
+                   help="another registered project's queue, by its key, root or name")
+    q.set_defaults(func=cmd_queue_mirror)
+    q = queue.add_parser(
+        "render", help="render the plan page beside the queue now (ADR-032 D11)")
+    q.add_argument("--project", default=None,
+                   help="another registered project's plan page, by its key, root or name")
+    q.set_defaults(func=cmd_queue_render)
+    q = queue.add_parser("list", help="the queue, in order")
+    q.add_argument("--project", default=None,
+                   help="another registered project's queue, by its key, root or name")
+    q.set_defaults(func=cmd_queue_list)
+    guard = ("refuse, writing nothing, unless the entry is still queued at this position, "
+             "counting from 1 (the phone's confirmed edit)")
+    q = queue.add_parser("remove", help="take an entry off the queue")
+    q.add_argument("entry", help="the entry's id, Q<n>")
+    q.add_argument("--if-queued-at", type=int, default=None, metavar="N", help=guard)
+    q.set_defaults(func=cmd_queue_remove)
+    q = queue.add_parser("move", help="put an entry at another position")
+    q.add_argument("entry", help="the entry's id, Q<n>")
+    q.add_argument("--to", type=int, required=True, help="its new position, counting from 1")
+    q.add_argument("--if-queued-at", type=int, default=None, metavar="N", help=guard)
+    q.set_defaults(func=cmd_queue_move)
 
     # items
     item = sub.add_parser("item").add_subparsers(dest="sub", required=True)
@@ -9656,6 +11111,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.set_defaults(func=cmd_guidelines_baseline)
     q = guide.add_parser(
+        "except",
+        help="record the user's exception to a guideline, confirmed at a terminal "
+        "(ADR-032 D7); an agent proposes this line, the user runs it",
+        parents=[session_arg],
+    )
+    q.add_argument("rule", help="the guideline's id, a rule derived from the layer map included")
+    q.add_argument("path", help="the project-relative path or glob the exception sets aside")
+    q.add_argument("--fingerprint", help="excuse one finding (twelve hex) rather than the file")
+    q.add_argument("--by", required=True, help="who gives the ruling")
+    q.add_argument("--reason", required=True, help="why")
+    q.set_defaults(func=cmd_guidelines_except)
+    q = guide.add_parser(
+        "loosen",
+        help="lower a guideline to warn and record the user's ruling, confirmed at a "
+        "terminal (ADR-032 D7)",
+        parents=[session_arg],
+    )
+    q.add_argument("target", metavar="rule-id", help="the guideline's id, or 'layers' for the map")
+    q.add_argument(
+        "--to", required=True, choices=("warn", "off"),
+        help="the severity it is lowered to; off pauses it (ADR-032 ruling 13)",
+    )
+    q.add_argument("--by", required=True, help="who gives the ruling")
+    q.add_argument("--reason", required=True, help="why")
+    q.set_defaults(func=cmd_guidelines_loosen)
+    q = guide.add_parser(
+        "retire",
+        help="take a guideline out for good into the ruleset's retired list, "
+        "confirmed at a terminal (ADR-032 ruling 13)",
+        parents=[session_arg],
+    )
+    q.add_argument("rule", help="the declared guideline's id")
+    q.add_argument("--by", required=True, help="who gives the ruling")
+    q.add_argument("--reason", required=True, help="why")
+    q.set_defaults(func=cmd_guidelines_retire)
+    q = guide.add_parser(
+        "adopt",
+        help="copy invariant's default guidelines into this project, confirmed at a "
+        "terminal (ADR-032 D8)",
+        parents=[session_arg],
+    )
+    q.add_argument(
+        "--layer", action="append", metavar="ID=GLOB",
+        help="fill a layer of the map it adds with a glob (repeatable)",
+    )
+    q.add_argument(
+        "--update", action="append", metavar="ID",
+        help="replace an updatable default rule with the shipped one (repeatable)",
+    )
+    q.add_argument(
+        "--dry-run", action="store_true", help="print the plan and write nothing",
+    )
+    q.set_defaults(func=cmd_guidelines_adopt)
+    q = guide.add_parser(
         "verdict",
         help="submit one cited verdict on a judgement guideline (ADR-012 D5)",
         parents=[session_arg],
@@ -9796,6 +11305,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-notify", action="store_true",
         help="post nothing; new alerts stay owed to a watcher that does",
     )
+    q.add_argument(
+        "--no-chain", action="store_true",
+        help="start nothing: leave every project's chain to another watcher (ADR-027)",
+    )
     q.set_defaults(func=cmd_oracle_watch)
     q = oracle.add_parser(
         "tui", help="the live dashboard; every action is confirmed first, n starts a new "
@@ -9823,9 +11336,73 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--name", default=None,
                    help="the label after the project in the session name "
                         "(default: MMDD-HHMM)")
+    q.add_argument("--model", default=None,
+                   help="the model the window runs on (default: host.window_model, "
+                        "else the host's own default); a forbidden one is refused")
     q.add_argument("--dry-run", action="store_true",
                    help="print the command and the facts; launch nothing")
     q.set_defaults(func=cmd_oracle_start_session)
+    q = oracle.add_parser(
+        "next",
+        help="what the oracle would start next in a project, and why; starts nothing",
+    )
+    q.add_argument("project", help="a registered project, by its key, root or name")
+    q.set_defaults(func=cmd_oracle_next)
+    chain_cmd = oracle.add_parser(
+        "chain", help="the oracle's chain of sessions: status, pause, resume, start (ADR-027)"
+    ).add_subparsers(dest="action", required=True)
+    q = chain_cmd.add_parser("status", help="each project's chain, the starts and the caps")
+    q.add_argument("project", nargs="?", default=None,
+                   help="one registered project, by its key, root or name")
+    q.set_defaults(func=cmd_oracle_chain_status)
+    q = chain_cmd.add_parser("pause", help="start nothing more in a project until resume")
+    q.add_argument("project", help="a registered project, by its key, root or name")
+    q.add_argument("--reason", default=None, help="one line saying why")
+    q.set_defaults(func=cmd_oracle_chain_pause)
+    q = chain_cmd.add_parser("resume", help="lift a project's pause; nothing is retried")
+    q.add_argument("project", help="a registered project, by its key, root or name")
+    q.set_defaults(func=cmd_oracle_chain_resume)
+    q = chain_cmd.add_parser(
+        "start", help="start the project's next work now, as you: accepts a proposal")
+    q.add_argument("project", help="a registered project, by its key, root or name")
+    which = q.add_mutually_exclusive_group()
+    which.add_argument("--entry", default=None, help="the queue entry to start, Q<n>")
+    which.add_argument("--item", default=None,
+                       help="a ready backlog item no queue entry names, by its id: a "
+                            "backlog proposal")
+    q.set_defaults(func=cmd_oracle_chain_start)
+    q = chain_cmd.add_parser(
+        "greenlight",
+        help="let the chain go ahead while the plan's weekly usage cannot be read, until "
+        "a fresh reading arrives (ADR-027 ruling 10)")
+    q.set_defaults(func=cmd_oracle_chain_greenlight)
+    for verb, words in (
+        ("continue", "type one more \"continue\" into a stalled chained session"),
+        ("retry", "close a stalled chained session's window and start its work afresh"),
+        ("close", "close a stalled chained session's window and mark its work failed"),
+    ):
+        q = chain_cmd.add_parser(verb, help=f"{words} (ADR-027 ruling 12)")
+        q.add_argument("project", help="a registered project, by its key, root or name")
+        q.set_defaults(func=cmd_oracle_chain_stall, stall=verb)
+    q = chain_cmd.add_parser(
+        "consent",
+        help="answer the oracle's ask in a landed session's window: may it close? "
+        "(ADR-027 ruling 21)")
+    q.add_argument("project", help="a registered project, by its key, root or name")
+    answer = q.add_mutually_exclusive_group(required=True)
+    answer.add_argument("--close", action="store_true",
+                        help="nothing more to do here: the oracle may close this window")
+    answer.add_argument("--not-yet", action="store_true",
+                        help="this window is still needed; give --note saying why")
+    q.add_argument("--note", default=None, help="why not yet, one line")
+    q.set_defaults(func=cmd_oracle_chain_consent)
+    for verb, words in (
+        ("close-window", "close a landed session's window the oracle could not settle"),
+        ("leave-open", "keep a landed session's window open; it is not asked again"),
+    ):
+        q = chain_cmd.add_parser(verb, help=f"{words} (ADR-027 ruling 21)")
+        q.add_argument("project", help="a registered project, by its key, root or name")
+        q.set_defaults(func=cmd_oracle_chain_landed, landed=verb)
     q = oracle.add_parser("notify-test", help="post one notification, to check delivery")
     q.set_defaults(func=cmd_oracle_notify_test)
     q = oracle.add_parser(
@@ -9883,6 +11460,12 @@ def build_parser() -> argparse.ArgumentParser:
     hooks = sub.add_parser("hooks").add_subparsers(dest="sub", required=True)
     q = hooks.add_parser("install")
     q.set_defaults(func=cmd_hooks_install)
+    q = hooks.add_parser(
+        "statusline",
+        help="set Claude Code's status line to record the plan's usage for the oracle; "
+        "an existing status line is never replaced (ADR-027 ruling 10)",
+    )
+    q.set_defaults(func=cmd_hooks_statusline)
 
     # host bridge
     q = sub.add_parser("hook")
@@ -9897,6 +11480,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     q.add_argument("rule", help="a rule id, or a guideline id from the ruleset")
     q.add_argument("--reason", help="required unless --clear")
+    q.add_argument(
+        "--by",
+        help="who grants it; required, with a terminal, for a guideline marked "
+        "owner: user (ADR-032 D7)",
+    )
     q.add_argument(
         "--calls", type=int, default=1,
         help="how many calls it covers; a guideline grant covers one",

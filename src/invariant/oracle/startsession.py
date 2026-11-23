@@ -54,39 +54,46 @@ class Starter:
 
     The CLI builds it (the oracle imports nothing from ``hosts/`` or the CLI):
 
-    * ``prepare(project, label, prompt, scanned)`` answers what the command
-      would print with ``--dry-run --json`` for that selector, label and
-      prompt, the facts read from ``scanned``, one project of the ``assess``
-      document (``{}`` when the read has none). It refuses, with an
+    * ``prepare(project, label, prompt, scanned, model)`` answers what the
+      command would print with ``--dry-run --json`` for that selector, label,
+      prompt and ``--model``, the facts read from ``scanned``, one project of
+      the ``assess`` document (``{}`` when the read has none). ``model``
+      ``None`` takes the configured window model, and the answer's
+      ``model`` says which one runs (DEC_ADR_030_D6). It refuses, with an
       ``InvariantError``, whatever the command refuses: a project the index
       does not name, a label with no letter or digit, a prompt that reads as
-      a flag. Nothing is launched.
+      a flag, a model the forbidden list holds. Nothing is launched. The
+      oracle never names a model; it carries the person's text.
     * ``launch(prepared)`` opens the window ``prepare`` described, through
       the one launcher, and returns the lines the command prints; it raises
       ``InvariantError`` when the window did not open.
     """
 
-    prepare: Callable[[str, str | None, str | None, dict[str, Any]], dict[str, Any]]
+    prepare: Callable[[str, str | None, str | None, dict[str, Any], str | None],
+                      dict[str, Any]]
     launch: Callable[[dict[str, Any]], str]
 
     def prepare_in(self, document: dict[str, Any], key: str, label: str | None,
-                   prompt: str | None) -> dict[str, Any]:
+                   prompt: str | None, model: str | None = None) -> dict[str, Any]:
         """``prepare`` with the facts read from project ``key`` of ``document``."""
-        return self.prepare(key, label, prompt, project_of(document, key))
+        return self.prepare(key, label, prompt, project_of(document, key), model)
 
     def again(self, document: dict[str, Any], key: str, label: str, name: str,
-              prompt: str | None) -> tuple[dict[str, Any] | None, str | None]:
+              prompt: str | None, model: str | None = None,
+              ) -> tuple[dict[str, Any] | None, str | None]:
         """At the button: ``(prepared, None)`` if the confirm still holds, else ``(None, why)``.
 
-        ``label``, ``name`` and ``prompt`` are what the confirm showed, the
-        label already resolved, so a default time label is not taken again.
+        ``label``, ``name``, ``prompt`` and ``model`` are what the confirm
+        showed, the label and the model already resolved, so a default time
+        label is not taken again, and the window runs on the model the
+        confirm showed even if the configured one moved since.
         The start is prepared once more from ``document``, a fresh read. A
         refusal the command makes, and a name another window took since the
         confirm, start nothing: a window is never started under a name the
         person did not see. ``why`` ends in "nothing ran".
         """
         try:
-            prepared = self.prepare_in(document, key, label, prompt)
+            prepared = self.prepare_in(document, key, label, prompt, model)
         except InvariantError as exc:
             return None, f"{exc}; nothing ran"
         if (prepared["name"], prepared["prompt"]) != (name, prompt):

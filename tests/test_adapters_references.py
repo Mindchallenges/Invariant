@@ -69,14 +69,23 @@ class TestTheSeam:
         path = write(tmp_path, "a.py", "import os\n")
         assert Adapter().references(path, Path("a.py"), tmp_path) is None
 
-    @pytest.mark.parametrize("ecosystem", ["swift_xcode", "node", "generic"])
-    def test_only_python_answers(self, tmp_path, ecosystem):
-        """Swift boundaries need symbols (ruling 3); node and generic gain
-        nothing (DN-9)."""
+    @pytest.mark.parametrize("ecosystem", ["swift_xcode", "generic"])
+    def test_swift_and_generic_offer_no_imports(self, tmp_path, ecosystem):
+        """Swift boundaries need symbols (ruling 3), or a fitness test
+        (ADR-032 D3); generic gains nothing (DN-9)."""
         path = write(tmp_path, "a.py", "import b\n")
         write(tmp_path, "b.py")
         adapter = get_adapter(ecosystem)
         assert "imports" not in adapter.guideline_engines
+        assert adapter.references(path, Path("a.py"), tmp_path) is None
+
+    @pytest.mark.parametrize("ecosystem", ["node", "dart", "flutter"])
+    def test_node_and_dart_answer_only_for_their_own_files(self, tmp_path, ecosystem):
+        """ADR-032 increment 5: they offer imports, and a Python file is not theirs."""
+        path = write(tmp_path, "a.py", "import b\n")
+        write(tmp_path, "b.py")
+        adapter = get_adapter(ecosystem)
+        assert "imports" in adapter.guideline_engines
         assert adapter.references(path, Path("a.py"), tmp_path) is None
 
     def test_python_offers_imports_and_mask(self):

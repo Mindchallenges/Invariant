@@ -115,6 +115,9 @@ class TestRecord:
             "ended": False,
             "degraded": None,
             "background": None,
+            "prompts": None,
+            "prompted": None,
+            "received": None,
         }
 
     def test_keys_this_build_does_not_know_survive_a_round_trip(self):
@@ -500,6 +503,17 @@ class TestHostSignals:
             cc.ATTENTION_ANSWERED
         )
 
+    def test_an_answered_question_leaves_its_receipt(self, host, ctx):
+        """ADR-029 D43: the answered tool's hook carries the answer's hash."""
+        from invariant.hosts.claude_code_talk import answer_digest
+
+        body = {"tool_name": "AskUserQuestion", "tool_use_id": "toolu_q1",
+                "tool_input": {"questions": [{"question": "Pick one hue"}]},
+                "tool_response": {"answers": {"Pick one hue": "Teal"}}}
+        assert self.signal(host, ctx, "post-tool-use", body) == AttentionSignal(
+            cc.ATTENTION_ANSWERED,
+            received=answer_digest("toolu_q1", ["Pick one hue"], {"Pick one hue": "Teal"}))
+
     def test_user_prompt_submit_is_a_prompt(self, host, ctx):
         assert self.signal(host, ctx, "user-prompt-submit", {}) == AttentionSignal(
             cc.ATTENTION_PROMPT
@@ -597,6 +611,47 @@ class TestHookWrites:
 
         hook("session-end", {"session_id": HOST})
         assert json.loads(sidecar(governed).read_text())["ended"] is True
+
+    def test_a_prompt_leaves_its_receipt_never_its_text(self, governed):
+        """ADR-029 D3: the hook path records the prompt's hash, the oracle's
+        receipt for a message it typed; the text stays in the transcript."""
+        from invariant.hosts.claude_code_talk import prompt_digest
+
+        hook("user-prompt-submit", {"session_id": HOST, "prompt": "The secret is hunter2\n"})
+        doc = json.loads(sidecar(governed).read_text())
+        assert doc["received"]["kind"] == "message"
+        assert doc["received"]["hash"] == prompt_digest("The secret is hunter2")
+        assert doc["received"]["at"] == doc["prompted"]
+        assert "hunter2" not in sidecar(governed).read_text()
+
+    def test_an_answer_leaves_its_receipt_never_its_text(self, governed):
+        """ADR-029 D43: PostToolUse of AskUserQuestion records the answer's
+        hash as a question's receipt, and the question stops waiting."""
+        from invariant.hosts.claude_code_talk import answer_digest
+
+        hook("pre-tool-use", {"session_id": HOST, "tool_name": "AskUserQuestion",
+                              "tool_input": {"questions": [{"question": "Pick one"}]}})
+        hook("post-tool-use", {"session_id": HOST, "tool_name": "AskUserQuestion",
+                               "tool_use_id": "toolu_q1",
+                               "tool_input": {"questions": [{"question": "Pick one"}]},
+                               "tool_response": {"answers": {"Pick one": "hunter2"}}})
+        doc = json.loads(sidecar(governed).read_text())
+        assert doc["waiting"] is None
+        assert doc["received"]["kind"] == "question"
+        assert doc["received"]["hash"] == answer_digest("toolu_q1", ["Pick one"],
+                                                        {"Pick one": "hunter2"})
+        assert "hunter2" not in sidecar(governed).read_text()
+
+    def test_an_answer_is_recorded_even_with_nothing_waiting(self, attention, store):
+        attention.answered(HOST, received="abc")
+        assert on_disk(store)["received"]["kind"] == "question"
+        assert on_disk(store)["received"]["hash"] == "abc"
+        assert attention.answered(HOST) is False
+
+    def test_a_prompt_without_text_keeps_the_last_receipt(self, attention, store):
+        attention.prompt(HOST, received="abc")
+        attention.prompt(HOST)
+        assert on_disk(store)["received"]["hash"] == "abc"
 
     def test_a_payload_without_a_host_id_writes_nothing(self, governed, monkeypatch):
         monkeypatch.setenv("INVARIANT_HOST_SESSION_ID", HOST)
@@ -1075,9 +1130,12 @@ class TestBackgroundSignals:
         7,
     ])
     def test_a_person_s_prompt_is_a_prompt(self, host, ctx, prompt):
+        from invariant.hosts.claude_code_talk import prompt_digest
+
         body = {} if prompt is None else {"prompt": prompt}
+        receipt = prompt_digest(prompt) if isinstance(prompt, str) else None
         assert self.signal(host, ctx, "user-prompt-submit", body) == AttentionSignal(
-            cc.ATTENTION_PROMPT)
+            cc.ATTENTION_PROMPT, received=receipt)
 
     def test_a_notification_naming_no_task_closes_nothing(self, host, ctx):
         prompt = "<task-notification>\n<status>completed</status>\n</task-notification>"

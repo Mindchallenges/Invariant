@@ -56,9 +56,12 @@ class FakeStarter:
         self.taken: set[str] = set()
         self.refuse: str | None = None
         self.fail: BaseException | None = None
+        #: The model each prepare was asked for, beside ``prepared``.
+        self.models: list[str | None] = []
 
-    def prepare(self, key, label, prompt, project):
+    def prepare(self, key, label, prompt, project, model=None):
         self.prepared.append((key, label, prompt, project))
+        self.models.append(model)
         if self.refuse:
             raise InvariantError(self.refuse)
         name = (project.get("project") or {}).get("name") or key
@@ -68,6 +71,7 @@ class FakeStarter:
         return {
             "project": {"key": key, "name": name, "root": f"/w/{name}"},
             "name": full, "label": label, "prompt": prompt, "cwd": f"/w/{name}",
+            "model": model or "configured-model",
             "argv": argv, "by_hand": f"cd /w/{name} && " + " ".join(argv),
             "facts": startsession.start_facts(project, 3),
         }
@@ -273,6 +277,7 @@ class TestTheModal:
             screen = await open_start(app, pilot)
             assert text_of(screen, "#refused") == "will not start: OSError: git is gone"
             assert text_of(screen, "#name") == ""
+            assert text_of(screen, "#model-line") == ""
 
         drive(app, script)
 
@@ -358,6 +363,26 @@ class TestStart:
         drive(app, script)
         (launched,) = fake.launched
         assert launched["name"] == "gamma-x" and launched["label"] == "x"
+
+    def test_the_model_typed_is_asked_shown_and_started(self, machine_world):
+        """DEC_ADR_030_D6: blank is the configured model, a typed one is asked
+        for, shown, and bound to the start."""
+        app, fake, _ = start_app(machine_world)
+
+        async def script(pilot):
+            screen = await open_start(app, pilot)
+            assert fake.models[-1] is None
+            assert text_of(screen, "#model-line") == "model: configured-model"
+            await type_into(app, pilot, "#model", " chosen-model ")
+            assert fake.models[-1] == "chosen-model"
+            assert text_of(screen, "#model-line") == "model: chosen-model"
+            await pilot.click("#start")
+            await settle(app, pilot)
+
+        drive(app, script)
+        assert fake.models[-1] == "chosen-model", "prepared again on the model shown"
+        (launched,) = fake.launched
+        assert launched["model"] == "chosen-model"
 
     def test_the_label_the_modal_resolved_is_the_one_started(self, machine_world):
         app, fake, _ = start_app(machine_world)

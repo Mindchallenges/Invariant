@@ -381,6 +381,10 @@ round-trip contract under Storage layout below).
 |                   | ``"consumed": {"at", "how", "session", "host"}`` |                                      |
 |                   | once the note was claimed or dismissed           |                                      |
 +-------------------+--------------------------------------------------+--------------------------------------+
+| ``reports``       | How it said it ended:                            | the oracle's scan, onto the          |
+|                   | ``{"outcome", "note", "at", "state"}`` per       | session's row (``report``)           |
+|                   | ``session report`` (ADR-027 D1, D11)             |                                      |
++-------------------+--------------------------------------------------+--------------------------------------+
 
 ``handoffs`` is the fifth, added with ``session handoff`` (ADR-005) and under the
 same no-migration contract. Its ``consumed`` key (IDEA_008) is under it too, one
@@ -1009,6 +1013,27 @@ and forcing no gate. A hook that cannot read the record, or a token that names
 nothing, changes nothing and fails nothing — the note simply goes on being
 offered.
 
+Reporting how it ended: an event too
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``invariant session report --outcome done|blocked|needs-user [--note]``
+(:need:`DEC_ADR_027_D1`, :need:`DEC_ADR_027_D11`) takes the handoff's shape
+for the same reasons: it changes nothing the machine governs, so it is legal
+in every state, torn down included, and is recorded as an entry of
+``reports`` and a standstill row in ``history`` (carrying ``report:
+<outcome>``), passing and forcing no gate. A finished session is saved and not
+registered again. It finds its session as a handoff does, and its note goes
+through the same vetting (``vet_line``). ``reports`` is under the round-trip
+contract: a record without it loads with an empty list, and an older build
+writes it back untouched (BUG_061).
+
+The oracle reads it. A session torn down with its plan complete has ended as
+``done`` with nothing written (ADR-027 ruling 1); a report covers the other
+endings. ``done`` on a session not yet torn down means "my part is finished",
+and the chain still waits for the teardown. ``blocked`` and ``needs-user``
+pause the project's chain: in increment 1, while that session is live
+(``oracle next``); the ledger that keeps the pause past it is increment 2's.
+
 How a session lands: two modes, asked rather than remembered
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1175,10 +1200,11 @@ pre-tool-use call naming a store path of the host's own project:
 
 1. **Which paths.** ``core/doclock.classify`` places the path: outside the
    store, a data record kept there (memory, the backlog, reports, sweeps:
-   outside the lock, ruling 20), ungoverned (the store's ``invariant.yaml``,
-   its git directory, anything under no policy record and no area), or a
-   policy path with its unit (under ``records.docs`` or ``records.guidelines``
-   kept in the store, or matched by a declared area).
+   outside the lock, ruling 20), ungoverned (its git directory, anything
+   under no policy record and no area), or a policy path with its unit (under
+   ``records.docs`` or ``records.guidelines`` kept in the store, the store's
+   own ``invariant.yaml``, which holds the guidelines' policy keys since
+   increment 4c-2, :need:`DEC_ADR_014_B143`, or matched by a declared area).
 2. **The grant.** For a session the call *proves* (explicit, host, target,
    prompt, cwd), the session domain takes the unit when it is free: nobody
    holds it, nobody queues for it, and the session's lease waits for no unit
@@ -1465,10 +1491,14 @@ is exactly what ``guidelines.ruleset_valid`` reads.
   ``guidelines.ruleset`` (an isolation-exempt manifest line, like
   ``methodology.pipeline``) cannot drop them mid-pipeline. Their verdicts then
   say what they can see. The comparison of the pinned digest with the
-  current one is A4's, for verdicts (DN-D): a submission is refused while
-  the tree's digest differs from the pin (A4 DN-6, below), and
-  ``guidelines.verdicts_complete`` reads every recorded verdict as stale while
-  it differs (A4 increment 3).
+  current one is A4's, for verdicts (DN-D, A4 DN-6 below). The pin governs
+  every rule it holds and nothing repins: with the tree moved off it, a
+  verdict on a rule the change edited is refused at submission and read as
+  stale by ``guidelines.verdicts_complete``, while a rule the pin holds
+  unchanged is still judged against the pin and a rule the pin lacks against
+  the tree (:need:`DEC_ADR_012_B115`). The pinned rules are read where the
+  pinned bytes are, the pin's path at the base, so the record holds no more
+  than ``{"path", "digest", "error"}``.
 - **Nothing pinned, nothing changes.** With no ruleset at start the field is
   null and the manifest decides, as before. A record written before the field
   existed loads with it null and is read the same way, so no record is
@@ -1503,11 +1533,13 @@ one invalid entry enters nothing (DN-11). One entry:
   submission. A later edit of the file makes the verdict stale, and
   ``guidelines.verdicts_complete`` reads a stale verdict as a missing one (A4
   increment 3).
-- **``ruleset``** is the pin, and a verdict is accepted only while the tree's
-  ruleset has the pinned digest (DN-6). With no pin, or a pin whose digest is
-  null, the tree's digest stands in for it. At the gate, a recorded
-  ``ruleset`` that is not the tree's digest, or a tree that is not the pin,
-  makes the verdict stale; nothing repins.
+- **``ruleset``** is the digest the rule was judged against (DN-6, as
+  amended by :need:`DEC_ADR_012_B115`): the pin, or the tree's digest for a
+  rule the pin lacks. With no pin, or a pin whose digest is null, the tree's
+  digest stands in for the pin. A rule the change edited cannot be judged,
+  and its verdict is refused. At the gate, a recorded ``ruleset`` that is not
+  the digest the rule is judged against now, or a rule the change has since
+  edited, makes the verdict stale; nothing repins.
 - **``state``** is the state the verdict was checked in, always a review-role
   state (DN-2). ``record_verdicts`` refuses, with nothing written, a record
   whose state the pipeline has since left.
@@ -1606,11 +1638,19 @@ and a missing fact stays null.
 
 - **No rule can see it.** ``RuleContext`` removes the key when it is built, on a
   copy, so this holds whoever builds the context, the oracle's gate cache
-  included. An audit write still moves the record's write time, so the cache
+  included. One fact is derived from it first (:need:`DEC_ADR_030_D4`):
+  ``forbidden_agents``, each agent whose observed models, else its asked one,
+  the configured forbidden-model list holds. The role gates and
+  ``test.new_test_fails`` read that membership and nothing else of the record,
+  and the failure it gives blocks whatever level the gate is configured at
+  (``Verdict.floor``, :need:`DEC_ADR_030_D5`). An audit write still moves the
+  record's write time, so the cache
   evaluates once more and gets the same answer.
 - **The landing record copies none of it.** A test pins the gate's verdict, the
   standings and the landing record equal with and without it.
-- **Who reads it.** ``invariant pipeline status``: ``--json`` and one text line.
+- **Who reads it.** ``invariant pipeline status``: ``--json`` and one text line,
+  and a ``models`` line naming the agents that ran with no model known, which
+  the forbidden list could not judge (:need:`DEC_ADR_030_D3`).
 - **No migration.** A record older than the key has none and prints no line.
 
 **A landing keeps what the guidelines family decided** (ADR-012 DN-7, A4
@@ -1714,7 +1754,9 @@ pair of gates the engine injects into whichever methodology is configured:
 ``docs.read_architecture`` leaving the design state, ``docs.updated`` entering the
 landing state (with ``docs.diagrams_current``, and ADR-018's
 ``docs.builds_strict``, ``docs.needs_traceable``, ``docs.decisions_recorded``,
-``items.decisions_linked`` and ``docs.mandate_kept`` beside it). A methodology cannot opt out of it; a project can only retune
+``items.decisions_linked`` and ``docs.mandate_kept`` beside it), and, since
+ADR-032 increment 3, ``docs.ahead_of_code`` entering the review state, judged
+on the design snapshot the advance out of design took (below). A methodology cannot opt out of it; a project can only retune
 the gates' level, and even that is discouraged.
 
 Details that are load-bearing rather than incidental:
@@ -1919,6 +1961,60 @@ no machine names it, so ``core/machines`` never injects it into a pipeline:
 row whose level the rule's decides, the fourth route by which a graded rule
 counts as reachable beside an event, a machine gate and an injection.
 
+**Built (ADR-032 D6, increment 3;** :need:`DEC_ADR_032_I3`\ **).** The design
+documents are proven ahead of the code at the boundary where the build
+begins. Two halves, one reading of "structural":
+
+- **The snapshot, at the advance out of design.** ``PipelineDomain.advance``,
+  on an edge from a state with the ``design`` role into one with neither the
+  ``design`` nor the ``abandon`` role, asks ``core/rules.design_snapshot``
+  once its gates have passed (or been forced), outside the record's lock, and
+  appends the answer to ``evidence["design_snapshots"]`` in the save that
+  writes the history row. The snapshot names each design document that
+  differs from the merge base (path and content digest) and whether any
+  structural source does. Design documents are the files under
+  ``paths.docs`` and the ``.rst`` pages holding a directive of the decision
+  role; in a store project, the store leg's docs as ``docs.updated`` counts
+  them. It is the tree's, read by the engine, so no host hook is involved.
+  The CLI prints it (``design_snapshot_notice``), and with no design
+  document changed says a structural change will fail ``docs.ahead_of_code``
+  at review.
+- **The gate, entering review.** ``docs.ahead_of_code`` rides the entry of
+  every ``review``-role state (``DOCS_FIRST_GATES``). It is N/A on a lane with
+  no design state and on a pipeline that left design before snapshots were
+  recorded; otherwise it judges the change as ``docs.updated`` does
+  (``_structural_change``, the one function both call, over its changed set
+  with the untracked files the snapshot reads added) and, for a structural
+  change, passes on the first snapshot showing a design document changed,
+  unless an earlier one showed source changed with none. A lane that goes
+  from design straight to review is judged on the snapshot that edge takes.
+  It blocks in ``standard`` and ``strict`` and warns in ``loose``.
+
+.. code:: json
+
+   {
+     "from": "designing", "to": "red", "step": 0,
+     "leg": "repo", "answerable": true, "problem": null,
+     "docs": [{"path": "docs/architecture/overview.rst", "digest": "3f1a9c0b7d2e"}],
+     "source_changed": false
+   }
+
+.. mermaid::
+
+   graph LR
+       ADV["advance: design state to a build state"] --> SNAP["core/rules.design_snapshot"]
+       SNAP --> DIFF["what differs from the merge base: dirty_paths, branch_files"]
+       SNAP --> STORE["store project: _store_docs_counted on the store leg"]
+       SNAP --> STRUCT["_structural_change: source changed?"]
+       SNAP --> EV["evidence.design_snapshots, with the history row"]
+       EV --> GATE["docs.ahead_of_code, entering review"]
+       STRUCT --> GATE
+       GATE --> V{"structural?"}
+       V -- "no" --> CLEAN["clean"]
+       V -- "yes" --> D{"a snapshot shows a design doc?"}
+       D -- "yes" --> PASS["clean, naming them"]
+       D -- "no" --> FAIL["fail: not changed before the build began"]
+
 **Built (ADR-016 D6, increment 3).** ``docs.area_documented`` is the
 incremental onboarding path's landing obligation. ``core/machines`` adds it to
 the ``landing`` state's entry set, beside ``docs.updated``
@@ -2117,7 +2213,7 @@ own ``coverage_run`` write. A test lists them and scans the domain for a writer 
 does not list. Reads take no lock, because a write is atomic.
 
 - **Nothing slow runs under it.** A test run, a coverage run, a gate evaluation,
-  a usage reading and the ruleset pin all happen before the lock is taken. It is
+  a usage reading, the ruleset pin and the design snapshot all happen before the lock is taken. It is
   held for one load, one mutation and one save, milliseconds on a normal record,
   so a hook is never queued behind somebody's suite.
 - **A write that changes nothing takes no lock.** ``record_docs_read``,
@@ -2142,9 +2238,12 @@ does not list. Reads take no lock, because a write is atomic.
            A->>R: read, no lock (seen)
            A->>G: edge and gates, no lock
            G-->>A: verdicts (a block refuses here)
+           opt the edge leaves a design state
+               A->>G: design snapshot, no lock
+           end
            A->>R: take the lock, read again
            alt the record equals seen, audit aside
-               A->>R: history row, state, save, release
+               A->>R: history row, design snapshot, state, save, release
            else anything changed
                A->>R: release, decide again from the top
            end
@@ -2265,7 +2364,7 @@ A writer that adds to an evidence field reads it first, and the field may hold t
 wrong shape. So ``agents_run``, ``docs_read`` (whose rows are paths, or
 ``{"path", "lease", "unit"}`` for a store doc, ADR-014 increment 4b),
 ``test_runs``, ``verdicts``,
-``guidelines_landings``, ``agents_run_how`` and ``acknowledged`` go through
+``guidelines_landings``, ``design_snapshots``, ``agents_run_how`` and ``acknowledged`` go through
 ``_evidence_list`` or ``_evidence_mapping``: anything but the right shape reads as
 empty and is replaced (ADR-012 A7 increment 4). The fact the caller came to record
 is what counts. A raise would lose it with the save, and a hook would still exit
@@ -2487,7 +2586,10 @@ Domain: work item
    :part_of: COMP_DOMAINS_WORKITEM
 
    ``data/machines/idea.yaml``: an idea's statuses and the transitions between
-   them.
+   them. ``proposed`` and ``accepted`` carry the ``ready`` role, which the
+   oracle's backlog fallback reads (:need:`DEC_ADR_027_D12`); they and
+   ``in_progress`` carry the ``mirror`` role, the states the backlog mirror
+   puts on the queue (:need:`DEC_ADR_027_D45`).
 
 .. comp:: The bug machine
    :id: COMP_MACHINE_BUG
@@ -2495,7 +2597,10 @@ Domain: work item
 
    ``data/machines/bug.yaml``: a bug's statuses, ``filed`` to ``reproduced`` to
    ``fixed`` and the ruled transitions, with ``filed → reproduced`` kept for
-   ``bug-reproducer``.
+   ``bug-reproducer``. ``reproduced`` carries the ``ready`` role
+   (:need:`DEC_ADR_027_D12`); ``filed`` and ``reproduced`` the ``mirror`` role
+   (:need:`DEC_ADR_027_D45`), and ``filed`` the ``reproduce`` role, so its
+   entry starts a reproduction first (:need:`DEC_ADR_027_D50`).
 
 
 Two item types with distinct lifecycles.
@@ -2707,6 +2812,97 @@ state.
 
 This is the same shape as the memory domain's index check below — not "you may
 not do this", but "this store no longer says what it means".
+
+Domain: queue
+-------------
+
+Not an FSM (:need:`ADR-027 <DEC_ADR_027>` D2, :need:`DEC_ADR_027_D10`). The
+queue is a committed record, so it holds no clock time; ``domains/queue``
+writes it through ``core/queue`` and the oracle only reads it (D9).
+
+.. code:: json
+
+   {"version": 1, "next": 4,
+    "entries": [{"id": "Q2", "ref": "IDEA_057", "added_by": "user",
+                 "state": "queued", "brief": "<the next session's first prompt>"},
+                {"id": "Q3", "ref": "ADR-027 inc 2", "added_by": "fff0573d",
+                 "state": "started", "session": "<the session it started>"},
+                {"id": "Q4", "ref": "BUG_9", "added_by": "<session>", "state": "queued",
+                 "mode": "propose"},
+                {"id": "Q6", "ref": "triage Q5", "added_by": "oracle", "state": "queued",
+                 "triage_of": "Q5", "brief": "<the triage prompt, filled>"},
+                {"id": "Q7", "ref": "IDEA_8", "added_by": "oracle", "state": "queued",
+                 "retry_of": "Q5"},
+                {"id": "Q8", "ref": "ADR-029 inc 1", "added_by": "user", "state": "queued",
+                 "serves": "IDEA_60"},
+                {"id": "Q9", "ref": "BUG_12", "added_by": "backlog", "state": "queued",
+                 "blind": 1}],
+    "mirrored": ["BUG_12"]}
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **Order is position**            | The list is the queue; ``move``  |
+|                                  | and ``add --at`` place an entry, |
+|                                  | counting from 1.                 |
++----------------------------------+----------------------------------+
+| **Ids are never reused**         | ``next`` mints ``Q<n>`` and only |
+|                                  | grows (a file whose entries name |
+|                                  | a higher number raises it), so a |
+|                                  | removed entry's id never names   |
+|                                  | another piece of work.           |
++----------------------------------+----------------------------------+
+| **One open entry per ref**       | A ``ref`` a ``queued`` or        |
+|                                  | ``started`` entry holds is       |
+|                                  | refused, so one piece of work is |
+|                                  | not started twice.               |
++----------------------------------+----------------------------------+
+| **States**                       | ``queued``, ``started`` (with    |
+|                                  | ``session``), ``done``,          |
+|                                  | ``failed`` (with ``reason``);    |
+|                                  | only ``queued`` is the head.     |
+|                                  | Increment 1 wrote ``queued``     |
+|                                  | only; the chain step writes the  |
+|                                  | rest, through the CLI.           |
++----------------------------------+----------------------------------+
+| **An entry's own mode**          | ``mode: propose`` is offered and |
+|                                  | never started on its own; the    |
+|                                  | first entry of no mode behind it |
+|                                  | runs. ``triage_of`` names the    |
+|                                  | failed entry a triage looks at,  |
+|                                  | ``retry_of`` the first entry of  |
+|                                  | the work a retry tries again     |
+|                                  | (ADR-027 ruling 9). All three    |
+|                                  | are left out while unset, and an |
+|                                  | older build keeps them, BUG_061. |
++----------------------------------+----------------------------------+
+| **The backlog mirror**           | An entry ``added_by: backlog``   |
+| (increment 5)                    | was written by                   |
+|                                  | ``domains/queue.mirror``         |
+|                                  | (:need:`DEC_ADR_027_D44`);       |
+|                                  | ``mirrored`` names the items it  |
+|                                  | added in their current open      |
+|                                  | spell, so one the user removed   |
+|                                  | stays off. ``serves`` names the  |
+|                                  | item an entry serves, which the  |
+|                                  | mirror then skips; ``blind``     |
+|                                  | counts the reproduce-first runs  |
+|                                  | that recorded nothing. All are   |
+|                                  | left out while unset.            |
++----------------------------------+----------------------------------+
+| **One queue per project**        | A repository queue is the main   |
+|                                  | checkout's, whatever worktree    |
+|                                  | writes it; it is the one the     |
+|                                  | oracle reads.                    |
++----------------------------------+----------------------------------+
+| **Locked, atomic, read whole**   | An edit holds the state root's   |
+|                                  | ``locks/queue.lock`` and         |
+|                                  | replaces the file atomically. A  |
+|                                  | file that does not parse is      |
+|                                  | refused naming what is wrong,    |
+|                                  | never read in part. Unknown keys |
+|                                  | survive (BUG_061).               |
++----------------------------------+----------------------------------+
 
 Domain: memory
 --------------
@@ -3272,7 +3468,27 @@ D5):
     "turn": "running|ended", "turn_since": "<iso>",
     "ended": false,
     "degraded": {"event": "<hook>", "error": "<type: message>", "since": "<iso>"},
-    "background": {"<task id>": {"kind": "agent|command", "since": "<iso>"}}}
+    "background": {"<task id>": {"kind": "agent|command", "since": "<iso>"}},
+    "prompts": 3, "prompted": "<iso>",
+    "received": {"kind": "message|question", "hash": "<sha256>", "at": "<iso>"}}
+
+``prompts`` counts the turns the person started (a ``UserPromptSubmit`` of a
+prompt, never a background task's notice) and ``prompted`` is when the last
+one began (ADR-027 ruling 21, :need:`DEC_ADR_027_D54`). The chain step reads
+them to tell a turn the user typed into a landed session's window since its
+teardown; a record written before them counts from nothing.
+
+``received`` is the receipt the oracle's talk path waits for after it types
+a message into the window (ADR-029 D3, :need:`DEC_ADR_029_D27`): every
+``UserPromptSubmit`` with prompt text records the SHA-256 of that prompt, as
+the host layer normalises it, and when it arrived, with the turn it starts.
+It is a hash, never the text, beside a transcript on the same Mac that
+already holds the text; a prompt with no text leaves the last receipt as it
+was. A record written before it reads as no receipt. Since ADR-029 increment
+5 a question the person answered records one too, of the kind ``question``
+(:need:`DEC_ADR_029_D43`): the ``PostToolUse`` of ``AskUserQuestion`` leaves
+the SHA-256 of the call's id and its answers, as the host layer normalises
+them, never the answers, with the write that clears ``waiting``.
 
 ``background`` is the ledger of work the host's main turn started in the
 background and has not heard finish (BUG_094): a launch opens an entry
@@ -3384,18 +3600,29 @@ the machine — so it keeps a directory per USER:
      projects.json         the project index
      locks/projects.lock   advisory lock for its read-modify-write
      locks/alerts.lock     advisory lock for the ledger's read-modify-write
+     locks/chain.lock      advisory lock for the chain ledger (ADR-027 inc 2)
      oracle/               the watcher's derived state; safe to delete
        snapshot.json       the last tick's assessed view of every project
        alerts.json         the rising-edge de-dup ledger
+       chain.json          the chain ledger: pauses, the start each project
+                           follows, its starts and owed notices (ADR-027);
+                           derived, but NOT replaced when unreadable;
+                           since inc 2b also the usage hold, the greenlight,
+                           a chained start's stall and released sessions
+       usage.json          the plan's last usage reading, as the opt-in
+                           status line recorded it (ADR-027 ruling 10)
        watcher.log         the launchd agent's stdout and stderr
        web.json            the web page loop's report: waiting or serving, where
        web.log             the web page agent's stdout and stderr
      web/                  the web page's records; NOT derived (0700)
        devices.json        token hashes and pending pairing codes (0600)
+       push.json           web push: the VAPID key pair and each paired
+                           device's subscriptions (0600; ADR-027 inc 4)
        actions.log         what the page ran: a start and an end line each (0600)
        tls/                the page's certificate (0700)
          oracle.pem        Tailscale's certificate chain, then its key (0600)
      locks/devices.lock    advisory lock for its read-modify-write
+     locks/push.lock       advisory lock for web/push.json's (ADR-027 inc 4)
 
 .. code:: json
 
@@ -3559,6 +3786,161 @@ watcher older than stamps, which ``oracle status`` and ``doctor`` report as olde
 |                                  | condition returning is a new     |
 |                                  | edge. A project that could not   |
 |                                  | be read keeps its keys.          |
++----------------------------------+----------------------------------+
+
+The chain ledger
+~~~~~~~~~~~~~~~~
+
+The watcher's chain step (ADR-027 increment 2, :need:`DEC_ADR_027_D14`) keeps
+``<oracle home>/oracle/chain.json`` under ``locks/chain.lock``:
+
+.. code:: json
+
+   {"version": 1, "next": 13,
+    "projects": {"<state root>": {
+      "paused": {"reason": "<why>", "by": "user|report|failure", "since": "<iso>"},
+      "resumed": "<iso>", "resumed_epoch": 1800000000.0,
+      "current": {"id": "C12", "state": "launching|running", "source": "queue|backlog",
+                  "ref": "IDEA_7", "entry": "Q3", "mode": "auto|accepted",
+                  "name": "<window name>", "pid": 4242, "by_pid": 777,
+                  "at": "<iso>", "at_epoch": 1800000000.0, "appeared_epoch": 1800000000.0,
+                  "session": "<session id>", "gone_since_epoch": null,
+                  "triage_of": null, "retry_of": null,
+                  "reproduce": false, "residue": null,
+                  "nudged_epoch": 1800000000.0,
+                  "stall": {"since_epoch": 1800000000.0, "cause": "limit|error|unknown",
+                            "resets_at": null, "nudge": "sending|typed|no_tab|<code>",
+                            "nudged_epoch": null, "still": false, "still_said": false,
+                            "waiting_said": false}},
+      "proposed": {"entry:Q5": {"since": "<iso>"}},
+      "held": {"daily_cap|2026-11-18": {"since": "<iso>"}},
+      "starts": [{"id": "C12", "ref": "IDEA_7", "entry": "Q3", "at": "<iso>",
+                  "day": "2026-11-18", "mode": "auto", "session": null,
+                  "outcome": "done|failed|null", "detail": "<the launcher's words>"}],
+      "released": ["<session id>"],
+      "mirrored_epoch": 1800000000.0,
+      "landed": {"id": "C12", "entry": "Q3", "ref": "IDEA_7", "session": "<session id>",
+                 "name": "<window name>", "pid": 4242, "host": "<host id>", "tty": "ttys004",
+                 "landed": "<iso>", "landed_epoch": 1800000000.0,
+                 "state": "watching|asking|asked|consented|closing|notified|left_open|users",
+                 "limits": {"ask_after": 300.0, "ask_again": 1800.0, "asks": 3,
+                            "answer_within": 600.0},
+                 "baseline": 4, "ask_at_epoch": null, "consented_epoch": null,
+                 "closing_epoch": null, "gone_since_epoch": null,
+                 "asks": [{"at": "<iso>", "at_epoch": 1800000000.0,
+                           "code": "sending|typed|lost|<the typer's code>", "detail": "<why>"}],
+                 "answers": [{"answer": "close|not_yet", "note": "<one line>",
+                              "at": "<iso>", "at_epoch": 1800000000.0}],
+                 "notice": {"why": "no_answer|not_yet|not_typed|unread|close_failed",
+                            "at": "<iso>", "note": null, "detail": null},
+                 "decided": {"what": "close|leave_open", "by": "user", "at": "<iso>"},
+                 "closed": {"at": "<iso>", "lines": ["<what the close did>"]}},
+      "landings": [{"...": "an ended landed record", "outcome": "closed|closed_by_user|gone",
+                    "ended": "<iso>"}]}},
+    "usage": {"held": {"kind": "over|unknown", "since": "<iso>"},
+              "greenlight": {"at": "<iso>", "at_epoch": 1800000000.0}},
+    "notices": [{"title", "subtitle", "message", "sound"}]}
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **Never replaced**               | Unlike ``alerts.json``, a ledger |
+|                                  | that cannot be read, or of a     |
+|                                  | newer version, is left as it is  |
+|                                  | and the chain does nothing until |
+|                                  | it is mended: replacing it would |
+|                                  | lift every pause and reset the   |
+|                                  | caps. Deleting it by hand does   |
+|                                  | exactly that.                    |
++----------------------------------+----------------------------------+
+| **One start per project**        | ``current`` is the start the     |
+|                                  | step follows. A ``launching``    |
+|                                  | one is a reservation made under  |
+|                                  | the lock before the launch, so   |
+|                                  | two watchers never start one     |
+|                                  | piece of work twice.             |
++----------------------------------+----------------------------------+
+| **Days are local**               | ``day`` is the machine's local   |
+|                                  | calendar day, what the daily cap |
+|                                  | counts. ``starts`` keeps the     |
+|                                  | last 100 per project.            |
++----------------------------------+----------------------------------+
+| **Clock times, machine-local**   | As in ``alerts.json``: outside   |
+|                                  | every repository, never          |
+|                                  | committed. The committed queue   |
+|                                  | carries only a short reason; the |
+|                                  | launcher's words stay here.      |
++----------------------------------+----------------------------------+
+| **Owed notices**                 | A notice no notifier delivered   |
+|                                  | stays in ``notices`` (at most    |
+|                                  | 50) for the next tick.           |
++----------------------------------+----------------------------------+
+| **One usage hold per machine**   | ``usage`` is not a project's:    |
+| (increment 2b)                   | the plan's usage holds every     |
+|                                  | project alike. ``held`` is the   |
+|                                  | hold already said; a greenlight  |
+|                                  | is spent once a newer reading    |
+|                                  | arrives (ADR-027 D25).           |
++----------------------------------+----------------------------------+
+| **A stall on its start**         | ``current.stall`` lasts while    |
+| (increment 2b)                   | the scan reads the session       |
+|                                  | ``stalled``; ``nudged_epoch``    |
+|                                  | outlives it, so a new stall soon |
+|                                  | after a nudge is still the same  |
+|                                  | stall (D28).                     |
++----------------------------------+----------------------------------+
+| **Released sessions**            | The last 100 sessions per        |
+| (increment 2b)                   | project the chain has finished   |
+|                                  | with (failed, retried, closed):  |
+|                                  | they no longer hold the project  |
+|                                  | (ruling 13, D30). A landed       |
+|                                  | session whose window the oracle  |
+|                                  | closed joins them (ruling 21).   |
++----------------------------------+----------------------------------+
+| **A landed window**              | ``landed`` follows the window of |
+| (ruling 21)                      | a start that ended done until it |
+|                                  | closes: every ask, answer,       |
+|                                  | notice and close is on it, and   |
+|                                  | the ``close_*`` limits of the    |
+|                                  | day it landed. ``consent`` is    |
+|                                  | written here by the CLI, never   |
+|                                  | read from a transcript. An ended |
+|                                  | one moves to ``landings``, the   |
+|                                  | last 20 per project (D53).       |
++----------------------------------+----------------------------------+
+
+The plan's usage reading
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``invariant hook statusline``, the opt-in status line (ADR-027 ruling 10,
+:need:`DEC_ADR_027_D24`), writes ``<oracle home>/oracle/usage.json``:
+
+.. code:: json
+
+   {"weekly": 41.0, "weekly_resets_at": 1800000000.0, "five_hour": 12.0,
+    "five_hour_resets_at": 1800000000.0, "read_at": 1800000000.0,
+    "host": "claude_code"}
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **Host-neutral**                 | Percentages and epoch seconds;   |
+|                                  | the host adapter turned its own  |
+|                                  | JSON into them, and the oracle   |
+|                                  | reads only these keys.           |
++----------------------------------+----------------------------------+
+| **Derived, safe to delete**      | Deleting it is a missing         |
+|                                  | reading: the chain holds until a |
+|                                  | new one arrives or a greenlight. |
++----------------------------------+----------------------------------+
+| **Written on a change, or once a | Every status-line refresh would  |
+| minute**                         | otherwise write; an atomic       |
+|                                  | replace lets several windows     |
+|                                  | record at once.                  |
++----------------------------------+----------------------------------+
+| **Stale after 30 minutes**       | ``read_at`` is when it was read; |
+|                                  | an older reading holds as        |
+|                                  | unknown (D25).                   |
 +----------------------------------+----------------------------------+
 
 The web page loop's report
@@ -3744,6 +4126,74 @@ make it again.
 |                                  | seconds) are the D14 exception   |
 |                                  | again: under the home, never     |
 |                                  | committed or rendered.           |
++----------------------------------+----------------------------------+
+
+Web push
+~~~~~~~~
+
+``<oracle home>/web/push.json`` holds what web push needs (ADR-027 increment
+4, ruling 17, :need:`DEC_ADR_027_D39`): the oracle's VAPID key pair and each
+paired device's push subscriptions. It lives in ``web/`` beside
+``devices.json`` because it is a record, not derived: deleting it turns push
+off for every device and makes a new key the next time the page offers push,
+which every phone must subscribe to again.
+
+.. code:: json
+
+   {"version": 1,
+    "vapid": {"private": "<base64url P-256 scalar>", "public": "<base64url point>",
+              "created": "<iso>"},
+    "subscriptions": [{"device": "<8 hex>", "endpoint": "<the push service's URL>",
+                       "p256dh": "<base64url>", "auth": "<base64url>",
+                       "origin": "https://<mac>.<tailnet>.ts.net:7341", "added": "<iso>",
+                       "last_ok": "<iso>", "last_error": "<why>", "last_error_at": "<iso>"}]}
+
++----------------------------------+----------------------------------+
+| Property                         | Why                              |
++==================================+==================================+
+| **The key never leaves it**      | The VAPID private key signs      |
+|                                  | every push; it is kept here and  |
+|                                  | nowhere else, never in a         |
+|                                  | manifest or a project, and only  |
+|                                  | its public half is shown to a    |
+|                                  | paired device.                   |
++----------------------------------+----------------------------------+
+| **A subscription is a device's** | ``device`` is the paired device  |
+|                                  | whose token posted it, at most   |
+|                                  | four each, one endpoint to one   |
+|                                  | device. ``oracle web revoke``    |
+|                                  | drops the device's, and a send   |
+|                                  | skips any whose device is no     |
+|                                  | longer in ``devices.json``.      |
++----------------------------------+----------------------------------+
+| **Only a push service's          | ``endpoint`` is https, port 443, |
+| endpoint**                       | at ``push.apple.com``,           |
+|                                  | ``fcm.googleapis.com``,          |
+|                                  | ``push.services.mozilla.com`` or |
+|                                  | ``notify.windows.com`` or below; |
+|                                  | ``p256dh`` must be a P-256 point |
+|                                  | and ``auth`` 16 bytes.           |
++----------------------------------+----------------------------------+
+| **What the last send did**       | ``last_ok``, or ``last_error``   |
+|                                  | and when, written by the watcher |
+|                                  | after each push, so the page can |
+|                                  | say "the last one did not        |
+|                                  | arrive". A 404 or 410 removes    |
+|                                  | the subscription.                |
++----------------------------------+----------------------------------+
+| **Owner-only, locked, refused    | As ``devices.json``: ``web/`` is |
+| shapes**                         | ``0700`` and every write's       |
+|                                  | temporary file ``0600`` from     |
+|                                  | creation; writes hold            |
+|                                  | ``locks/push.lock``; a newer     |
+|                                  | ``version`` or a malformed shape |
+|                                  | is refused, and unknown keys     |
+|                                  | survive.                         |
++----------------------------------+----------------------------------+
+| **Clock times, machine-local**   | ``created``, ``added`` and the   |
+|                                  | ``last_*`` times are UTC ISO to  |
+|                                  | the second: ADR-007's D14        |
+|                                  | exception, never committed.      |
 +----------------------------------+----------------------------------+
 
 The web actions' audit log

@@ -23,6 +23,7 @@ import copy
 import fnmatch
 import os
 import posixpath
+import string
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -38,6 +39,7 @@ from .agents import TIERS
 from .errors import ManifestError, UnknownRuleError
 from .home import UserConfig, load_user_config
 from .identity import repo_identity
+from .needs import ITEM_ROLES
 from .privacy import DEFAULT_PATTERNS, parse_allow
 from .stores import (
     POINTER,
@@ -252,6 +254,10 @@ DEFAULTS: dict[str, Any] = {
         # from the main checkout, and a declared store is writable and exempt
         # from session isolation by construction.
         "sweeps": "docs/sweeps",
+        # The queue of work that runs next in this project (ADR-027 D2, D10):
+        # one JSON file, committed. Its location, `records.queue`, follows
+        # `records.backlog` when no level sets it.
+        "queue": "docs/queue.json",
     },
     "commands": {
         "build": None,
@@ -501,7 +507,40 @@ DEFAULTS: dict[str, Any] = {
     # `tier_map` is tier -> this host's own choice for that tier, one line of
     # text the engine never interprets (ADR-012 D9, ruling 10). Empty by default
     # and in every shipped file, so every agent runs on the host's default.
-    "host": {"kind": "claude_code", "tier_map": {}},
+    # `window_model` and `forbidden_models` are null: the host adapter's
+    # defaults, so no model name lives in core (DEC_ADR_030_D2).
+    "host": {"kind": "claude_code", "tier_map": {}, "window_model": None,
+             "forbidden_models": None},
+    # What the oracle may start in this project, and when (ADR-027 D4, D5).
+    # `chain.queue` and `chain.backlog` each take auto, propose or off: work
+    # from the queue, and work the oracle picks from the backlog when the
+    # queue is empty. `chain.hours` is null (always) or [start, end], two
+    # whole local hours from 0 to 24; outside it an auto start is proposed
+    # instead. `chain.daily_cap` bounds the chained starts a local day
+    # (increment 2); `chain.prompt` is a start's first prompt when its entry has
+    # no brief, and `chain.triage_prompt` the brief of the triage entry a failed
+    # start queues (ADR-027 ruling 9). The watcher's chain step acts on them.
+    # `chain.stall_after` is the hours a live session may go without activity
+    # before it reads `stalled` (ADR-027 ruling 11, increment 2b).
+    # Increment 5 (rulings 18 to 20): `chain.mirror` puts every open backlog
+    # item on the queue, in the states `chain.mirror_states` names (null: each
+    # item machine's `mirror` role); those entries start under `chain.backlog`,
+    # now auto. `chain.reproduce_first` starts a filed bug's entry with
+    # `chain.reproduce_prompt` (null: the shipped one) before anyone fixes it.
+    # On for every project; a project opts out here.
+    # Ruling 21 (IDEA_062): a landed chained session's window is asked once it
+    # has been quiet `chain.close_ask_after` minutes, asked again
+    # `chain.close_ask_again` minutes after a "not yet", `chain.close_asks`
+    # times in all, and a notice goes to the user when no answer came
+    # `chain.close_answer_within` minutes after an ask.
+    "oracle": {"chain": {
+        "queue": "auto", "backlog": "auto", "hours": None, "daily_cap": 20,
+        "prompt": None, "triage_prompt": None, "stall_after": 2,
+        "mirror": True, "mirror_states": None, "reproduce_first": True,
+        "reproduce_prompt": None,
+        "close_ask_after": 5, "close_ask_again": 30, "close_asks": 3,
+        "close_answer_within": 10,
+    }},
     # The project's coding guidelines (ADR-012 D3, D13). `ruleset` is the
     # path of the one YAML ruleset; null means no guidelines, and every
     # `guidelines.*` rule is N/A. The documented location is inside the docs
@@ -544,7 +583,67 @@ DEFAULTS: dict[str, Any] = {
 _AGENTS_KEYS = ("library", "local", "roles", "overlays", "tiers")
 
 #: The `host` keys this build reads.
-_HOST_KEYS = ("kind", "tier_map")
+_HOST_KEYS = ("kind", "tier_map", "window_model", "forbidden_models")
+
+#: The `oracle` keys this build reads, and those of `oracle.chain`
+#: (ADR-027 D4, D5; increment 1).
+_ORACLE_KEYS = ("chain",)
+_CHAIN_KEYS = ("queue", "backlog", "hours", "daily_cap", "prompt", "triage_prompt",
+               "stall_after", "mirror", "mirror_states", "reproduce_first",
+               "reproduce_prompt", "close_ask_after", "close_ask_again", "close_asks",
+               "close_answer_within")
+#: The minutes `oracle.chain` times a landed window's asks by (ruling 21).
+CHAIN_CLOSE_MINUTES = ("close_ask_after", "close_ask_again", "close_answer_within")
+#: What `oracle.chain.queue` and `oracle.chain.backlog` may say.
+CHAIN_MODES = ("auto", "propose", "off")
+#: The placeholders `oracle.chain.prompt` and `oracle.chain.triage_prompt` may
+#: name (ADR-027 increment 2, ruling 9).
+CHAIN_PROMPT_FIELDS = ("ref", "title", "entry")
+TRIAGE_PROMPT_FIELDS = ("ref", "entry", "reason", "retry")
+#: The placeholders `oracle.chain.reproduce_prompt` may name (increment 5):
+#: ``{attempt}`` is 1, or 2 for the run after one that recorded nothing.
+REPRODUCE_PROMPT_FIELDS = ("ref", "title", "entry", "attempt")
+#: A chained start's first prompt when its entry has no brief, and the triage
+#: brief, when the project sets neither (null). One line each: a brief is.
+#: Each default opens with the session start (BUG_158, DEC_ADR_027_D62): the
+#: chain step binds a window only to a session row, and only the window's own
+#: ``invariant session start`` creates one. The task name carries the entry, so
+#: a retry or a second attempt is never refused for a parked session.
+DEFAULT_CHAIN_PROMPT = (
+    "First run invariant session start {ref}-{entry}, invariant session isolate "
+    "--execute and invariant session plan add for the work. Then take up {ref} from "
+    "this project's queue ({entry}: {title}). Run it through the project's pipeline; "
+    "once it has landed, queue what comes next with invariant queue add."
+)
+DEFAULT_TRIAGE_PROMPT = (
+    "First run invariant session start triage-{entry}, invariant session isolate "
+    "--execute and invariant session plan add for the triage. Then triage: the "
+    "oracle's chained start of {ref} ({entry}) failed: {reason}. File the "
+    "failure as a bug with the backlog-curator agent, with the evidence from invariant "
+    "queue list and invariant oracle chain status; prove it with the bug-reproducer "
+    "agent; then judge whether carrying on with other sessions would harm this project. "
+    "If the bug is severe, queue its fix at the head as a proposal (invariant queue add "
+    "<bug id> --propose --at 1) and take the retry {retry} off the queue (invariant "
+    "queue remove {retry}). If carrying on is not safe, run invariant session report "
+    "--outcome needs-user --note '<why>', which pauses the chain for the user. "
+    "Otherwise leave the retry {retry} where it is: it is the one retry. A retry of "
+    "none means this work failed twice and is not tried again."
+)
+#: A filed bug's first prompt when its turn comes (ADR-027 ruling 20). The agent
+#: names live here, in a template, never in engine code (D19).
+DEFAULT_REPRODUCE_PROMPT = (
+    "First run invariant session start reproduce-{ref}-{entry}, invariant session "
+    "isolate --execute and invariant session plan add for the reproduction. Then "
+    "reproduce {ref} ({entry}) before anyone fixes it, attempt {attempt}: run the "
+    "bug-reproducer agent on {ref} (on attempt 2, with the harness the item's last repro "
+    "attempt suggests), land its proof through the project's pipeline and record its "
+    "verdict on the item as the agent routes it: RED-CONFIRMED moves it to reproduced; "
+    "ALREADY-FIXED closes it by the edge the report names, asking the user for any "
+    "ruling it needs; DEVICE-ONLY records the live leg with invariant item residue; "
+    "HARNESS-BLIND records the attempt and the next harness to try. Do not fix the bug "
+    "and do not queue its fix: the oracle reads the verdict from the item when this "
+    "session lands and queues what follows."
+)
 
 #: The `guidelines` keys this build reads.
 _GUIDELINES_KEYS = (
@@ -602,6 +701,7 @@ RECORD_LOCATIONS: dict[str, tuple[str, ...]] = {
     "memory": ("repo", "store"),
     "reports": ("repo", "store"),
     "sweeps": ("repo", "store"),
+    "queue": ("repo", "store"),
     "hooks": ("repo", "local"),
     "agents": ("repo", "local"),
 }
@@ -637,7 +737,12 @@ RECORD_PATH_KEYS: dict[str, tuple[str, ...]] = {
     "memory": ("paths.memory", "paths.memory_index"),
     "reports": ("paths.reports",),
     "sweeps": ("paths.sweeps",),
+    "queue": ("paths.queue",),
 }
+
+#: A record with no default location of its own takes another's when no
+#: level sets it (ADR-027 D10): the queue lives where the backlog does.
+RECORD_FOLLOWS: dict[str, str] = {"queue": "backlog"}
 
 #: Records whose `store` location is refused until the increment that makes
 #: it safe is built, with that reason (ADR-014 D9, Increments). Empty since
@@ -913,6 +1018,7 @@ class Manifest:
         for below_label, level in below:
             _merge(data, level, provenance, below_label)
         _merge(data, raw, provenance, label)
+        _follow_records(data, provenance)
 
         manifest = cls(
             root=Path(root),
@@ -1189,6 +1295,7 @@ class Manifest:
         self._validate_docs_adopt()
         self._validate_agents()
         self._validate_host()
+        self._validate_oracle()
         backend = self.data["items"]["backend"]
         if backend not in {"markdown", "sphinx_needs", "json", "none"}:
             raise ManifestError(f"unknown work-item backend {backend!r}")
@@ -1506,7 +1613,8 @@ class Manifest:
         A key the schema does not know loads, does nothing, and reads in
         `config show` as though it had taken: the BUG_050 shape, so it is
         refused by name. `ruleset`, `baseline` and `checklist` are null or a
-        non-empty path, `instruction_files` null or a non-empty list of them,
+        non-empty path, `instruction_files` null (the host default) or a list
+        of them, empty meaning none (BUG_161),
         `injection.max_lines` an integer of at least 2, `injection.on_edit` a
         boolean, and `verdicts.note_max_chars` a positive integer. Where a path
         points is checked by whatever reads it, against the tree in hand.
@@ -1528,7 +1636,7 @@ class Manifest:
                 )
         files = section.get("instruction_files")
         if files is not None and not (
-            isinstance(files, list) and files and all(_is_path(f) for f in files)
+            isinstance(files, list) and all(_is_path(f) for f in files)
         ):
             # A bare string is refused rather than read as one file: the
             # AUD-08 precedent for every list a manifest declares.
@@ -1942,6 +2050,8 @@ class Manifest:
         `tier_map` maps a tier to one line of text the host adapter hands its
         host. The engine checks the shape and never what the value says, so
         core holds no list of model names (ADR-012 D1 item 3, ruling 10).
+        `window_model` is one line and `forbidden_models` a list of them, each
+        null for the host adapter's default (DEC_ADR_030_D2).
         `kind` is not judged here: which kinds have an adapter is the host
         layer's answer, asked by the commands that need one.
         """
@@ -1969,6 +2079,85 @@ class Manifest:
                 raise ManifestError(
                     f"host.tier_map.{tier} must be one line of text, got {choice!r}"
                 )
+        window = section.get("window_model")
+        if window is not None and not _is_one_line(window):
+            raise ManifestError(
+                f"host.window_model must be one line of text, or null for the host's "
+                f"default, got {window!r}"
+            )
+        forbidden = section.get("forbidden_models")
+        if forbidden is not None and (
+            not isinstance(forbidden, list) or not all(_is_one_line(f) for f in forbidden)
+        ):
+            raise ManifestError(
+                f"host.forbidden_models must be a list of lines of text, [] for none or "
+                f"null for the host's default, got {forbidden!r}"
+            )
+
+    def _validate_oracle(self) -> None:
+        """Refuse an `oracle` key that would load and do nothing (ADR-027 D4).
+
+        A key this build does not read is refused rather than ignored.
+        """
+        section = self.data.get("oracle")
+        if not isinstance(section, Mapping):
+            raise ManifestError(f"oracle must be a mapping, got {section!r}")
+        _refuse_unknown("oracle", section, _ORACLE_KEYS)
+        chain = section.get("chain")
+        if not isinstance(chain, Mapping):
+            raise ManifestError(f"oracle.chain must be a mapping, got {chain!r}")
+        _refuse_unknown("oracle.chain", chain, _CHAIN_KEYS)
+        for key in ("queue", "backlog"):
+            if chain.get(key) not in CHAIN_MODES:
+                raise ManifestError(
+                    f"oracle.chain.{key} is {chain.get(key)!r}; use one of "
+                    f"{', '.join(CHAIN_MODES)}"
+                )
+        cap = chain.get("daily_cap")
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            raise ManifestError(
+                f"oracle.chain.daily_cap is {cap!r}; give a whole number of at least 1, "
+                f"the chained starts a local day may make"
+            )
+        stall = chain.get("stall_after")
+        if isinstance(stall, bool) or not isinstance(stall, (int, float)) or stall <= 0:
+            raise ManifestError(
+                f"oracle.chain.stall_after is {stall!r}; give the hours, a number above 0, "
+                f"a live session may go without activity before it reads stalled"
+            )
+        for key in CHAIN_CLOSE_MINUTES:
+            minutes = chain.get(key)
+            if (isinstance(minutes, bool) or not isinstance(minutes, (int, float))
+                    or minutes <= 0):
+                raise ManifestError(
+                    f"oracle.chain.{key} is {minutes!r}; give the minutes, a number above 0 "
+                    f"(ADR-027 ruling 21)"
+                )
+        asks = chain.get("close_asks")
+        if isinstance(asks, bool) or not isinstance(asks, int) or asks < 1:
+            raise ManifestError(
+                f"oracle.chain.close_asks is {asks!r}; give a whole number of at least 1, "
+                f"the times a landed window is asked whether it may close"
+            )
+        for key in ("mirror", "reproduce_first"):
+            if not isinstance(chain.get(key), bool):
+                raise ManifestError(
+                    f"oracle.chain.{key} is {chain.get(key)!r}; give true or false"
+                )
+        _check_mirror_states(chain.get("mirror_states"))
+        for key, fields in (("prompt", CHAIN_PROMPT_FIELDS),
+                            ("triage_prompt", TRIAGE_PROMPT_FIELDS),
+                            ("reproduce_prompt", REPRODUCE_PROMPT_FIELDS)):
+            problem = _prompt_problem(chain.get(key), fields)
+            if problem:
+                raise ManifestError(f"oracle.chain.{key} {problem}")
+        hours = chain.get("hours")
+        if hours is not None and not _is_hours(hours):
+            raise ManifestError(
+                f"oracle.chain.hours is {hours!r}; leave it null for always, or "
+                f"give [start, end], two different whole hours from 0 to 24 "
+                f"(local time; start later than end wraps past midnight)"
+            )
 
     def scheduled_gates(self) -> frozenset[str]:
         """The gates a sweep cadence has moved off the per-change path.
@@ -2536,6 +2725,85 @@ def _refuse_unknown(where: str, mapping: Mapping[str, Any], known: Sequence[str]
                 f"{where}.{key} is not a key this build reads; it reads "
                 f"{', '.join(where + '.' + k for k in known)}."
             )
+
+
+def _check_mirror_states(value: Any) -> None:
+    """``oracle.chain.mirror_states``: null, or item type -> the states mirrored.
+
+    The shape is checked here; whether each state is one its machine has is
+    checked when the mirror runs, since a project's own machine is read then
+    (ADR-027 increment 5).
+    """
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise ManifestError(
+            f"oracle.chain.mirror_states is {value!r}; leave it null for each item "
+            f"machine's mirror role, or map an item type ({', '.join(ITEM_ROLES)}) to "
+            f"the states whose items go on the queue"
+        )
+    for item_type, states in value.items():
+        if item_type not in ITEM_ROLES:
+            raise ManifestError(
+                f"oracle.chain.mirror_states names {item_type!r}; the item types are "
+                f"{', '.join(ITEM_ROLES)}"
+            )
+        if (not isinstance(states, list) or not states
+                or not all(isinstance(s, str) and s.strip() for s in states)):
+            raise ManifestError(
+                f"oracle.chain.mirror_states.{item_type} is {states!r}; give a list of "
+                f"one or more state names"
+            )
+
+
+def _prompt_problem(value: Any, fields: Sequence[str]) -> str | None:
+    """Why ``value`` is no prompt template naming only ``fields``; ``None`` if it is.
+
+    Null takes the shipped default. A template is one line of text whose
+    placeholders are bare names from ``fields``; a literal brace is doubled.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return f"is {value!r}; give one line of text, or null for the default"
+    if "\n" in value or "\r" in value:
+        return "is one line: it becomes a first prompt or a queue brief"
+    allowed = ", ".join("{" + f + "}" for f in fields)
+    try:
+        parsed = list(string.Formatter().parse(value))
+    except ValueError as exc:
+        return f"is not a template ({exc}); double a literal brace"
+    for _, name, spec, conversion in parsed:
+        if name is None:
+            continue
+        if name not in fields or spec or conversion:
+            return f"names {{{name}}}; it may name {allowed}"
+    return None
+
+
+def _is_hours(value: Any) -> bool:
+    """``[start, end]``: two different whole hours from 0 to 24."""
+    if not isinstance(value, list) or len(value) != 2:
+        return False
+    if not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 24 for h in value):
+        return False
+    return value[0] != value[1]
+
+
+def _follow_records(data: dict[str, Any], provenance: dict[str, str]) -> None:
+    """Give a record no level placed the location of the record it follows.
+
+    ADR-027 D10: ``records.queue`` unset is ``records.backlog``'s value, so a
+    store project keeps its queue in the store and a repo project in the repo.
+    Provenance names the record it followed, which ``config show`` prints.
+    """
+    records = data.get("records")
+    if not isinstance(records, dict):
+        return
+    for record, leader in RECORD_FOLLOWS.items():
+        if record not in records and leader in records:
+            records[record] = records[leader]
+            provenance[f"records.{record}"] = f"default (follows records.{leader})"
 
 
 def _is_path(value: Any) -> bool:

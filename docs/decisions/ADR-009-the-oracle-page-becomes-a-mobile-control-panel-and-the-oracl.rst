@@ -18,7 +18,14 @@ ADR-009 — The oracle page becomes a mobile control panel, and the oracle gains
      BUG_078 and IDEA_024, have shipped. D16, the oracle starting a new Claude
      window (IDEA_030), was added on 2026-10-26; its CLI core and shared
      launcher shipped with IDEA_030 increment 1, the panel's sheet with
-     increment 2, and the TUI key with increment 3. IDEA_029's transcript decision is D17.
+     increment 2, and the TUI key with increment 3. D17, the transcript
+     decision IDEA_029 reserved here, was written on 2026-11-20 with ADR-029
+     (IDEA_060, which took in IDEA_029's Read half), accepted with it on
+     2026-11-20 (ruling: user), and built with ADR-029 increment 1, the
+     last-message excerpt; the page's drop after 60 seconds in the background
+     comes with ADR-029 increment 2. ADR-029, accepted, now amends D1, D2, D3,
+     D6, D8 and D16, each for its own talk path as built increment by
+     increment.
      The design of record (screens, components, tokens, wording) is
      :doc:`oracle-panel.md </architecture/oracle-panel>`.
    - **Date:** 2026-10-23
@@ -576,7 +583,10 @@ Decisions recorded
      (``MMDD-HHMM``, local). A name a live Claude window holds, in Claude Code's
      per-process records or in the process table, gets ``-2``, ``-3``, the user's
      choice over refusing it. ``LaunchPlan`` refuses an argv without the pair
-     (ADR-005 D3).
+     (ADR-005 D3). *Amended 2026-11-21 by* :need:`DEC_ADR_030_D6` *(ruling:
+     user): the command line carries* ``--model <model>`` *before the prompt,
+     the configured window model unless the person chose one, and a model the
+     forbidden-model list holds is refused.*
    - **Claude's default permission mode only.** There is no mode picker. The
      command never carries ``--dangerously-skip-permissions``,
      ``--allow-dangerously-skip-permissions`` or ``--permission-mode``:
@@ -622,6 +632,49 @@ Decisions recorded
    start in the same minute is ordinary. *Rejected:* creating the invariant
    session first. It would bind a session to a window that may never start,
    and Claude starts the session in its own turn.
+
+.. dec:: A session's own text reaches paired devices only, capped, as plain text, and is stored nowhere
+   :id: DEC_ADR_009_D17
+   :status: accepted
+   :part_of: DEC_ADR_009
+   :affects: COMP_ORACLE_WEB, COMP_ORACLE_WEBPAGE, COMP_ORACLE_PANEL, COMP_HOSTS_CLAUDE_CODE_TELEMETRY, COMP_HOSTS_CLAUDE_CODE_TALK, COMP_ORACLE_TALK
+
+   *Written 2026-11-20 with ADR-029 and accepted with it the same day
+   (ruling: user); built with ADR-029 increment 1, and the page's drop in
+   the background with its increment 2 (:need:`DEC_ADR_029_D24`). IDEA_029 reserved
+   this number for its transcript decision; IDEA_060 took in IDEA_029's Read
+   half, and the user settled it in ADR-029's rulings 7 (2026-11-19), 13
+   and 14 (2026-11-20). It is written here, where the number was reserved, rather than
+   as a decision of ADR-029, which reads and draws the text
+   (:need:`DEC_ADR_029_D11`).*
+
+   Transcript text on a phone is content the oracle has never served: the
+   last-message excerpt and, with ADR-029, a session's recent conversation.
+   It is bounded as follows.
+
+   - **Paired devices only.** It is served only on a request whose token
+     verifies (ADR-008 D4), checked before any transcript is read. An
+     unpaired request gets the "not paired" page and no text from any route.
+   - **Stored nowhere.** No transcript text is written to any oracle file,
+     log or record: not the ``assess`` document, the watcher's snapshot,
+     ``oracle list``'s output, the audit log, the chain ledger, a
+     notification or a web push payload (ADR-027 ruling 17 already keeps it
+     out of push). The web server holds only the live read: the request's own
+     read and the transcript reader's in-memory tail. Every response is
+     ``Cache-Control: no-store`` as today, so the browser keeps no copy, and
+     the page drops the text from its memory and its screen once it has been
+     in the background for 60 seconds, reading it again when it comes back.
+   - **No masking.** The user's ruling (2026-11-20): the text is shown as it
+     is. The project's privacy patterns are not applied to it, which settles
+     IDEA_029's open question on redaction.
+   - **Capped.** The reader walks back at most the tail reader's 2 MiB. An
+     entry's text is cut at 20 000 characters, a conversation read is at most
+     40 entries and 512 KiB, a card shows at most three lines.
+   - **Plain text.** The page puts the text into text nodes and never into
+     markup: no HTML, no markdown rendering, no link made live, whatever the
+     text holds. Text containing ``<script>`` or a markdown link displays as
+     those characters and runs nothing. The Content-Security-Policy is
+     unchanged, so nothing loads from another origin.
 
 Alternatives rejected
 ---------------------

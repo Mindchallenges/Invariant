@@ -649,7 +649,8 @@ class TestTheTierOverride:
 
 
 class TestTheHostKeys:
-    """`host.kind` and `host.tier_map` are the keys; any other is refused at
+    """`host.kind`, `host.tier_map`, `host.window_model` and
+    `host.forbidden_models` (ADR-030 D2) are the keys; any other is refused at
     load (the A7 rulings 4 and 14). A host key nobody reads used to load and
     do nothing, the BUG_050 shape."""
 
@@ -667,7 +668,8 @@ class TestTheHostKeys:
         assert minimal.get("host.tier_map") == {}
 
     def test_a_manifest_with_no_host_section_loads(self, minimal):
-        assert minimal.get("host") == {"kind": "claude_code", "tier_map": {}}
+        assert minimal.get("host") == {"kind": "claude_code", "tier_map": {},
+                                       "window_model": None, "forbidden_models": None}
 
     def test_a_host_section_with_only_kind_loads(self, tmp_path):
         assert self.load(tmp_path, {"kind": "claude_code"}).get("host.kind") == "claude_code"
@@ -681,6 +683,7 @@ class TestTheHostKeys:
         text = self.refused(tmp_path, {"kind": "claude_code", key: "x"})
         assert f"host.{key} " in text
         assert "host.kind" in text and "host.tier_map" in text
+        assert "host.window_model" in text and "host.forbidden_models" in text
 
     @pytest.mark.parametrize("value", [["claude_code"], "claude_code", None, 3])
     def test_host_is_a_mapping(self, tmp_path, value):

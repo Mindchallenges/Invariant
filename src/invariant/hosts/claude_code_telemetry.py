@@ -92,7 +92,7 @@ def claude_home() -> Path:
     return Path(os.environ.get(CLAUDE_HOME_ENV) or (Path.home() / ".claude"))
 
 
-def _parse_timestamp(raw) -> float | None:
+def parse_timestamp(raw) -> float | None:
     """A time, or ``None``. Never an exception, and never a reason to skip.
 
     A record whose time will not parse still spent tokens. The prior-art sketch
@@ -205,7 +205,7 @@ def _sample_from(line: str, fallback_id: str) -> Sample | None:
     session_id = record.get("sessionId")
     return Sample(
         host_session_id=str(session_id) if session_id else fallback_id,
-        timestamp=_parse_timestamp(record.get("timestamp")),
+        timestamp=parse_timestamp(record.get("timestamp")),
         model=model,
         usage=_usage_from(usage_raw),
         tools=tools,
@@ -230,6 +230,13 @@ class TranscriptTurn:
     text: str
     truncated: bool
     sidechain: bool
+    #: On an entry Claude Code wrote for a failed request (``isApiErrorMessage``):
+    #: its ``error`` code (``rate_limit``, ``authentication_failed``, ...), and
+    #: for a usage limit the ``quotaLimits`` window (``five_hour`` or
+    #: ``seven_day``) and when it resets, as an epoch (ADR-027 D7).
+    error: str | None = None
+    limit: str | None = None
+    resets_at: float | None = None
 
 
 def _text_of(message, cap: int) -> tuple[str, bool]:
@@ -264,17 +271,42 @@ def _turn_from(raw: bytes, cap: int) -> TranscriptTurn | None:
         return None
     if not isinstance(record, dict) or record.get("type") not in TURN_TYPES:
         return None
-    timestamp = _parse_timestamp(record.get("timestamp"))
+    timestamp = parse_timestamp(record.get("timestamp"))
     if timestamp is None:
         return None
     text, truncated = _text_of(record.get("message"), cap)
+    error = limit = resets_at = None
+    if record.get("isApiErrorMessage") is True:
+        error = record.get("error") if isinstance(record.get("error"), str) else "api_error"
+        quota = record.get("quotaLimits")
+        if isinstance(quota, dict):
+            kind = quota.get("rateLimitType")
+            limit = kind if isinstance(kind, str) else None
+            resets = quota.get("resetsAt")
+            if isinstance(resets, (int, float)) and not isinstance(resets, bool):
+                resets_at = float(resets)
     return TranscriptTurn(
         role=record["type"],
         timestamp=timestamp,
         text=text,
         truncated=truncated,
         sidechain=record.get("isSidechain") is True,
+        error=error,
+        limit=limit,
+        resets_at=resets_at,
     )
+
+
+def turn_end(turn: TranscriptTurn | None) -> dict | None:
+    """How a host's last turn ended, when it ended on a failed request.
+
+    ``{error, limit, resets_at}``, the host-neutral fact the oracle's stall
+    diagnosis reads (ADR-027 D7): ``limit`` names a usage limit's window and
+    ``resets_at`` when it resets. ``None`` for a turn that ended any other way.
+    """
+    if turn is None or turn.error is None:
+        return None
+    return {"error": turn.error, "limit": turn.limit, "resets_at": turn.resets_at}
 
 
 def last_turn(
@@ -310,18 +342,20 @@ def last_turn(
 
     try:
         with Path(path).open("rb") as handle:
-            return _scan_tail(handle, parse, block_size, budget)
+            return scan_tail(handle, parse, block_size, budget)
     except OSError:
         return None
 
 
-def _scan_tail(
+def scan_tail(
     handle, parse: Callable[[bytes], T | None], block_size: int, budget: int
 ) -> T | None:
     """The newest complete line ``parse`` answers for, read from the end.
 
     The open-tail, join-across-blocks and budget rules :func:`last_turn` names
-    live here, for every reader of a tail.
+    live here, for every reader of a tail: this module's, and
+    ``claude_code_talk``'s read of a window's conversation (ADR-029 D4), whose
+    ``parse`` collects as it goes and answers only to stop.
     """
     position = os.fstat(handle.fileno()).st_size
     pending = b""
@@ -380,7 +414,7 @@ def last_model(
     """
     try:
         with Path(path).open("rb") as handle:
-            return _scan_tail(handle, _model_from, block_size, budget)
+            return scan_tail(handle, _model_from, block_size, budget)
     except (OSError, ValueError):
         return None
 
@@ -524,7 +558,7 @@ class ClaudeCodeTranscripts:
         self.origin = Path(origin) if origin is not None else None
         self._home = Path(home) if home is not None else None
         self._roots: list[tuple[str, Path]] | None = None
-        self._turns: dict[Path, tuple[tuple[int, int], float | None]] = {}
+        self._turns: dict[Path, tuple[tuple[int, int], float | None, dict | None]] = {}
 
     @property
     def home(self) -> Path:
@@ -655,15 +689,38 @@ class ClaudeCodeTranscripts:
             return None
         if newer_than is not None and stat.st_mtime <= newer_than:
             return None
+        turn_at, _ = self._read(path, stat)
+        return turn_at if turn_at is not None else stat.st_mtime
+
+    def _read(self, path: Path, stat) -> tuple[float | None, dict | None]:
+        """``path``'s last turn and how it ended, remembered against its size and mtime."""
         key = (stat.st_size, stat.st_mtime_ns)
         remembered = self._turns.get(path)
         if remembered is not None and remembered[0] == key:
-            turn_at = remembered[1]
-        else:
-            found = last_turn(path)
-            turn_at = found.timestamp if found is not None else None
-            self._turns[path] = (key, turn_at)
-        return turn_at if turn_at is not None else stat.st_mtime
+            return remembered[1], remembered[2]
+        found = last_turn(path)
+        turn_at = found.timestamp if found is not None else None
+        end = turn_end(found)
+        self._turns[path] = (key, turn_at, end)
+        return turn_at, end
+
+    def turn_ends(self) -> dict[str, dict]:
+        """Host session id to how its last turn ended, for the hosts whose last
+        turn was a failed request: an error, or a usage limit with its reset
+        (:func:`turn_end`). Read by the oracle's stall diagnosis through the
+        probe (ADR-027 D7). The main transcript answers, from the same
+        remembered tail :meth:`activity` reads, so it costs no extra read.
+        """
+        ends: dict[str, dict] = {}
+        for path in self.paths():
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            _, end = self._read(path, stat)
+            if end is not None:
+                ends[path.stem] = end
+        return ends
 
     def sessions(self) -> list[SourceRef]:
         return [

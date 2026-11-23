@@ -1,7 +1,8 @@
 # invariant's own guidelines ruleset (ADR-012 D3, IDEA_031 A3 increment 9).
 # The checklist beside it is generated: edit this file, then run
 # `invariant guidelines render`.
-version: 1
+version: 2
+catalogue: patterns.yaml
 sections:
   - id: layers
     title: Layering
@@ -9,6 +10,29 @@ sections:
     title: Agent conduct
   - id: docs
     title: Design records
+  - id: solid
+    title: SOLID principles
+  - id: patterns
+    title: Design patterns
+layers:
+  # Innermost first. Map each layer's folders or globs in paths; an inner
+  # layer never imports an outer one, and one rule per layer is derived from
+  # this map. A layer with no paths derives nothing yet.
+  owner: user
+  origin: {set: defaults, version: 1, digest: "9166d53d10de"}
+  map:
+    - id: entities
+      title: Entities
+      paths: ["src/invariant/core/**"]
+    - id: use-cases
+      title: Use Cases
+      paths: ["src/invariant/domains/**"]
+    - id: interface-adapters
+      title: Interface Adapters
+      paths: ["src/invariant/adapters/**", "src/invariant/hosts/**"]
+    - id: frameworks-drivers
+      title: Frameworks & Drivers
+      paths: ["src/invariant/oracle/**", "src/invariant/cli/**"]
 rules:
   - id: layers.only-the-cli-imports-the-oracle
     section: layers
@@ -133,3 +157,187 @@ rules:
       decisions add) and write it as a need. docs.decisions_recorded holds
       the declared ones at the landing; a decision nobody declared is
       visible only to this review.
+  - id: solid.single-responsibility
+    section: solid
+    title: Single responsibility
+    statement: |
+      Each module, type and function a change adds or edits has one reason to
+      change: it answers to one owner, named in the architecture docs.
+
+      Fix: split the unit along its owners and name each part's owner in the
+      docs; a unit doing two things for two callers is two units.
+    severity: blocker
+    owner: user
+    phases: [design, review, landing]
+    applies_to:
+      - "**/*.py"
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: no_executable_change
+          mechanical: {no_executable_change: true}
+    rationale: >
+      It keeps a change isolated to the one owner who asked for it, so a
+      change for one caller cannot break another. The component
+      responsibilities in the architecture overview are where each unit's
+      owner is named.
+    origin: {set: defaults, version: 1, digest: "d89df7d73d4b"}
+  - id: solid.open-closed
+    section: solid
+    title: Open/closed
+    statement: |
+      New behaviour is added by extension (a new implementation of an existing
+      seam, a new data entry, a new strategy), not by growing a conditional
+      over kinds inside code that already works.
+
+      Fix: where a change adds a branch on a type or kind tag, introduce or
+      reuse the seam and add the new case as its implementation.
+    severity: blocker
+    owner: user
+    phases: [design, review, landing]
+    applies_to:
+      - "**/*.py"
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: no_executable_change
+          mechanical: {no_executable_change: true}
+    rationale: >
+      It leaves working code untouched when a new case arrives, so what was
+      tested stays as it was tested. The seams a component offers are named
+      in its responsibilities in the architecture overview.
+    origin: {set: defaults, version: 1, digest: "e72b922ed350"}
+  - id: solid.liskov-substitution
+    section: solid
+    title: Liskov substitution
+    statement: |
+      Every implementation of an interface or subclass honours its contract:
+      it accepts what the base accepts, promises what it promises, and raises
+      nothing the base does not declare. No caller checks which implementation
+      it holds.
+
+      Fix: where an implementation narrows input, weakens output or is
+      type-checked by a caller, change the contract in the docs or stop
+      implementing it.
+    severity: blocker
+    owner: user
+    phases: [design, review, landing]
+    applies_to:
+      - "**/*.py"
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: no_executable_change
+          mechanical: {no_executable_change: true}
+    rationale: >
+      It keeps every seam substitutable, so a caller written against the
+      contract works with any implementation. A contract lives with the
+      component that owns it in the architecture overview.
+    origin: {set: defaults, version: 1, digest: "1fb1cc8466d8"}
+  - id: solid.interface-segregation
+    section: solid
+    title: Interface segregation
+    statement: |
+      A client depends only on the operations it uses. An interface a change
+      adds or widens is shaped by its callers, and no implementation is forced
+      to stub operations it cannot honour.
+
+      Fix: split the interface by client role; let each caller depend on its
+      own role.
+    severity: blocker
+    owner: user
+    phases: [design, review, landing]
+    applies_to:
+      - "**/*.py"
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: no_executable_change
+          mechanical: {no_executable_change: true}
+    rationale: >
+      It keeps coupling narrow, so a change to one caller's needs does not
+      ripple into callers that never used it. Each client role is named with
+      its component in the architecture overview.
+    origin: {set: defaults, version: 1, digest: "7f780d21e0af"}
+  - id: solid.dependency-inversion
+    section: solid
+    title: Dependency inversion
+    statement: |
+      Policy depends on abstractions it owns; details implement them and are
+      injected at the composition root. No high-level unit constructs or looks
+      up a concrete detail.
+
+      Fix: define the abstraction where the policy lives, implement it
+      outward, and inject it from the entry point. The import-visible half is
+      the derived layer rules'.
+    severity: blocker
+    owner: user
+    phases: [design, review, landing]
+    applies_to:
+      - "**/*.py"
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+      not_applicable_when:
+        - id: no_executable_change
+          mechanical: {no_executable_change: true}
+    rationale: >
+      It keeps policy testable without its details, which arrive through an
+      injected abstraction rather than a constructor call or a lookup. The
+      architecture overview names which component owns each abstraction.
+    origin: {set: defaults, version: 1, digest: "33a68312294d"}
+  - id: patterns.named-or-declined
+    section: patterns
+    title: A new abstraction names its pattern or says why none fits
+    statement: |
+      Every new abstraction a change introduces (an interface, protocol, base
+      class, or a type that mediates between two others) names in its design
+      the catalogue pattern it applies, or states why none fits.
+
+      Fix: name the pattern by its id in the catalogue (patterns.rst) in the
+      design, or write one sentence on why no pattern fits.
+    severity: warn
+    owner: user
+    phases: [design, review]
+    applies_to:
+      - "**/*.py"
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+    rationale: >
+      A named pattern tells the next reader what the abstraction is for and
+      which forces it balances; a stated refusal tells them it was weighed.
+    origin: {set: defaults, version: 1, digest: "ac3c0a7202da"}
+  - id: docs.design-before-code
+    section: docs
+    title: The design documents are updated before the code
+    statement: |
+      Read the architecture docs, update the design documents (diagram,
+      component responsibilities, decision needs) to describe the change, then
+      implement; the design documents stay level with or ahead of the code.
+
+      Fix: update the design documents to describe what the change builds,
+      in the same change, before the code they describe.
+    severity: warn
+    owner: user
+    phases: [design, review]
+    applies_to:
+      - "**/*.py"
+    check:
+      kind: judgement
+      evidence: citation
+      scope: diff
+    rationale: >
+      The design documents are where the next change starts; a design
+      written after the code records what was built, not what was decided.
+    origin: {set: defaults, version: 1, digest: "bbd2a61ee39c"}

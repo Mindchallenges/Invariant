@@ -520,10 +520,88 @@ class TestTheGate:
         verdict = gate(context(repo)).verdict
         assert verdict.ok and "no judgement guideline is owed" in verdict.message
 
-    def test_a_ruleset_edited_mid_pipeline_makes_verdicts_stale(self, repo):
+    def test_a_rule_edited_mid_pipeline_makes_its_verdict_stale(self, repo):
+        """DN-6's guard, as amended (DEC_ADR_012_B115): the change edits a rule
+        the pin holds, so the verdict on it no longer holds; the others do."""
+        write(repo, "app/m.py", "x = 1\ny = 2\n")
+        runs = [green(SELECTOR)]
+        recorded = every_pass(repo, runs)
+        write(repo, RULESET_REL, RULESET.replace(
+            "No code path holds two store handles at once.", "Two handles are fine.",
+        ))
+        verdict = gate(context(repo, pipe=pipeline(verdicts_=recorded, runs=runs))).verdict
+        assert not verdict.ok and "DN-6" in verdict.message
+        assert "data.single-open" in verdict.message
+        assert "data.tested" not in verdict.message and "style.explained" not in verdict.message
+
+    def test_an_edit_elsewhere_in_the_ruleset_leaves_verdicts_current(self, repo):
+        """D3: a mid-pipeline edit does not change an untouched rule's obligation."""
         write(repo, "app/m.py", "x = 1\ny = 2\n")
         runs = [green(SELECTOR)]
         recorded = every_pass(repo, runs)
         write(repo, RULESET_REL, RULESET.replace("Code never prints.", "Code never prints!"))
         verdict = gate(context(repo, pipe=pipeline(verdicts_=recorded, runs=runs))).verdict
-        assert not verdict.ok and "DN-6" in verdict.message
+        assert verdict.ok, verdict.message
+
+
+# -- BUG_115: a change that adds a judgement guideline ----------------------------------------------
+
+ADDED_RULE = """\
+  - id: conduct.interview
+    section: style
+    title: Interview the user when their input is needed
+    statement: A decision that is the user's is asked, not guessed.
+    severity: blocker
+    phases: [always]
+    applies_to: ["CLAUDE.md"]
+    check:
+      kind: judgement
+      evidence: citation
+      scope: file
+"""
+
+
+class TestBUG115:
+    # Repro for BUG_115, now the fix's definition of done (DEC_ADR_012_B115).
+    def test_BUG_115_a_rule_the_change_adds_can_be_answered_by_a_recorded_verdict(self, repo):
+        """The symptom, not a design: the pipeline pinned the ruleset as it was at
+        start; the change adds a judgement guideline whose `applies_to` meets a
+        file the same change creates, so the rule is owed. A pass on it, citing
+        that file, must be accepted at submission, and with it recorded,
+        `guidelines.verdicts_complete` must pass, with no override anywhere."""
+        write(repo, RULESET_REL, RULESET + ADDED_RULE)
+        write(repo, "CLAUDE.md", "Ask the user.\nWith concrete options.\n")
+        sh(repo, "add", RULESET_REL, "CLAUDE.md")
+        sh(repo, "commit", "-qm", "add a guideline and the file it governs")
+        pin = pipeline()  # the ruleset as pinned at start, before the change
+        assert pin["ruleset"]["digest"] == DIGEST
+
+        plan = plan_verdicts(context(repo, pipe=pin), [
+            {"rule": "conduct.interview", "status": "pass",
+             "citations": [{"path": "CLAUDE.md", "lines": [1, 2]}]},
+        ])
+        assert plan.ok, [str(p) for p in plan.problems]
+
+        recorded = [r.record() for r in plan.records]
+        verdict = gate(context(repo, pipe=pipeline(verdicts_=recorded))).verdict
+        assert verdict.ok, verdict.message
+
+    def test_a_verdict_on_an_added_rule_goes_stale_when_the_ruleset_moves_again(self, repo):
+        """The added rule was judged against the tree's ruleset, so a later edit
+        of the ruleset makes it stale (P1), as any edited ruleset did before."""
+        write(repo, RULESET_REL, RULESET + ADDED_RULE)
+        write(repo, "CLAUDE.md", "Ask the user.\nWith concrete options.\n")
+        sh(repo, "add", RULESET_REL, "CLAUDE.md")
+        sh(repo, "commit", "-qm", "add a guideline and the file it governs")
+        pin = pipeline()
+        plan = plan_verdicts(context(repo, pipe=pin), [
+            {"rule": "conduct.interview", "status": "pass",
+             "citations": [{"path": "CLAUDE.md", "lines": [1, 2]}]},
+        ])
+        assert plan.ok, [str(p) for p in plan.problems]
+        recorded = [r.record() for r in plan.records]
+        assert recorded[0]["ruleset"] != DIGEST
+        write(repo, RULESET_REL, RULESET + ADDED_RULE.replace("is asked, not", "may be"))
+        verdict = gate(context(repo, pipe=pipeline(verdicts_=recorded))).verdict
+        assert not verdict.ok
+        assert "conduct.interview" in verdict.message and "P1" in verdict.message

@@ -191,6 +191,7 @@ def evaluate_row(
     agent_plan_for: Callable[[Manifest], Callable[[], Sequence[AgentCopy]] | None] = (
         lambda manifest: None
     ),
+    forbidden_for: Callable[[Manifest], tuple[str, ...]] = lambda manifest: (),
 ) -> Mapping[str, list[Evaluated]]:
     """``pipeline gates`` for the session ``row`` names, as its worktree sees it.
 
@@ -203,7 +204,9 @@ def evaluate_row(
     imports no host. ``agent_plan_for`` answers the host adapter's agent
     install plan for a manifest, or ``None`` with no adapter, which
     ``agents.rendered_current`` at the landing reads (ADR-012 D8); the CLI
-    supplies that too.
+    supplies that too. ``forbidden_for`` answers the forbidden-model list in
+    force, the host adapter's default included, which the agent gates read
+    (DEC_ADR_030_D4); the CLI supplies it as well.
     """
     workdir = _workdir(row)
     if workdir is None:
@@ -218,6 +221,7 @@ def evaluate_row(
             store=store,
             host_instruction_files=instruction_files_for(manifest),
             host_agent_plan=agent_plan_for(manifest),
+            forbidden_models=forbidden_for(manifest),
         ).evaluate_gates_by_destination(
             row.session_id,
             session=session.to_dict() if session is not None else None,

@@ -32,6 +32,14 @@ ADR-012 — The guidelines domain, and the model-agnostic contract it rests on
      gave is corrected: the ``docs`` scope keyword reaches ``paths.docs``
      alone, so the ruleset file is screened only where ``privacy.scope``
      names its folder. Ruling 1, D3 and D13 are amended in place.
+   - **Amended 2026-11-22 for BUG_115** by :need:`DEC_ADR_012_B115`: DN-6
+     judges a rule the pin lacks against the tree's ruleset, and the pin
+     governs every rule it holds, so a change that adds a judgement guideline
+     can answer it with a recorded verdict.
+   - **Amended 2026-11-23 for BUG_161** by :need:`DEC_ADR_012_B161`:
+     ``guidelines.instruction_files`` may be an empty list, meaning no
+     instruction file, so a project whose host default is exempt from
+     isolation can render; the always-layer warning stays silent for it.
    - **Date:** 2026-10-27
    - **Supersedes:** nothing. Extends ADR-001 (scripted state over prose rules)
      from the workflow to the coding guidelines themselves, and ADR-003 (where an
@@ -275,7 +283,12 @@ Decisions
       stamps under the engine, vary the tier configuration, and rename the role's
       agents consistently, and require identical outcomes. That proves engine
       independence only. Whether two models given one brief reach one verdict is
-      the driven layer's question (D11).
+      the driven layer's question (D11). *Amended 2026-11-21 by*
+      :need:`DEC_ADR_030_D4` *(ruling: user): one fact is derived from the
+      audit record before it is removed, whether the configured forbidden-model
+      list holds an agent's model, and the agent gates read that membership;
+      the test permutes everything else and shows membership alone moving an
+      outcome.*
    3. **What an agent needs from a model is a capability tier, never a model
       id.** A tier is a hint the host adapter may act on (D9). No shipped asset
       depends on a model. ``core/stats``' price table names models to put a price on
@@ -299,6 +312,13 @@ Decisions
    :status: accepted
    :part_of: DEC_ADR_012
    :affects: COMP_CORE_GUIDELINES, COMP_DOMAINS_GUIDELINES, COMP_CORE_FINDINGS, COMP_CORE_VERDICTS
+
+   *Amended 2026-11-22 by* :need:`DEC_ADR_032_D7` *(ADR-032, ruling: user; not
+   yet built).* Rules a ruleset marks ``owner: user`` (every default ADR-032
+   adds) are excepted, loosened or reworded by the user alone, through a ruling
+   recorded with ``by``, ``date`` and ``reason``; an agent proposes. The
+   defaults are copied into the project's ruleset (:need:`DEC_ADR_032_D8`) and
+   are the project's content from then on.
 
    +----------------------------------+----------------------------------+
    | Owned by invariant               | Owned by the project             |
@@ -337,6 +357,12 @@ Decisions
    :status: accepted
    :part_of: DEC_ADR_012
    :affects: COMP_CORE_MACHINES, COMP_CORE_RULES, COMP_CORE_GUIDELINES, COMP_DOMAINS_GUIDELINES, COMP_HOSTS_CLAUDE_CODE
+
+   *Amended 2026-11-22 by* :need:`DEC_ADR_032_D2` *(ADR-032, ruling: user; not
+   yet built).* The ruleset schema becomes version 2: an optional layer map
+   from which one direction rule per layer is derived, the ``owner``, ``ruled``
+   and ``origin`` rule keys, and a ``catalogue`` file rendered beside the rules
+   page (:need:`DEC_ADR_032_D5`). Version 1 loads unchanged.
 
    **Amended 2026-11-11 by** :need:`DEC_ADR_020_D10` **(ADR-020 ruling 9).**
    The default place below holds for existing projects. A new project's
@@ -681,7 +707,8 @@ Decisions
    D3, ruling 8 and DN-C.
 
    - *The manifest.* ``guidelines.instruction_files`` is null or a non-empty list
-     of paths, and a bare string is refused. ``guidelines.injection`` is a mapping
+     of paths, and a bare string is refused. (Amended for BUG_161 by
+     :need:`DEC_ADR_012_B161`: an empty list is accepted and means none.) ``guidelines.injection`` is a mapping
      whose one key is ``max_lines``, default 40, an integer of at least 2. D13's
      ``on_edit`` is refused by name until A5 reads it, as are ``baseline`` and
      ``verdicts``.
@@ -873,11 +900,48 @@ Decisions
      the field back. The state model needed no version bump.
    - *Tests.* ``tests/test_guidelines_pin.py``.
 
+.. dec:: An empty instruction_files list means no instruction file
+   :id: DEC_ADR_012_B161
+   :status: accepted
+   :part_of: DEC_ADR_012
+   :amends: DEC_ADR_012_D3
+   :affects: COMP_CORE_MANIFEST, COMP_CORE_RULES
+
+   BUG_161. ``guidelines.instruction_files`` could not say "none": null is
+   the host adapter's default (``CLAUDE.md`` for claude_code), and an empty
+   list was refused at load. A project that exempts its ``CLAUDE.md`` from
+   session isolation therefore had ``guidelines render`` refused (ruling 13:
+   a generated file is never exempt), with no setting that let it render the
+   checklist alone.
+
+   - *The manifest.* ``instruction_files`` is null, meaning the host default,
+     or a list of non-empty paths, and an empty list means no instruction
+     file. A bare string and an empty entry are still refused.
+   - *Render and drift.* With no file named, render writes the checklist and
+     no block, and ``guidelines.generated_current`` checks the checklist
+     alone; both already read the list as given, so only the load changed.
+   - *The refusal.* An instruction file exempt from isolation is still
+     refused. When it is the host default (the key null), the fix names
+     ``guidelines.instruction_files: []``, or a file outside the exemptions;
+     a file the project named itself keeps the old fix.
+   - *The always layer.* The A5 ruling D12 warning is silent for an explicit
+     empty list, as it is under ``records.agents: local``: the project chose
+     no standing block, and the turn index carries the always rules on every
+     turn. Null with a host that has no default still warns and names the
+     key.
+   - *Tests.* ``tests/test_bug_161_empty_instruction_files.py`` and
+     ``tests/test_guidelines.py``.
+
 .. dec:: Five check kinds; v1 ships four of them in full and one in part
    :id: DEC_ADR_012_D4
    :status: accepted
    :part_of: DEC_ADR_012
    :affects: COMP_CORE_FINDINGS, COMP_CORE_GIT, COMP_CORE_MANIFEST, COMP_CORE_MACHINES, COMP_CORE_RULES, COMP_CORE_GUIDELINES, COMP_DOMAINS_GUIDELINES, COMP_HOSTS_CLAUDE_CODE, COMP_CLI_MAIN, COMP_MANIFEST_FILE
+
+   *Amended 2026-11-22 by* :need:`DEC_ADR_032_D3` *(ADR-032, ruling: user; not
+   yet built).* The ``boundary`` kind gains a ``fitness`` engine that reads a
+   project's own recorded test run, and the Dart and node adapters answer
+   ``imports``.
 
    +---------------+-----------------+-------------------+-----------------+
    | Kind          | Question it     | Evaluated by      | v1              |
@@ -1803,6 +1867,12 @@ Decisions
    :part_of: DEC_ADR_012
    :affects: COMP_CORE_FINDINGS, COMP_CORE_MACHINES, COMP_CORE_RULES, COMP_CORE_VERDICTS, COMP_CORE_CONFORMANCE, COMP_DOMAINS_PIPELINE, COMP_DOMAINS_GUIDELINES, COMP_HOSTS_CLAUDE_CODE, COMP_CLI_CONFORMANCE, COMP_CLI_MAIN
 
+   *Amended 2026-11-22 by* :need:`DEC_ADR_032_D7` *(ADR-032, ruling: user; not
+   yet built).* A submitted ``na`` verdict on an ``owner: user`` rule is
+   refused (only the engine's mechanical N/A conditions answer one), and
+   ``guidelines.blocking_verdicts`` holds a blocker rule's missing, stale or
+   failing verdict at ``block`` in ``standard``.
+
    **The schema.** One verdict per applicable judgement rule, submitted through
    the CLI, so any host, a script or a person can produce one:
 
@@ -1869,6 +1939,9 @@ Decisions
    **Staleness.** A verdict whose cited file's blob has changed since submission
    is stale, and the gate treats it as missing. The fix is a fresh verdict on the
    new lines. A ruleset hash different from the pipeline's pin is the same case.
+   (Amended for BUG_115, :need:`DEC_ADR_012_B115`: the pin governs only the
+   rules it holds, so an edit of one rule no longer stales the verdicts on the
+   others, and a rule the change adds is judged against the tree.)
 
    **The gate.** ``guidelines.verdicts_complete`` sits on the landing state's entry,
    injected by role exactly as ``agents.review_agent_ran`` is (ADR-003, BUG_037).
@@ -1937,6 +2010,13 @@ Decisions
    |       |                              | repins. A pin with a null    |
    |       |                              | digest, or no pin, compares  |
    |       |                              | against the tree's digest.   |
+   |       |                              | *Amended for BUG_115*        |
+   |       |                              | (DEC_ADR_012_B115): a rule   |
+   |       |                              | the pin lacks is judged      |
+   |       |                              | against the tree, a rule the |
+   |       |                              | pin holds unchanged against  |
+   |       |                              | the pin, and only a rule the |
+   |       |                              | change edited is refused.    |
    +-------+------------------------------+------------------------------+
    | DN-7  | The landing's guidelines     | Saved into pipeline evidence |
    |       | records                      | (increment 6).               |
@@ -2016,7 +2096,9 @@ Decisions
      and writes nothing.
 
      - P1: the rule is a judgement guideline; the tree's digest equals the pin
-       (DN-6); the change meets ``applies_to`` (DN-3); the state carries the
+       (DN-6; amended for BUG_115 by :need:`DEC_ADR_012_B115`, which judges
+       a rule the pin lacks against the tree and refuses only a pinned rule
+       the change edited); the change meets ``applies_to`` (DN-3); the state carries the
        ``review`` role and the rule's phases name review, landing or always
        (DN-2).
      - P2: a ``pass`` or ``fail`` rests on the evidence kinds ``evidence`` allows.
@@ -2769,6 +2851,78 @@ Decisions
        and the worktree place check;
      - the DN-12 pin.
 
+.. dec:: DN-6 judges a rule the pin lacks against the tree, and the pin governs every rule it holds
+   :id: DEC_ADR_012_B115
+   :status: accepted
+   :part_of: DEC_ADR_012
+   :amends: DEC_ADR_012_D5
+   :affects: COMP_CORE_RULES, COMP_CORE_VERDICTS
+
+   BUG_115. DN-6 refused every verdict once the tree's ruleset digest
+   differed from the pin, so a change that adds a judgement guideline owed a
+   verdict on it that it could never record: the only route was an override.
+   DN-6 guards against a rule edited mid-pipeline to dodge its judgement, and
+   D3 says a mid-pipeline edit "does not change the running pipeline's
+   obligations". Both are about the rules the pin holds. The amendment keeps
+   the pin governing those rules and nothing repins; it only stops the whole
+   ruleset's digest standing in for every rule.
+
+   - **Which ruleset a verdict is judged against** (``core/verdicts``,
+     ``judged_against``). The tree is the pin, or nothing was pinned: the pin,
+     as before. The tree moved off the pin:
+
+     - *a rule the pin lacks* (the change added it) holds no pinned
+       obligation to dodge, so it is judged against the tree's ruleset, and
+       its record's ``ruleset`` is the tree's digest;
+     - *a rule the pin holds exactly as the tree does* (every field of the
+       rule equal, rationale and links included) has the obligation it had at
+       start, so it is judged against the pin, and its record's ``ruleset`` is
+       the pin, as before;
+     - *a rule the change edited* (the pin holds it, the tree's entry
+       differs) is refused at P1, naming the rule and both digests (DN-6's
+       guard). Its pinned definition is the obligation, and the tree no
+       longer holds it. The routes are the ones DN-6 always offered: restore
+       the rule as pinned, finish the pipeline and start a fresh one under
+       the edited ruleset, or an override (A4.5).
+
+   - **Where the pinned rules come from** (``core/rules``,
+     ``_pinned_rules``). The pin records a path and a digest, not the rules,
+     so they are read where the pinned bytes are: the pin's path at the base
+     ``guidelines.baseline_only_shrinks`` reads its base ruleset at (the merge
+     base, or the store's base, ``_base_trees``), and only when those bytes
+     have the pinned digest (``_base_rules`` with ``digest``). The pipeline
+     record and the state model are unchanged, so no record is migrated.
+     When they cannot be read (no path, no base recorded, no merge base, the
+     base's copy missing, unparsable or not the pinned bytes, as when the
+     pipeline was started after the session had already edited its ruleset),
+     every rule is judged by the digest alone, as DN-6 first ruled, and the
+     refusal names why.
+
+   - **At the gate.** ``guidelines.verdicts_complete`` re-checks a recorded
+     verdict through the same ``judged_against``, so its ``ruleset`` must equal
+     the digest the rule is judged against now. A verdict on an added rule
+     goes stale on any later edit of the ruleset (its record holds the tree's
+     digest of the time); a verdict on an unchanged pinned rule stays current
+     across edits of other rules; a verdict on a rule the change then edits
+     goes stale. A submission naming ``ruleset`` must name that same digest.
+
+   - **What this does not change.** Which rules are owed is still read from
+     the tree's ruleset (A4.3). A rule renamed by the change is a pinned rule
+     removed and a new rule added: the new id is judged against the tree, and
+     the removed one is owed nothing, as a removed rule already was. The
+     ruleset lane (D10) and its review are what see a removal. The
+     whole-ruleset alternative, an explicit recorded re-pin inside the
+     pipeline, was not taken: it would let a change edit a pinned rule, re-pin
+     and answer the looser text, which is the dodge DN-6 exists to stop.
+
+   The proofs are the reproducer's test, unchanged with its marker removed
+   (``tests/test_guidelines_verdicts_complete.py::TestBUG115``), and the
+   guards beside it: a rule the change edits is refused at submission and
+   stale at the gate; an edit elsewhere leaves a pinned rule answerable under
+   the pin; an added rule is recorded under the tree's digest and goes stale
+   when the ruleset moves again; and a pin whose rules cannot be read refuses
+   every rule, naming why (``tests/test_guidelines_verdicts.py``).
+
 .. dec:: The ratchet: existing violations are baselined, new ones block, and the baseline can only shrink
    :id: DEC_ADR_012_D6
    :status: accepted
@@ -3153,7 +3307,8 @@ Decisions
      Nothing in ``core/`` names ``CLAUDE.md``. With no file to look in (the key null
      and a host kind with no adapter) the message says no instruction file is
      configured, and the fix names ``guidelines.instruction_files`` before the
-     render command.
+     render command. An explicit empty list (BUG_161, :need:`DEC_ADR_012_B161`) is a
+     deliberate choice of no block, so it raises no warning.
    - *``guidelines.generated_current`` notes it (D12).* The note joins the detail,
      beside the absent blocks a passing verdict already named, and never changes
      the verdict: a passing rule stays passing. A failing verdict carries it
@@ -3668,6 +3823,13 @@ Decisions
    adapter renders into its own field. It is empty by default, so every agent
    runs on the host's default model, and no host adapter ships a tier-to-model
    table of its own.
+
+   *Amended 2026-11-21 by* :need:`DEC_ADR_030_D4` *(ruling: user, BUG_159).*
+   Tiers stay hints no gate reads, and the audit record still never reaches a
+   gate's inputs; whether ``host.forbidden_models`` holds an audited agent's
+   model is derived from it first, and the role gates and
+   ``test.new_test_fails`` fail on that. The user set ``host.tier_map`` at the
+   user level (:need:`DEC_ADR_030_D8`); what ships stays empty.
 
    **A7 rulings (the user's).** The user ruled on all fourteen A7 questions before
    A7 was built. They bind every A7 increment.

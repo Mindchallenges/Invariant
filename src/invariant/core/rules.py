@@ -17,6 +17,7 @@ from __future__ import annotations
 import codecs
 import fnmatch
 import functools
+import hashlib
 import os
 import posixpath
 import re
@@ -36,13 +37,20 @@ from . import doclock, git, shell, storescan
 from . import findings as findings_reader
 from . import guidelines as guidelines_reader
 from . import plan as plan_reader
+from . import queue as queue_reader
 from . import rulings as rulings_reader
 from . import steps as steps_reader
 from . import sweep as sweep_reader
 from . import verdicts as verdicts_reader
+from .docformat import rst_directives
 from .errors import InvariantError, ManifestError, StateError
 from .items import backend_for
-from .machines import load_item_machine, load_pipeline_machine, load_session_machine
+from .machines import (
+    DESIGN_ROLE,
+    load_item_machine,
+    load_pipeline_machine,
+    load_session_machine,
+)
 from .manifest import (
     MANIFEST_RELPATH,
     Level,
@@ -188,6 +196,12 @@ class Verdict:
     #: in grant order, used or not; what :func:`grant_outcomes` reads for a
     #: grant that passed nothing.
     grants: tuple[tuple[str, str], ...] = ()
+    #: The least level a failure is delivered at, whatever level the gate is
+    #: configured at; ``None`` for the configured level alone. Set only where a
+    #: user ruling makes a failure stop the work in every profile: work done
+    #: on a forbidden model (DEC_ADR_030_D5). A gate the project turned off is
+    #: still off, because then nothing is evaluated at all.
+    floor: Level | None = None
 
     @classmethod
     def clean(cls, message: str = "", detail: str = "") -> Verdict:
@@ -327,6 +341,54 @@ def _without_audit(pipeline: dict | None) -> dict | None:
     }
 
 
+def forbidden_entry(value: Any, entries: Iterable[Any]) -> str | None:
+    """The first of ``entries`` found in ``value``, ignoring case; else ``None``.
+
+    The one comparison behind every forbidden-model check (DEC_ADR_030_D3):
+    plain text against configured text, so ``core`` knows no model family and
+    holds no model name. A value or an entry that is not non-empty text
+    matches nothing.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    folded = value.casefold()
+    for entry in entries:
+        if isinstance(entry, str) and entry and entry.casefold() in folded:
+            return entry
+    return None
+
+
+def _forbidden_runs(pipeline: dict | None, entries: Sequence[str]) -> dict[str, str]:
+    """Each audited agent the configured list forbids, with the value that matched.
+
+    The audit's one reader on the way into a rule (DEC_ADR_030_D4), called
+    before ``_without_audit`` removes the record. An agent is judged on every
+    model observed for it in this pipeline, else on the model it was asked to
+    run on, else not at all: a host that reports no model is never refused.
+    Any shape this does not expect reads as no fact, and an empty list
+    forbids nothing.
+    """
+    if not entries or not pipeline:
+        return {}
+    evidence = pipeline.get("evidence")
+    audit = evidence.get(AUDIT_KEY) if isinstance(evidence, dict) else None
+    agents = audit.get("agents") if isinstance(audit, dict) else None
+    if not isinstance(agents, dict):
+        return {}
+    found: dict[str, str] = {}
+    for name, entry in agents.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        observed = entry.get("models")
+        values = [m for m in observed if isinstance(m, str) and m] if isinstance(
+            observed, list) else []
+        for value in values or [entry.get("asked")]:
+            if forbidden_entry(value, entries) is not None:
+                found[name] = value
+                break
+    return found
+
+
 @dataclass
 class RuleContext:
     """Everything a rule may read. Rules never reach outside this."""
@@ -363,11 +425,23 @@ class RuleContext:
     #: as it supplies ``host_instruction_files``. Empty means the host declares
     #: none, and then every line of a message is read alike.
     host_attribution_trailers: tuple[AttributionTrailer, ...] = ()
+    #: The forbidden-model list: ``host.forbidden_models``, or the host
+    #: adapter's default where no level sets it (DEC_ADR_030_D2). The default
+    #: is a host's, and nothing below the CLI imports a host, so the CLI
+    #: supplies it as it supplies ``host_instruction_files``. Empty forbids
+    #: nothing.
+    forbidden_models: tuple[str, ...] = ()
+    #: The agents of this pipeline whose model the list forbids, each with the
+    #: value that matched. Derived here from the audit record before it is
+    #: removed, and the only thing of it a rule may read (DEC_ADR_030_D4).
+    forbidden_agents: Mapping[str, str] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         # Here rather than at each caller, so no rule can see the audit record
         # whoever builds the context, the oracle's gate cache included (the A7
-        # ruling 10). A gate's verdict may not depend on which model ran (D1).
+        # ruling 10). A gate's verdict may not depend on which model ran (D1),
+        # beyond whether the configured list forbids it (DEC_ADR_030_D4).
+        self.forbidden_agents = _forbidden_runs(self.pipeline, self.forbidden_models)
         self.pipeline = _without_audit(self.pipeline)
 
     # -- convenience --------------------------------------------------
@@ -714,8 +788,26 @@ def evaluate(rule_ids: Iterable[str], ctx: RuleContext) -> list[Evaluated]:
                 f"rule {rule_id!r} raised {type(exc).__name__}: {exc}",
                 detail="This is a bug in the rule, not a finding about your work.",
             )
-        results.append(Evaluated(rule_id, level, verdict))
+        results.append(Evaluated(rule_id, _delivered_level(level, verdict), verdict))
     return results
+
+
+#: The levels in the order they stop work, least first, for a verdict's floor.
+_LEVEL_ORDER = (Level.OFF, Level.WARN, Level.ASK, Level.BLOCK)
+
+
+def _delivered_level(level: Level, verdict: Verdict) -> Level:
+    """The level a verdict is delivered at: the configured one, raised to the
+    verdict's floor when it fails (DEC_ADR_030_D5).
+
+    A pass and a skip keep the configured level, so a floor changes nothing
+    but how a failure that carries one is delivered: it stops the work, and
+    no acknowledgement passes it, whichever profile the project runs.
+    """
+    floor = verdict.floor
+    if floor is None or verdict.ok or verdict.skipped:
+        return level
+    return max(level, floor, key=_LEVEL_ORDER.index)
 
 
 def evaluate_event(event: str, ctx: RuleContext) -> list[Evaluated]:
@@ -1767,6 +1859,34 @@ def gated_roles_of(manifest: Manifest, agent: str) -> list[str]:
     ]
 
 
+def _forbidden_model_verdict(
+    ctx: RuleContext, agents: Sequence[str], message: str, rule_id: str
+) -> Verdict:
+    """The failure for work done on a model ``host.forbidden_models`` forbids.
+
+    DEC_ADR_030_D4, D5: the agents' work is in this pipeline whatever ran
+    after it, so another run does not clear it. It blocks whatever level the
+    gate is configured at (ruling 4, the floor), and the way past a run the
+    operator stands by is a forced advance, whose reason is recorded.
+    """
+    named = "; ".join(f"{agent} on {ctx.forbidden_agents[agent]}" for agent in agents)
+    failed = Verdict.fail(
+        message,
+        detail=(
+            f"The audit observed {named}, which the forbidden-model list "
+            f"({', '.join(ctx.forbidden_models)}) forbids. Work done on a forbidden "
+            f"model does not satisfy {rule_id}, in any profile, and a later run "
+            f"does not undo it."
+        ),
+        fixes=(
+            "invariant pipeline advance <state> --force --reason '<why this work stands>'",
+            "or abandon this pipeline and redo the work on an allowed model",
+            "change host.forbidden_models if the list is wrong",
+        ),
+    )
+    return replace(failed, floor=Level.BLOCK)
+
+
 def _agent_role_gate(ctx: RuleContext, role: str, purpose: str) -> Verdict:
     configured = _role_members(ctx.manifest, role)
     if not configured:
@@ -1774,8 +1894,14 @@ def _agent_role_gate(ctx: RuleContext, role: str, purpose: str) -> Verdict:
 
     ran = [str(a) for a in (ctx.evidence("agents_run", []) or [])]
     matched = [a for a in ran if a in configured]
+    counted = [a for a in matched if a not in ctx.forbidden_agents]
+    if counted:
+        return Verdict.clean(f"{', '.join(counted)} ran in this pipeline")
     if matched:
-        return Verdict.clean(f"{', '.join(matched)} ran in this pipeline")
+        return _forbidden_model_verdict(
+            ctx, sorted(set(matched)), f"no {role} agent ran on an allowed model in this pipeline",
+            GATED_ROLES[role],
+        )
 
     detail = (
         f"{purpose} A subagent carries the project's own procedure; doing the "
@@ -1990,8 +2116,9 @@ def _agents_rendered_current(ctx: RuleContext) -> Verdict:
 #: Rules no machine names and nothing injects, reached instead through a
 #: `doctor` row whose level the rule's own decides: `warn` warns, `block`
 #: fails the row, `off` removes it (ADR-016 D3). The fourth route a graded
-#: rule may be reached by.
-DOCTOR_ROW_RULES = frozenset({"docs.assessment"})
+#: rule may be reached by. ``docs.plan_current`` (ADR-032 increment 6) is the
+#: second: the plan page is the project's, not a change's.
+DOCTOR_ROW_RULES = frozenset({"docs.assessment", "docs.plan_current"})
 
 
 @rule(
@@ -2105,6 +2232,72 @@ def _docs_read_under_lease(ctx: RuleContext, rows: list, docs_root: Path) -> Ver
     )
 
 
+@dataclass(frozen=True)
+class _Structural:
+    """``docs.updated``'s answer to "is this change structural" (BUG_064,
+    BUG_102), as :func:`_structural_change` gives it.
+
+    ``source`` is the structural source, project-relative; ``outside_docs``
+    every changed path outside the architecture docs; ``held`` names each
+    path held out by the project's ``non_source`` or as test code.
+    """
+
+    source: frozenset[str]
+    outside_docs: frozenset[str]
+    held: tuple[str, ...]
+
+    def clean_verdict(self) -> Verdict:
+        """The clean verdict for a change with no structural source."""
+        if self.outside_docs:
+            return Verdict.clean(
+                f"no structural change ({len(self.outside_docs)} non-source file(s))",
+                detail="; ".join(self.held) or None,
+            )
+        return Verdict.clean("docs-only change")
+
+
+def _structural_change(ctx: RuleContext, changed: Iterable[Path]) -> _Structural:
+    """The one reading of a structural change: what ``docs.updated``,
+    ``docs.area_documented``, ``docs.ahead_of_code`` and the design snapshot
+    all ask (ADR-032 D6: the same function, not a second copy).
+
+    Outside the architecture docs is not the same as structural: a backlog
+    record, a release plan or a LICENSE read as "source changed" and blocked
+    the chore and docs lanes on a doc nobody could honestly write (BUG_064).
+    The answer is NARROWER than the coverage gate's on purpose. That one asks
+    whether a run could measure the path; this one asks whether a diagram
+    could now be wrong, and a machine YAML or an API contract changes
+    structure with no code beside it. Prose and repository metadata, then the
+    project's own ``non_source`` assertion, named, as it is there.
+
+    Test code is the one kind of code held out, and only on an adapter's
+    positive claim. The documented architecture is the product's: its
+    components, seams and flows. A change confined to the suite that
+    measures them moves none of those, so the doc it demanded was one no
+    change could honestly write, and a bugfix whose defect lived in a test
+    harness had ``--force`` as its only landing (BUG_102). ADR-006 D2 already
+    held a repro-only commit to the same reading. Named in the verdict, as
+    ``non_source`` is: a harness some project does document is still visible
+    to the reviewer, and a code path beside the tests keeps the block.
+    """
+    root = _repo_root(ctx)
+    docs_root = _docs_root(ctx)
+    outside_docs = {
+        _relative_to_any(p, _coverage_roots(ctx))
+        for p in changed
+        if not _is_within(root / p, docs_root)
+    }
+    source, declared_non_source = _excluded_as_declared_non_source(
+        ctx, {p for p in outside_docs if not _is_prose(p)}
+    )
+    source, held_as_tests = _excluded_as_test_code(ctx, source)
+    return _Structural(
+        source=frozenset(source),
+        outside_docs=frozenset(outside_docs),
+        held=(*declared_non_source, *held_as_tests),
+    )
+
+
 @rule(
     "docs.updated",
     summary="A structural change updates the architecture docs.",
@@ -2125,40 +2318,9 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
 
     root = _repo_root(ctx)
     docs_changed = [p for p in changed if _is_within(root / p, docs_root)]
-    # Outside the architecture docs is not the same as structural: a backlog
-    # record, a release plan or a LICENSE read as "source changed" and blocked
-    # the chore and docs lanes on a doc nobody could honestly write (BUG_064).
-    # The answer is NARROWER than the coverage gate's on purpose. That one asks
-    # whether a run could measure the path; this one asks whether a diagram
-    # could now be wrong, and a machine YAML or an API contract changes
-    # structure with no code beside it. Prose and repository metadata, then the
-    # project's own `non_source` assertion — named, as it is there.
-    outside_docs = {
-        _relative_to_any(p, _coverage_roots(ctx))
-        for p in changed
-        if not _is_within(root / p, docs_root)
-    }
-    source_changed, declared_non_source = _excluded_as_declared_non_source(
-        ctx, {p for p in outside_docs if not _is_prose(p)}
-    )
-    # Test code is the one kind of code held out, and only on an adapter's
-    # positive claim. The documented architecture is the product's: its
-    # components, seams and flows. A change confined to the suite that
-    # measures them moves none of those, so the doc it demanded was one no
-    # change could honestly write, and a bugfix whose defect lived in a test
-    # harness had `--force` as its only landing (BUG_102). ADR-006 D2 already
-    # held a repro-only commit to the same reading. Named in the verdict, as
-    # `non_source` is: a harness some project does document is still visible
-    # to the reviewer, and a code path beside the tests keeps the block.
-    source_changed, held_as_tests = _excluded_as_test_code(ctx, source_changed)
-
-    if not source_changed:
-        if outside_docs:
-            return Verdict.clean(
-                f"no structural change ({len(outside_docs)} non-source file(s))",
-                detail="; ".join([*declared_non_source, *held_as_tests]) or None,
-            )
-        return Verdict.clean("docs-only change")
+    structural = _structural_change(ctx, changed)
+    if not structural.source:
+        return structural.clean_verdict()
     if _docs_in_store(ctx.manifest):
         return _docs_updated_in_store(ctx, docs_root)
     if docs_changed:
@@ -2173,6 +2335,43 @@ def _docs_updated(ctx: RuleContext) -> Verdict:
             "invariant pipeline advance <state> --force --reason 'no structural change'",
         ),
     )
+
+
+def _store_docs_counted(
+    ctx: RuleContext, leg: _StoreLeg, wanted: Callable[[_StoreChange], bool]
+) -> tuple[list[_StoreChange], list[str]]:
+    """The store docs ``docs.updated`` counts as an update, and why each other
+    one ``wanted`` keeps is set aside (ADR-014 D5, D9).
+
+    A store doc counts when it was COMMITTED under a span of its unit which
+    also holds a recorded read in that unit (the read and the write under one
+    lease), or when the file did not exist when the unit was taken. The
+    design snapshot asks the same (ADR-032 increment 3), so the two cannot
+    count a store doc differently. ``leg`` is answerable; each counted change
+    is listed once, by its store-relative path.
+    """
+    reads = {
+        (str(row.get("lease")), str(row.get("unit")))
+        for row in ctx.evidence("docs_read", []) or []
+        if isinstance(row, Mapping) and row.get("lease") and row.get("unit")
+    }
+    counted: dict[str, _StoreChange] = {}
+    set_aside: list[str] = []
+    for change in leg.changes:
+        if not wanted(change):
+            continue
+        if not change.committed:
+            set_aside.append(f"{change.rel}: uncommitted in the store")
+        elif (change.lease, change.unit) in reads:
+            counted.setdefault(change.rel, change)
+        elif git.exists_at(leg.root, change.start, change.rel) is False:
+            # New in the span: there was nothing to read.
+            counted.setdefault(change.rel, change)
+        else:
+            set_aside.append(
+                f"{change.rel}: committed under {change.unit}, whose span holds no read of it"
+            )
+    return [counted[rel] for rel in sorted(counted)], sorted(set(set_aside))
 
 
 def _unreadable_store_leg(leg: _StoreLeg, consequence: str) -> Verdict:
@@ -2199,27 +2398,10 @@ def _docs_updated_in_store(ctx: RuleContext, docs_root: Path) -> Verdict:
     leg = _store_leg(ctx)
     if not leg.answerable:
         return _unreadable_store_leg(leg, "the doc update cannot be found")
-    reads = {
-        (str(row.get("lease")), str(row.get("unit")))
-        for row in ctx.evidence("docs_read", []) or []
-        if isinstance(row, Mapping) and row.get("lease") and row.get("unit")
-    }
-    counted: set[str] = set()
-    set_aside: list[str] = []
-    for change in leg.changes:
-        if not _is_within(change.path, docs_root):
-            continue
-        if not change.committed:
-            set_aside.append(f"{change.rel}: uncommitted in the store")
-        elif (change.lease, change.unit) in reads:
-            counted.add(change.rel)
-        elif git.exists_at(leg.root, change.start, change.rel) is False:
-            counted.add(change.rel)  # new in the span: there was nothing to read
-        else:
-            set_aside.append(
-                f"{change.rel}: committed under {change.unit}, whose span holds no read of it"
-            )
-    aside = sorted(set(set_aside))
+    counted_changes, aside = _store_docs_counted(
+        ctx, leg, lambda change: _is_within(change.path, docs_root)
+    )
+    counted = {change.rel for change in counted_changes}
     if counted:
         return Verdict.clean(
             f"{len(counted)} store doc file(s) committed under the docs lock with their read",
@@ -2239,6 +2421,288 @@ def _docs_updated_in_store(ctx: RuleContext, docs_root: Path) -> Verdict:
             "then read the doc, update it and commit it in the store under that lock",
             "invariant pipeline advance <state> --force --reason 'no structural change'",
         ),
+    )
+
+
+# -- docs ahead of the code (ADR-032 D6, increment 3) ---------------------------
+
+#: The pipeline evidence key the design snapshots are kept under: one entry
+#: per advance out of a design state, appended by ``domains/pipeline``.
+DESIGN_SNAPSHOTS = "design_snapshots"
+
+#: How many paths a notice or a verdict names before it counts the rest.
+_NAMED_PATHS = 5
+
+#: The verdict a structural change gets when no design document led it.
+NOT_AHEAD = "the design documents were not changed before the build began"
+
+
+def _named(paths: Sequence[str]) -> str:
+    """``paths`` joined, the first :data:`_NAMED_PATHS` named and the rest counted."""
+    shown = ", ".join(paths[:_NAMED_PATHS])
+    rest = len(paths) - _NAMED_PATHS
+    return f"{shown}, and {rest} more" if rest > 0 else shown
+
+
+@dataclass(frozen=True)
+class _Differing:
+    """What differs from the merge base on the repository leg, or why that
+    cannot be said (``problem``)."""
+
+    paths: tuple[Path, ...] = ()
+    problem: str | None = None
+
+
+def _work_tip(ctx: RuleContext) -> str:
+    """The tip that carries the session's work, as ``_repo_changed_set``
+    names it: the session's branch when the caller is not standing on it."""
+    branch = str((ctx.session or {}).get("branch") or "")
+    return branch if branch and git.current_branch(ctx.cwd) != branch else "HEAD"
+
+
+def _differing_from_base(ctx: RuleContext) -> _Differing:
+    """Every path that differs from the merge base: the session tree's working
+    changes, untracked files included (a doc written in design is often new),
+    and the branch's commits since the merge base.
+
+    Not the session's declared file set, which ``_changed_set`` also reads:
+    a declared path is one the session means to touch, not one that differs,
+    and the snapshot says what differs. An unreadable range or status is a
+    problem, never an empty answer.
+    """
+    base = str((ctx.session or {}).get("base") or "")
+    if not base:
+        return _Differing(problem="the session records no base branch to compare with")
+    committed = git.branch_files(ctx.cwd, base, _work_tip(ctx))
+    if committed is None:
+        return _Differing(
+            problem=f"the branch's commits could not be read against base {base!r}"
+        )
+    dirty = git.dirty_paths(_session_tree(ctx))
+    if dirty is None:
+        return _Differing(problem="the working tree's changes could not be read")
+    seen = {str(path): Path(path) for path in [*committed, *map(Path, dirty)]}
+    return _Differing(paths=tuple(sorted(seen.values(), key=str)))
+
+
+def _content_digest(path: Path) -> str | None:
+    """The first twelve hex of the SHA-256 of the file's bytes, ``None`` for
+    a file that is not there (a deleted doc)."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+    except OSError:
+        return None
+
+
+def _holds_decision(ctx: RuleContext, path: Path) -> bool:
+    """Whether the ``.rst`` page at ``path`` holds a need of the decision
+    role: one of its directives (``core/docformat``) is a directive the
+    project's types map to that role (``core/needs``)."""
+    from . import needs  # local: one reader of the docs project's types
+
+    if path.suffix != ".rst":
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    wanted = needs.directives_of(needs.types_of(ctx.manifest), ("decision",))
+    return any(directive.name in wanted for directive in rst_directives(text))
+
+
+def _repo_design_docs(ctx: RuleContext, paths: Iterable[Path]) -> list[dict[str, Any]]:
+    """Each differing path that is a design document: under ``paths.docs`` in
+    the session's tree, or a page there holding a decision need."""
+    tree = _session_tree(ctx)
+    relative = _docs_relative(ctx.manifest, ctx.cwd)
+    docs_root = tree / relative if relative is not None else ctx.manifest.path_for("docs")
+    found: list[dict[str, Any]] = []
+    for rel in paths:
+        path = tree / rel
+        if _is_within(path, docs_root) or _holds_decision(ctx, path):
+            found.append({"path": Path(rel).as_posix(), "digest": _content_digest(path)})
+    return found
+
+
+def _store_design_docs(ctx: RuleContext) -> dict[str, Any]:
+    """The snapshot's documents in a store project: the store leg's docs, as
+    ``docs.updated`` counts them (``_store_docs_counted``)."""
+    leg = _store_leg(ctx)
+    if not leg.answerable:
+        return {"leg": STORE_LEG, "answerable": False, "problem": leg.problem, "docs": []}
+    docs_root = _docs_root(ctx)
+    counted, _ = _store_docs_counted(
+        ctx,
+        leg,
+        lambda change: _is_within(change.path, docs_root) or _holds_decision(ctx, change.path),
+    )
+    docs = [{"path": change.rel, "digest": _content_digest(change.path)} for change in counted]
+    return {"leg": STORE_LEG, "docs": docs}
+
+
+def design_snapshot(ctx: RuleContext) -> dict[str, Any]:
+    """The design documents differing from the merge base, and whether any
+    structural source does (ADR-032 D6, :need:`DEC_ADR_032_I3`).
+
+    What ``domains/pipeline`` records when a pipeline leaves a design state,
+    and what ``docs.ahead_of_code`` reads live on an edge that leaves design
+    straight into review. Read from the tree, so every host gets the same
+    answer. ``docs`` holds ``{path, digest}`` for each design document;
+    ``answerable`` false names its ``problem`` and holds no documents.
+    """
+    differing = _differing_from_base(ctx)
+    snapshot: dict[str, Any] = {
+        "leg": REPO_LEG,
+        "answerable": differing.problem is None,
+        "problem": differing.problem,
+        "docs": [],
+        "source_changed": False,
+    }
+    if differing.problem is not None:
+        return snapshot
+    snapshot["source_changed"] = bool(_structural_change(ctx, differing.paths).source)
+    if _docs_in_store(ctx.manifest):
+        snapshot.update(_store_design_docs(ctx))
+    else:
+        snapshot["docs"] = _repo_design_docs(ctx, differing.paths)
+    return snapshot
+
+
+def design_snapshot_notice(snapshot: Mapping[str, Any]) -> list[str]:
+    """The lines the advance out of design prints for the snapshot it took."""
+    if not snapshot.get("answerable"):
+        return [
+            f"design snapshot  could not be read: {snapshot.get('problem')}",
+            "  docs.ahead_of_code fails at review on a structural change until it can be",
+        ]
+    docs = [str(doc.get("path")) for doc in snapshot.get("docs") or []]
+    if docs:
+        return [f"design snapshot  {len(docs)} design document(s) changed: {_named(docs)}"]
+    return [
+        "design snapshot  no design document differs from the merge base",
+        "  a structural change will fail docs.ahead_of_code at review: write the doc now",
+    ]
+
+
+@rule(
+    "docs.ahead_of_code",
+    summary="A structural change's design documents changed before the build began.",
+    events=(),
+)
+def _docs_ahead_of_code(ctx: RuleContext) -> Verdict:
+    """ADR-032 D6: a structural change is judged against the snapshots its
+    pipeline took when it left design (:need:`DEC_ADR_032_I3`).
+
+    Rides the review state's entry. "Structural" is ``docs.updated``'s
+    reading, through the one function both call. Source edited in the
+    design state itself is not judged here; ``docs.design-before-code``,
+    the reviewer's judgement rule, covers it.
+    """
+    pipeline = ctx.pipeline
+    if not pipeline:
+        return Verdict.na("no pipeline is running, so no design state was left")
+    methodology = str(pipeline.get("methodology") or "")
+    try:
+        machine = load_pipeline_machine(ctx.manifest, methodology or None)
+    except InvariantError as exc:
+        return Verdict.fail(
+            f"the pipeline's methodology {methodology!r} does not load, so its "
+            "design state cannot be told",
+            detail=str(exc),
+        )
+    design = set(machine.states_with_role(DESIGN_ROLE))
+    if not design:
+        return Verdict.na(
+            f"the {machine.id} methodology has no design state, so no design "
+            "snapshot is taken"
+        )
+    recorded = ctx.evidence(DESIGN_SNAPSHOTS, []) or []
+    if not isinstance(recorded, list):
+        recorded = []  # a malformed record holds no snapshot to judge
+    snapshots = [s for s in recorded if isinstance(s, Mapping)]
+    if str(pipeline.get("state") or "") in design:
+        # The edge judged leaves design straight into review: no build ran
+        # between, and the snapshot this edge records is the tree now.
+        snapshots.append(design_snapshot(ctx))
+    if not snapshots:
+        history = [row for row in pipeline.get("history") or [] if isinstance(row, Mapping)]
+        if any(str(row.get("from") or "") in design for row in history):
+            return Verdict.na(
+                "this pipeline left its design state before design snapshots were recorded"
+            )
+        return Verdict.na(
+            "the pipeline has not left its design state, so no design snapshot is recorded"
+        )
+
+    # docs.updated's changed set, with the untracked files the snapshot
+    # reads: at the review entry a new module may not be added to git yet,
+    # and it is structural all the same.
+    touched = _changed_set(ctx)
+    differing = _differing_from_base(ctx)
+    changed = {str(path): path for path in [*touched.paths, *differing.paths]}
+    if not changed:
+        if not touched.answerable and differing.problem is not None:
+            return _unestablished_changed_set(touched)
+        return Verdict.na("nothing changed")
+    structural = _structural_change(ctx, changed.values())
+    if not structural.source:
+        return structural.clean_verdict()
+    return _judge_snapshots(ctx, snapshots, structural)
+
+
+def _judge_snapshots(
+    ctx: RuleContext, snapshots: Sequence[Mapping[str, Any]], structural: _Structural
+) -> Verdict:
+    """The snapshots in order: the first naming a design document passes,
+    unless an earlier one found source differing with none."""
+    where = _rel(_docs_root(ctx), _repo_root(ctx))
+    fixes = (
+        (
+            f"update the design documents under {where} now: docs.updated still "
+            "owes them at the landing"
+        ),
+        "invariant pipeline advance <state> --force --reason '<why the docs followed>'",
+    )
+    source_first: str | None = None
+    for snapshot in snapshots:
+        edge = f"{snapshot.get('from') or '?'} -> {snapshot.get('to') or '?'}"
+        if not snapshot.get("answerable"):
+            return Verdict.fail(
+                f"the design snapshot taken at {edge} could not be read, so whether "
+                "the design led the build is not known",
+                detail=f"{snapshot.get('problem')}. An unanswered question is not a "
+                "negative answer.",
+                fixes=fixes[1:],
+            )
+        docs = [
+            str(doc.get("path"))
+            for doc in snapshot.get("docs") or []
+            if isinstance(doc, Mapping)
+        ]
+        if docs and source_first is None:
+            return Verdict.clean(
+                f"{len(docs)} design document(s) changed before the build began: "
+                + _named(docs)
+            )
+        if docs:
+            return Verdict.fail(
+                NOT_AHEAD,
+                detail=f"At {source_first} source already differed from the merge "
+                "base and no design document did; the documents named at "
+                f"{edge} ({_named(docs)}) came after the build began.",
+                fixes=fixes,
+            )
+        if snapshot.get("source_changed") and source_first is None:
+            source_first = edge
+    edges = ", ".join(
+        f"{s.get('from') or '?'} -> {s.get('to') or '?'}" for s in snapshots
+    )
+    return Verdict.fail(
+        NOT_AHEAD,
+        detail=f"No design document under {where}, and no page holding a decision "
+        f"need, differed from the merge base when the design state was left "
+        f"({edges}), and the change is structural: {_named(sorted(structural.source))}.",
+        fixes=fixes,
     )
 
 
@@ -2281,17 +2745,7 @@ def _docs_area_documented(ctx: RuleContext) -> Verdict:
         if not touched.answerable:
             return _unestablished_changed_set(touched)
         return Verdict.na("nothing changed")
-    root = _repo_root(ctx)
-    docs_root = _docs_root(ctx)
-    outside_docs = {
-        _relative_to_any(p, _coverage_roots(ctx))
-        for p in touched.paths
-        if not _is_within(root / p, docs_root)
-    }
-    source, _ = _excluded_as_declared_non_source(
-        ctx, {p for p in outside_docs if not _is_prose(p)}
-    )
-    source, _ = _excluded_as_test_code(ctx, source)
+    source = set(_structural_change(ctx, touched.paths).source)
     if not source:
         return Verdict.na("no source changed, so no area is touched")
 
@@ -2912,8 +3366,12 @@ def _rulings_by_user(ctx: RuleContext) -> Verdict:
     target = ctx.target_path
     if target is None:
         return Verdict.na("no file path in this call")
-    if not rulings_reader.is_config_file(ctx.manifest, target):
-        return Verdict.na("not a file a config level is read from")
+    config = rulings_reader.is_config_file(ctx.manifest, target)
+    if not config and not _is_guidelines_policy(ctx, Path(target)):
+        return Verdict.na(
+            "not a file a config level is read from, nor the guidelines ruleset or "
+            "its catalogue"
+        )
     try:
         before = Path(target).read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -2923,6 +3381,8 @@ def _rulings_by_user(ctx: RuleContext) -> Verdict:
     after = _edited(ctx, before)
     if after is None:
         return Verdict.na("the edit does not apply to the file as it stands")
+    if not config:
+        return _ruled_by_user(Path(target), before, after)
     changed = rulings_reader.changed_rulings(before, after)
     if changed is None:
         if "rulings" not in "\n".join(_edit_texts(ctx)):
@@ -2942,6 +3402,66 @@ def _rulings_by_user(ctx: RuleContext) -> Verdict:
                 "--by <who> --reason <why>"
             ),
             "for lowerings the configuration already had: invariant rules carry-over",
+        ),
+    )
+
+
+def _is_guidelines_policy(ctx: RuleContext, target: Path) -> bool:
+    """Is ``target`` the configured guidelines ruleset, or the catalogue it
+    names, in any checkout (ADR-032 D7, increment 2)?
+
+    Compared project-relative, as the policy tree spells them: the store's
+    main checkout under ``records.guidelines: store``, else every checkout
+    of the repository. The catalogue is named by the ruleset as the policy
+    tree holds it; a ruleset that cannot be read names none.
+    """
+    configured = ctx.manifest.get("guidelines.ruleset")
+    rel = policy_relpath(ctx, configured)
+    if rel is None:
+        return False
+    wanted = {rel}
+    try:
+        raw = yaml.safe_load((guidelines_tree(ctx) / rel).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        raw = None
+    named = raw.get("catalogue") if isinstance(raw, Mapping) else None
+    if isinstance(named, str) and named.strip():
+        wanted.add(posixpath.join(posixpath.dirname(rel), named))
+    if guidelines_in_store(ctx.manifest):
+        store = Path(ctx.manifest.store.root)
+        if not _is_within(target, store):
+            return False
+        forms = [target.resolve().relative_to(store.resolve()).as_posix()]
+    else:
+        forms = _project_relative_forms(ctx, target)
+    return any(form in wanted for form in forms)
+
+
+def _ruled_by_user(target: Path, before: str, after: str) -> Verdict:
+    """``config.rulings_by_user`` over the guidelines ruleset or catalogue:
+    an edit adding or changing a ``ruled`` entry is the agent ruling for the
+    user (ADR-032 D7)."""
+    changed = rulings_reader.changed_ruled(before, after)
+    if changed is None:
+        if "ruled" not in after:
+            return Verdict.clean("the edit writes no ruled entry")
+        changed = ["(the edit does not read as YAML, and names ruled)"]
+    if not changed:
+        return Verdict.clean("the edit adds or changes no ruled entry")
+    return Verdict.fail(
+        f"this edit writes the ruled entr{'y' if len(changed) == 1 else 'ies'} "
+        f"{', '.join(changed)} in {target.name}, and only the user rules on a "
+        f"guideline (ADR-032 D7)",
+        detail="A ruled exception or change passes a finding for every session "
+        "after it, so the agent cannot give it. It proposes the exception in its "
+        "report, and the user records it with a command that asks for confirmation "
+        "at a terminal of their own.",
+        fixes=(
+            (
+                "ask the user to run: invariant guidelines except <rule-id> <path> "
+                "--by <who> --reason <why>"
+            ),
+            "or: invariant guidelines loosen <rule-id> --to warn --by <who> --reason <why>",
         ),
     )
 
@@ -3135,9 +3655,12 @@ def _guidelines_ruleset_valid(ctx: RuleContext) -> Verdict:
         return failure
     if ruleset is None:
         return Verdict.na("no guidelines ruleset configured")
+    # A note never fails the ruleset: a new project's empty layer map is the
+    # starter's state, told to map its folders (ADR-032 D2).
     return Verdict.clean(
         f"{len(ruleset.rules)} guideline(s) in {len(ruleset.sections)} section(s), "
-        f"ruleset {ruleset.digest}"
+        f"ruleset {ruleset.digest}",
+        detail="; ".join(ruleset.notes),
     )
 
 
@@ -3503,6 +4026,9 @@ class RenderPlan:
     #: The rules as needs, ``<srcdir>/rules.rst`` (ADR-018 D12); ``None`` where
     #: the docs are not a docs project in this tree.
     rules: PagePlan | None = None
+    #: The pattern catalogue, ``<srcdir>/patterns.rst`` (ADR-032 D5); ``None``
+    #: with no catalogue or no docs project in this tree.
+    patterns: PagePlan | None = None
 
 
 def plan_render(
@@ -3555,6 +4081,7 @@ def plan_render(
         )
     status = _generated_status(path, rel, fmt, text, "guidelines.checklist")
     rules = _plan_rules_page(ctx, ruleset, source, tree, scanner)
+    patterns = _plan_patterns_page(ctx, ruleset, tree, scanner)
 
     body = guidelines_reader.render_index_block(
         ruleset, source=source, max_lines=manifest.get("guidelines.injection.max_lines")
@@ -3588,6 +4115,7 @@ def plan_render(
         blocks=tuple(blocks),
         always=tuple(r.id for r in ruleset.rules if "always" in r.phases),
         rules=rules,
+        patterns=patterns,
     )
 
 
@@ -3650,6 +4178,100 @@ def _plan_rules_page(
         )
     status = _generated_status(path, rel, "sphinx", text, "the docs project's rules page")
     return PagePlan(status=status, path=path, relpath=rel, text=text)
+
+
+def _plan_patterns_page(
+    ctx: RuleContext,
+    ruleset: guidelines_reader.Ruleset,
+    tree: Path,
+    scanner: PrivacyScanner,
+) -> PagePlan | None:
+    """``<srcdir>/patterns.rst``, the catalogue (ADR-032 D5), checked as the
+    rules page is, or ``None`` with no catalogue or no docs project in ``tree``."""
+    catalogue = ruleset.catalogue
+    srcdir = _docs_project_relpath(ctx, tree) if catalogue is not None else None
+    if catalogue is None or srcdir is None:
+        return None
+    rel = posixpath.join(srcdir, guidelines_reader.PATTERNS_PAGE)
+    path = tree / rel
+    if _policy_exempt(ctx, tree, path):
+        raise RenderRefused(
+            f"the patterns page {rel} is exempt from session isolation, and a "
+            f"generated file never is (ADR-012 ruling 13)",
+            "keep the docs project's source directory outside session.exempt_paths "
+            "and the declared stores",
+        )
+    text = guidelines_reader.render_patterns(catalogue, source=catalogue.path)
+    findings = scanner.scan_text(text, path=Path(rel))
+    if findings:
+        named = ", ".join(f"{rel}:{f.line} {f.pattern} {f.redacted}" for f in findings)
+        raise RenderRefused(
+            f"the rendered patterns page fails the privacy scan ({named}); "
+            f"nothing was written",
+            f"remove it from {catalogue.path}, then render again",
+        )
+    status = _generated_status(path, rel, "sphinx", text, "the docs project's patterns page")
+    return PagePlan(status=status, path=path, relpath=rel, text=text)
+
+
+@rule(
+    "docs.plan_current",
+    summary="The plan page's queue part matches the queue record it renders.",
+    events=(),
+)
+def _docs_plan_current(ctx: RuleContext) -> Verdict:
+    """ADR-032 D11 and increment 6: the generated plan page is current.
+
+    It judges the queue part only: the page names the queue digest it was
+    rendered from, and the record's digest now must be that. The session
+    plans are a dated snapshot of engine state and never make it stale. It
+    reports and never renders; it rides no pipeline edge, since the page
+    lives in the main checkout beside the queue and moves with queue edits a
+    session's change does not make: ``doctor``'s ``plan page`` row and
+    ``invariant check`` ask it.
+    """
+    page, why = queue_reader.plan_page(ctx.manifest)
+    if page is None:
+        return Verdict.na(why or "no plan page")
+    path = queue_reader.queue_path(ctx.manifest)
+    try:
+        queue = queue_reader.read_queue(path)
+    except StateError as exc:
+        return Verdict.fail(
+            f"the plan page cannot be judged: {exc}",
+            fixes=("repair the queue file, then: invariant queue render",),
+        )
+    text = page.read_text(encoding="utf-8") if page.is_file() else None
+    standing = queue_reader.page_standing(text, queue)
+    name = page.name
+    if standing == queue_reader.ABSENT and not path.is_file():
+        return Verdict.na("no queue record and no plan page")
+    if standing == queue_reader.CURRENT:
+        return Verdict.clean(
+            f"{name} is current against queue {queue_reader.queue_digest(queue)}"
+        )
+    said = {
+        queue_reader.ABSENT: f"{name} is missing: the plan page was never rendered",
+        queue_reader.UNMANAGED: (
+            f"{name} carries no invariant-managed marker: it is not the generated page"
+        ),
+        queue_reader.EDITED: f"{name} was edited by hand",
+        queue_reader.STALE: (
+            f"{name} is stale: it names queue {queue_reader.page_digest(text or '')}, "
+            f"and the queue is {queue_reader.queue_digest(queue)}"
+        ),
+    }
+    fix = (
+        "move the hand-written page, then: invariant queue render"
+        if standing == queue_reader.UNMANAGED
+        else "invariant queue render"
+    )
+    return Verdict.fail(
+        said[standing],
+        detail="The queue record is the plan page's source (ADR-032 D11); the page is "
+        "rendered again by every queue edit. This rule reports; it never renders.",
+        fixes=(fix,),
+    )
 
 
 def ruleset_or_refuse(ctx: RuleContext) -> guidelines_reader.Ruleset | None:
@@ -3743,10 +4365,16 @@ def _instruction_files(
                 "name a different file in guidelines.instruction_files",
             )
         if is_exempt_path(ctx.manifest, tree, tree / rel):
+            outside = "name a file outside session.exempt_paths and the declared stores"
             raise RenderRefused(
                 f"the instruction file {rel} is exempt from session isolation, "
                 f"and a generated file never is (ADR-012 ruling 13)",
-                "name a file outside session.exempt_paths and the declared stores",
+                outside
+                if configured is not None
+                # The host's default, not a file the project named: "none"
+                # is the setting that lets the checklist render alone.
+                else f"set guidelines.instruction_files: [] for no instruction "
+                f"file, or {outside}",
             )
         if rel not in found:
             found.append(rel)
@@ -3792,11 +4420,9 @@ def _default_checklist(ctx: RuleContext, source: str, suffix: str, tree: Path) -
 
 
 def _generated_status(path: Path, rel: str, fmt: str, text: str, setting: str) -> str:
-    if not path.exists():
-        return "new"
-    existing = path.read_text(encoding="utf-8")
-    digest, body = guidelines_reader.split_managed(existing, fmt)
-    if digest is None:
+    existing = path.read_text(encoding="utf-8") if path.exists() else None
+    state = guidelines_reader.managed_state(existing, text, fmt)
+    if state == "unmanaged":
         raise RenderRefused(
             f"{rel} exists and has no invariant-managed marker, so render "
             f"did not write it and will not overwrite it",
@@ -3804,9 +4430,7 @@ def _generated_status(path: Path, rel: str, fmt: str, text: str, setting: str) -
             if setting.startswith("guidelines.")
             else f"move that file: it is {setting}",
         )
-    if digest != guidelines_reader.digest_of(body.encode("utf-8")):
-        return "edited"
-    return "current" if existing == text else "stale"
+    return state
 
 
 def _always_layer_gap(plan: RenderPlan, manifest: Manifest) -> tuple[str, str] | None:
@@ -3822,11 +4446,17 @@ def _always_layer_gap(plan: RenderPlan, manifest: Manifest) -> tuple[str, str] |
     ``None`` with no always rules or with a block present, and with no file
     to carry one under ``records.agents: local``: nothing of invariant's is
     committed there, so no block is written, and the hook context carries the
-    always rules by design (ADR-014 D11).
+    always rules by design (ADR-014 D11). Likewise with
+    ``guidelines.instruction_files`` an explicit empty list: the project chose
+    no block (BUG_161).
     """
     if not plan.always or any(b.result.status != "absent" for b in plan.blocks):
         return None
-    if not plan.blocks and manifest.get("records.agents") == "local":
+    if not plan.blocks and (
+        manifest.get("records.agents") == "local"
+        # An explicit empty list chose no block (BUG_161).
+        or manifest.get("guidelines.instruction_files") == []
+    ):
         return None
     name = guidelines_reader.INDEX_BLOCK
     count = len(plan.always)
@@ -3904,6 +4534,8 @@ def _guidelines_generated_current(ctx: RuleContext) -> Verdict:
     pages = [(plan.relpath, plan.status, "the checklist")]
     if plan.rules is not None:
         pages.append((plan.rules.relpath, plan.rules.status, "the rules page"))
+    if plan.patterns is not None:
+        pages.append((plan.patterns.relpath, plan.patterns.status, "the patterns page"))
     for relpath, status, what in pages:
         said = {
             "new": f"{relpath} is missing: {what} was never rendered",
@@ -4026,9 +4658,11 @@ def _guidelines_mechanical_clean(ctx: RuleContext) -> Verdict:
         gone=gone,
         history=_change_history(ctx, tree, changed.base, adapters),
         registries=ruleset.registries,
+        fitness=_fitness_reads(ctx, tree),
     )
     ratcheted = findings_reader.ratchet(
-        evaluation.findings, baseline or (), touched=set(files) | set(gone)
+        evaluation.findings, _active_entries(ruleset, baseline or ()),
+        touched=set(files) | set(gone),
     )
     grants = guideline_grants(ctx, ruleset)
     found = findings_reader.overridden(ratcheted.findings, grants)
@@ -4273,6 +4907,25 @@ def guideline_override_refusal(ctx: RuleContext, guideline_id: str) -> str | Non
     return None
 
 
+def _fitness_reads(ctx: RuleContext, tree: Path) -> findings_reader.Fitness:
+    """A fitness rule's answer: its test's latest recorded run over ``tree``.
+
+    The runs are the pipeline's ``test_runs`` (none outside a pipeline), and
+    the tree's signature is taken once, and only when a fitness rule is asked
+    (ADR-032 D3, DEC_ADR_032_I5).
+    """
+    runs = ctx.evidence("test_runs") or []
+    runs = runs if isinstance(runs, list) else []
+    signed: list[tuple[str, str] | None] = []
+
+    def answer(selector: str) -> findings_reader.FitnessAnswer:
+        if not signed:
+            signed.append(git.tree_signature(tree))
+        return findings_reader.fitness_answer(runs, selector, signed[0])
+
+    return answer
+
+
 def _finding_reads(tree: Path, adapters: list[Adapter]) -> dict[str, Any]:
     """The reads ``core/findings`` is handed, from the tree in hand: one
     answer for the gate, ``--record`` and ``--prune``, so a record holds
@@ -4435,7 +5088,7 @@ def _mechanical_fixes(blocking: list[findings_reader.Finding]) -> tuple[str, ...
             f"or pass {guideline}'s new findings for one advance, recorded: "
             f"invariant override {guideline} --reason '<why>'"
         )
-    if any(f.status == "unanswerable" for f in blocking):
+    if any(f.status == "unanswerable" and not f.fix for f in blocking):
         fixes.append(
             "make the file answerable: declare the ecosystem whose adapter reads it, "
             "or fix what stops it being read; an unanswered file never passes"
@@ -4501,7 +5154,7 @@ def _edit_advisory(ctx: RuleContext, target: Path) -> guidelines_reader.EditAdvi
     advised = [
         rule for rule in ruleset.rules
         if rule.check.kind in ADVISED_KINDS
-        and any(findings_reader.matches(rel, glob) for glob in rule.applies_to)
+        and guidelines_reader.covers(rule, rel)
     ]
     if not advised or not (tree / rel).is_file():
         return None
@@ -4516,7 +5169,9 @@ def _edit_advisory(ctx: RuleContext, target: Path) -> guidelines_reader.EditAdvi
     reads = _finding_reads(tree, _ecosystem_adapters(ctx))
     reads["read"] = lambda _rel: raw
     evaluation = findings_reader.evaluate(advised, [rel], **reads)
-    ratcheted = findings_reader.ratchet(evaluation.findings, baseline or (), touched={rel})
+    ratcheted = findings_reader.ratchet(
+        evaluation.findings, _active_entries(ruleset, baseline or ()), touched={rel}
+    )
     lines = (raw or b"").decode("utf-8", errors="replace").split("\n")
     new = tuple(
         _advised(f, lines) for f in ratcheted.findings if f.status == "new"
@@ -4963,9 +5618,10 @@ def _checklist_relpath(ctx: RuleContext, source: str | None) -> str | None:
 def _baselined_rules(
     ruleset: guidelines_reader.Ruleset, names: tuple[str, ...]
 ) -> list[guidelines_reader.Guideline]:
-    """The rules a record scans: every pattern and boundary rule, or those named."""
+    """The rules a record scans: every pattern and ``imports`` boundary rule,
+    or those named. A fitness boundary is never baselined (ADR-032 D3)."""
     if not names:
-        return [r for r in ruleset.rules if r.check.kind in guidelines_reader.BASELINE_KINDS]
+        return [r for r in ruleset.rules if guidelines_reader.baselined(r)]
     chosen: list[guidelines_reader.Guideline] = []
     for name in dict.fromkeys(names):
         rule = ruleset.by_id(name)
@@ -4985,6 +5641,11 @@ def _baselined_rules(
                 f"rules are baselined: {reason}",
                 "name a pattern or boundary rule in --rule",
             )
+        if not guidelines_reader.baselined(rule):
+            raise BaselineRefused(
+                f"{name} is a {guidelines_reader.FITNESS_NOT_BASELINED}",
+                "name a pattern or imports boundary rule in --rule",
+            )
         chosen.append(rule)
     return chosen
 
@@ -5001,6 +5662,18 @@ def _parsed_or_refuse(
             f"fix {rel} by hand, or record every rule again: "
             "invariant guidelines baseline --record",
         ) from exc
+
+
+def _active_entries(
+    ruleset: guidelines_reader.Ruleset, entries: Iterable[guidelines_reader.BaselineEntry]
+) -> list[guidelines_reader.BaselineEntry]:
+    """The baseline entries of rules a gate evaluates: a paused rule's
+    (``severity: off``, ADR-032 ruling 13) are kept, never stale, until it is
+    raised again."""
+    return [
+        entry for entry in entries
+        if ruleset.by_id(entry.rule) is not None or ruleset.any_rule(entry.rule) is None
+    ]
 
 
 def _gone(
@@ -5050,7 +5723,7 @@ def _record_baseline(
         for entry in _parsed_or_refuse(existing, rel):
             if entry.rule in replaced:
                 continue
-            gone = _gone(entry, ruleset.by_id(entry.rule))
+            gone = _gone(entry, ruleset.any_rule(entry.rule))
             if gone is not None:
                 changes.append(gone)
             else:
@@ -5120,14 +5793,15 @@ def _prune_baseline(
     counts = findings_reader.counted(evaluation.findings)
     kept: list[guidelines_reader.BaselineEntry] = []
     for entry in entries:
+        if ruleset.by_id(entry.rule) is None and ruleset.any_rule(entry.rule) is not None:
+            kept.append(entry)  # a paused rule's entries wait for it (ruling 13)
+            continue
         rule = ruleset.by_id(entry.rule)
         drop = _gone(entry, rule)
         if drop is None and not (tree / entry.path).is_file():
             drop = BaselineChange(entry.rule, entry.path, entry.fingerprint, entry.count, 0,
                                   "its file was deleted")
-        if drop is None and not any(
-            findings_reader.matches(entry.path, glob) for glob in rule.applies_to
-        ):
+        if drop is None and not guidelines_reader.covers(rule, entry.path):
             drop = BaselineChange(entry.rule, entry.path, entry.fingerprint, entry.count, 0,
                                   "its rule no longer applies to the file")
         if drop is None and entry.path in touched:
@@ -5287,7 +5961,8 @@ def _guidelines_baseline_only_shrinks(ctx: RuleContext) -> Verdict:
         rules, files, **_finding_reads(tree, _ecosystem_adapters(ctx))
     )
     stale = findings_reader.ratchet(
-        evaluation.findings, entries, touched=set(files) | set(gone) | set(renames)
+        evaluation.findings, _active_entries(ruleset, entries),
+        touched=set(files) | set(gone) | set(renames),
     ).stale
 
     detail = _shrink_detail(copy, admitted, renames)
@@ -5504,7 +6179,10 @@ def _base_baseline(ctx: RuleContext, bases: _BaseTrees) -> _BaseCopy | Verdict:
     The base's manifest is read where the project's own level lives
     (``Manifest.location``), for its two ``guidelines`` paths and nothing
     else: in a store, the store's top level overlaid by this repository's
-    block. A repository with no manifest at the base, or one with no
+    block. Beneath it lies the user level as it stands now, which no base
+    holds (:func:`_user_guidelines`, DEC_ADR_014_B141), so the base resolves
+    the two paths in the working configuration's order. A repository with no
+    manifest at the base, or one with no
     ``guidelines.baseline``, is a base with no baseline configured; a store
     project's manifest missing at the base is a failure, never that (ADR-014
     D9). Anything else short of a baseline that parses in full is a failure,
@@ -5512,39 +6190,13 @@ def _base_baseline(ctx: RuleContext, bases: _BaseTrees) -> _BaseCopy | Verdict:
     not UTF-8 and one with a line that does not parse. The base copy is not
     checked against any ruleset; the entries are only counted.
     """
-    location, at = bases.location, bases.manifest
-    data = _at_base(at.tree, at.point, location.relpath, "manifest", at.named)
-    if isinstance(data, Verdict):
-        return data
-    if data is None:
-        if location.kind == "store":
-            return _base_fail(
-                f"the store's manifest {location.relpath} does not exist at {at.named}",
-                "In a store project the base's own manifest is the store's, and it says "
-                "where the baseline is: none there is not a base with no baseline "
-                "configured (ADR-014 D9).",
-                "check the store's history, or pass this landing deliberately, "
-                f"recorded: {_FORCED_LANDING}",
-            )
+    at = bases.manifest
+    paths = _base_guidelines_paths(ctx, bases)
+    if isinstance(paths, Verdict):
+        return paths
+    if paths is None or paths["baseline"] is None:
         return _BaseCopy(None, where=at.named)
-    fail = functools.partial(_base_manifest_fail, location.relpath)
-    try:
-        raw = yaml.safe_load(data.decode("utf-8")) or {}
-    except (UnicodeDecodeError, yaml.YAMLError) as exc:
-        return fail(f"does not parse ({exc})")
-    if not isinstance(raw, Mapping):
-        return fail("is not a mapping")
-    section = location.level(raw).get("guidelines") or {}
-    if not isinstance(section, Mapping):
-        return fail("gives guidelines as something other than a mapping")
-    paths: dict[str, str | None] = {}
-    for key in ("baseline", "ruleset"):
-        value = section.get(key)
-        if value is not None and not (isinstance(value, str) and value.strip()):
-            return fail(f"gives guidelines.{key} {value!r}, which is not a path")
-        paths[key] = value
-    if paths["baseline"] is None:
-        return _BaseCopy(None, where=at.named)
+    fail = functools.partial(_base_manifest_fail, bases.location.relpath)
     rel = policy_relpath(ctx, paths["baseline"])
     if rel is None:
         return fail(
@@ -5578,6 +6230,71 @@ def _base_baseline(ctx: RuleContext, bases: _BaseTrees) -> _BaseCopy | Verdict:
     return _BaseCopy(rel, entries, paths["ruleset"], policy.named)
 
 
+def _base_guidelines_paths(
+    ctx: RuleContext, bases: _BaseTrees
+) -> dict[str, str | None] | Verdict | None:
+    """The base's own manifest's ``guidelines.baseline`` and
+    ``guidelines.ruleset``, read where the project's own level lives
+    (``Manifest.location``), the user level beneath it as it stands now
+    (:func:`_user_guidelines`); ``None`` where a repository had no manifest
+    at the base. A store project's manifest missing there, and one that does
+    not parse or gives a path as anything but a string, fail. One read for
+    the shrink gate and ``guidelines.user_rules_ruled`` (ADR-032 inc 2).
+    """
+    location, at = bases.location, bases.manifest
+    data = _at_base(at.tree, at.point, location.relpath, "manifest", at.named)
+    if isinstance(data, Verdict):
+        return data
+    if data is None:
+        if location.kind == "store":
+            return _base_fail(
+                f"the store's manifest {location.relpath} does not exist at {at.named}",
+                "In a store project the base's own manifest is the store's, and it says "
+                "where the guidelines records are: none there is not a base with none "
+                "configured (ADR-014 D9).",
+                "check the store's history, or pass this landing deliberately, "
+                f"recorded: {_FORCED_LANDING}",
+            )
+        return None
+    fail = functools.partial(_base_manifest_fail, location.relpath)
+    try:
+        raw = yaml.safe_load(data.decode("utf-8")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        return fail(f"does not parse ({exc})")
+    if not isinstance(raw, Mapping):
+        return fail("is not a mapping")
+    section = location.level(raw).get("guidelines") or {}
+    if not isinstance(section, Mapping):
+        return fail("gives guidelines as something other than a mapping")
+    section = {**_user_guidelines(ctx.manifest), **section}
+    paths: dict[str, str | None] = {}
+    for key in ("baseline", "ruleset"):
+        value = section.get(key)
+        if value is not None and not (isinstance(value, str) and value.strip()):
+            return fail(f"gives guidelines.{key} {value!r}, which is not a path")
+        paths[key] = value
+    return paths
+
+
+def _user_guidelines(manifest: Any) -> dict[str, Any]:
+    """The user level's ``guidelines`` defaults, as the working configuration
+    layers them (ADR-014 D3, 5a; DEC_ADR_014_B141).
+
+    No base tree holds the user level, so a base reader takes it as it stands
+    now, beneath the level it reads at the base: a ``guidelines.baseline`` or
+    ``guidelines.ruleset`` set only there is still the one the project
+    resolves. Empty when no level is labelled ``user:``.
+    """
+    merged: dict[str, Any] = {}
+    for label, level in getattr(manifest, "levels", ()) or ():
+        if not str(label).startswith("user:"):
+            continue
+        section = level.get("guidelines") if isinstance(level, Mapping) else None
+        if isinstance(section, Mapping):
+            merged.update(section)
+    return merged
+
+
 def _base_manifest_fail(relpath: str, why: str) -> Verdict:
     return _base_fail(
         f"the base branch's manifest {relpath} {why}",
@@ -5595,18 +6312,30 @@ _FORCED_LANDING = "invariant pipeline advance <state> --force --reason '<why>'"
 
 
 def _base_rules(
-    ctx: RuleContext, at: _BaseAt, configured: str | None
+    ctx: RuleContext, at: _BaseAt, configured: str | None, *, digest: str | None = None
 ) -> dict[str, guidelines_reader.Guideline] | Verdict:
-    """The base branch's rules by id, read from its ruleset at the base.
+    """The base branch's rules by id (:func:`_base_ruleset`); no ruleset
+    configured there is no rule there."""
+    parsed = _base_ruleset(ctx, at, configured, digest=digest)
+    if isinstance(parsed, Verdict):
+        return parsed
+    return {} if parsed is None else {rule.id: rule for rule in parsed.rules}
 
-    No ruleset configured there is no rule there. The ruleset is parsed as the
+
+def _base_ruleset(
+    ctx: RuleContext, at: _BaseAt, configured: str | None, *, digest: str | None = None
+) -> guidelines_reader.Ruleset | Verdict | None:
+    """The base branch's ruleset, read at the base; ``None`` where none is
+    configured there. The ruleset is parsed as the
     base held it, its registries read at the same commit too, for the schema
     question alone: the engines a base's adapters offered do not change what
     a rule is. ``at`` is where the guidelines records live at the base: the
-    merge base, or the store's base (ADR-014 D9).
+    merge base, or the store's base (ADR-014 D9). With ``digest``, the base's
+    bytes must have it, or the copy is not the one asked for and it fails
+    (the pinned ruleset, DEC_ADR_012_B115).
     """
     if configured is None:
-        return {}
+        return None
     rel = policy_relpath(ctx, configured)
     if rel is None:
         return _base_fail(
@@ -5618,21 +6347,27 @@ def _base_rules(
         return data
     if data is None:
         return _base_fail(f"the base branch's ruleset {rel} does not exist at {at.named}", "")
+    if digest is not None and guidelines_reader.digest_of(data) != digest:
+        return _base_fail(
+            f"the base branch's ruleset {rel} at {at.named} is "
+            f"{guidelines_reader.digest_of(data)}, not the pinned {digest}", "",
+        )
     try:
         parsed = guidelines_reader.parse(
             data.decode("utf-8"),
             registered=[spec.id for spec in all_rules()],
             read=lambda name: git.blob_at(tree, point, name),
+            location=rel,
         )
     except UnicodeDecodeError as exc:
         return _base_fail(f"the base branch's ruleset {rel} is not UTF-8 text", f"{exc}.")
     except guidelines_reader.RulesetError as exc:
         return _base_fail(
-            f"the base branch's ruleset {rel} does not parse, so no added entry can be "
-            f"admitted ({len(exc.problems)} problem(s))",
+            f"the base branch's ruleset {rel} does not parse, so it cannot be compared "
+            f"({len(exc.problems)} problem(s))",
             "; ".join(exc.problems) + ".",
         )
-    return {rule.id: rule for rule in parsed.rules}
+    return parsed
 
 
 def _admitted(
@@ -5850,6 +6585,12 @@ def _verdict_facts(
             rule, condition, files, read=reads["read"], mask=reads["mask"], history=history
         )
 
+    # Read only when the tree has moved off the pin (DEC_ADR_012_B115).
+    pinned_rules, pinned_problem = (
+        _pinned_rules(ctx, tree, base, pinned)
+        if pin and pin != ruleset.digest and isinstance(pinned, Mapping)
+        else (None, None)
+    )
     runs = (ctx.evidence("test_runs") or ()) if ctx.pipeline else ()
     scanner = PrivacyScanner.from_manifest(ctx.manifest)
     return verdicts_reader.Facts(
@@ -5865,7 +6606,38 @@ def _verdict_facts(
         scan=lambda note: _note_findings(scanner, note),
         roles_problem=roles_problem,
         na=na,
+        pinned_rules=pinned_rules,
+        pinned_problem=pinned_problem,
     )
+
+
+def _pinned_rules(
+    ctx: RuleContext, tree: Path, base: str, pinned: Mapping[str, Any]
+) -> tuple[dict[str, guidelines_reader.Guideline] | None, str | None]:
+    """The rules of the ruleset the pipeline pinned, or why they cannot be read.
+
+    DN-6 as amended for BUG_115 (DEC_ADR_012_B115). The pin records a digest,
+    not the rules, so they are read where the pinned bytes are: the pin's path
+    at the base the baseline is read at (the merge base, or the store's base,
+    :func:`_base_trees`), accepted only when those bytes have the pinned
+    digest. Anything short of that is ``(None, why)``, and every rule is then
+    judged by the digest alone, as DN-6 first ruled.
+    """
+    path = pinned.get("path")
+    if not isinstance(path, str) or not path:
+        return None, "the pin records no ruleset path"
+    if not base:
+        return None, "no base recorded, so the pinned ruleset cannot be read at the base"
+    point = git.merge_base(tree, base)
+    if point is None:
+        return None, f"git could not find the merge base of {base!r} and this change"
+    bases = _base_trees(ctx, tree, point)
+    if isinstance(bases, Verdict):
+        return None, bases.message
+    rules = _base_rules(ctx, bases.policy, path, digest=pinned.get("digest"))
+    if isinstance(rules, Verdict):
+        return None, rules.message
+    return rules, None
 
 
 def _added_lines(ctx: RuleContext, tree: Path, base: str) -> dict[str, Any] | None:
@@ -5919,9 +6691,10 @@ def _guidelines_verdicts_complete(ctx: RuleContext) -> Verdict:
     other owed rule is answered by its latest recorded verdict, checked again
     through the reads ``plan_verdicts`` makes and the checks submission ran,
     the review-role predicate aside: a cited file whose blob changed, a
-    ruleset that is not the pin (DN-6), a test whose latest run is not green
-    (DN-8) or a mechanical N/A no longer true makes it stale, and stale is
-    missing. It fails on a missing or stale verdict, and on a current
+    recorded ruleset that is not the one the rule is judged against now, or a
+    rule the change edited since the pin (DN-6, DEC_ADR_012_B115), a test
+    whose latest run is not green (DN-8) or a mechanical N/A no longer true
+    makes it stale, and stale is missing. It fails on a missing or stale verdict, and on a current
     ``fail`` at blocker severity; a ``fail`` at warn is reported inside a
     pass. It never reads which agent submitted a verdict (D1 item 2, DN-12).
 
@@ -6094,6 +6867,159 @@ def standings_verdict(read: StandingsRead) -> Verdict:
     )
 
 
+@rule(
+    "guidelines.blocking_verdicts",
+    summary="Every judgement guideline at blocker the change owes has a verdict that "
+    "holds and does not fail.",
+    events=(),
+)
+def _guidelines_blocking_verdicts(ctx: RuleContext) -> Verdict:
+    """ADR-032 D7 ("A blocker judgement finding blocks"), DEC_ADR_032_I2.
+
+    ``guidelines.verdicts_complete`` stays ``warn`` in ``standard``, so a
+    blocker's ``fail`` would only warn there. This reads the same standings
+    (:func:`read_standings`), so the two cannot disagree on what is owed, and
+    judges the rules at ``blocker`` alone: a missing verdict, a stale one and
+    a current ``fail`` each fail it, unless a live grant passes the rule. A
+    path the user excepted is set aside by DN-3's one reading, so a rule only
+    excepted files meet is not owed. Block in ``standard`` and ``strict``,
+    warn in ``loose``.
+    """
+    return blocking_verdict(read_standings(ctx))
+
+
+def blocking_verdict(read: StandingsRead) -> Verdict:
+    """``guidelines.blocking_verdicts``' verdict over one read of the standings."""
+    if read.failure is not None:
+        return read.failure
+    if read.status == "no-ruleset":
+        return Verdict.na("no guidelines ruleset configured")
+    if read.status == "no-pipeline":
+        return Verdict.na("no pipeline is running, so no verdict is owed")
+    found = [s for s in read.standings if s.severity == "blocker"]
+    blocking = [s for s in found if s.blocks]
+    passed = [s for s in found if s.overridden and s.failing]
+    held = {s.rule for s in found}
+    kept = {
+        "ruleset": read.ruleset,
+        "grants": tuple((rule, why) for rule, why in read.grants.items() if rule in held),
+        "overridden": tuple((s.rule, s.unpassed()) for s in passed),
+    }
+    detail = "; ".join(_passed_detail(s) for s in passed)
+    if blocking:
+        fixes: list[str] = []
+        for s in blocking:
+            fixes.append(
+                f"fix what the fail on {s.rule} cites, then: invariant guidelines verdict "
+                f"{s.rule} --status pass"
+                if s.standing == verdicts_reader.CURRENT
+                else f"invariant guidelines verdict {s.rule} --status pass  # with the "
+                f"evidence the rule declares"
+            )
+        fixes += [
+            f"or propose to the user, who runs it at a terminal: invariant guidelines "
+            f"except {s.rule} <path> --by <who> --reason <why>"
+            for s in blocking
+        ]
+        return Verdict(
+            ok=False,
+            message=f"{len(blocking)} judgement guideline(s) at blocker lack a verdict "
+            f"that holds, or fail: " + "; ".join(s.describe() for s in blocking),
+            detail=detail,
+            fixes=tuple(fixes),
+            **kept,
+        )
+    return Verdict(
+        ok=True,
+        message=f"no judgement guideline at blocker fails or lacks a verdict, of "
+        f"{len(found)} owed, ruleset {read.ruleset}",
+        detail=detail,
+        **kept,
+    )
+
+
+@rule(
+    "guidelines.user_rules_ruled",
+    summary="A guideline only the user changes is changed with a new ruling, "
+    "against the base branch's copy.",
+    events=(),
+)
+def _guidelines_user_rules_ruled(ctx: RuleContext) -> Verdict:
+    """ADR-032 D7 ("A silent change"), DEC_ADR_032_I2.
+
+    The ruleset in the change is compared with the base branch's copy, read
+    where ``guidelines.baseline_only_shrinks`` reads the baseline's: at the
+    path the base's own manifest names, at the merge base or the store's
+    base. Each ``owner: user`` rule, and an ``owner: user`` layer map,
+    removed, lowered, made the project's, narrowed or reworded without a new
+    ``ruled``, and each exception added to one without its own new
+    ``ruled``, fails it (``core/guidelines.unruled_changes``). Adding or
+    widening needs nothing. N/A with no ruleset; a ruleset or a base copy
+    that cannot be read fails it, as for the shrink gate.
+    """
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None:
+        return Verdict.fail(
+            f"the ruleset cannot be compared: {failure.message}",
+            detail=failure.detail, fixes=failure.fixes,
+        )
+    if ruleset is None:
+        return Verdict.na("no guidelines ruleset configured")
+    changed = _changed_set(ctx)
+    if not changed.answerable:
+        return _unestablished_changed_set(changed)
+    tree = change_tree(ctx)
+    base = _base_point(tree, changed.base)
+    if isinstance(base, Verdict):
+        return base
+    bases = _base_trees(ctx, tree, base[0])
+    if isinstance(bases, Verdict):
+        return bases
+    paths = _base_guidelines_paths(ctx, bases)
+    if isinstance(paths, Verdict):
+        return paths
+    before = None if paths is None else _base_ruleset(ctx, bases.policy, paths["ruleset"])
+    if isinstance(before, Verdict):
+        return before
+    found = guidelines_reader.unruled_changes(before, ruleset)
+    where = bases.policy.named
+    if found:
+        return Verdict.fail(
+            f"{len(found)} change(s) to a guideline only the user changes carry no new "
+            f"ruling: " + "; ".join(found),
+            detail=f"compared with the base branch's ruleset, read at {where}. Only the "
+            "user excepts, lowers, narrows or rewords such a rule, recorded as ruled: "
+            "{by, date, reason} (ADR-032 D7).",
+            fixes=(
+                (
+                    "undo the change, or ask the user to record it at a terminal: invariant "
+                    "guidelines loosen <rule-id> --to warn --by <who> --reason <why>"
+                ),
+                (
+                    "for an exception, the user runs: invariant guidelines except "
+                    "<rule-id> <path> --by <who> --reason <why>"
+                ),
+            ),
+        )
+    if before is None:
+        return Verdict.clean("the base branch configured no ruleset, so every rule is new")
+    return Verdict.clean(
+        f"every change to a guideline only the user changes carries a new ruling, "
+        f"compared with the base's ruleset at {where}"
+    )
+
+
+def user_owned_guideline(ctx: RuleContext, guideline_id: str) -> bool:
+    """Is ``guideline_id`` a guideline marked ``owner: user`` in the ruleset
+    of the tree in hand (ADR-032 D7)? ``invariant override`` then asks for a
+    terminal and ``--by``. ``False`` where no ruleset loads or none names it."""
+    ruleset, failure = load_ruleset(ctx)
+    if failure is not None or ruleset is None:
+        return False
+    guideline = ruleset.by_id(guideline_id)
+    return guideline is not None and guideline.owner == "user"
+
+
 def _passed_detail(s: verdicts_reader.Standing) -> str:
     """A rule a grant passes, named with the grant, and whether it decided."""
     told = s.describe()
@@ -6253,6 +7179,15 @@ def _test_new_test_fails(ctx: RuleContext) -> Verdict:
     for run in failing:
         reason = _why_not_proof(run)
         if not reason:
+            if ctx.forbidden_agents:
+                # The red proof is the work of whichever agent wrote it, the
+                # bug-reproducer's in a repro session (DEC_ADR_030_D5).
+                return _forbidden_model_verdict(
+                    ctx, sorted(ctx.forbidden_agents),
+                    "a red run is on record, but an agent of this pipeline ran on a "
+                    "forbidden model",
+                    "test.new_test_fails",
+                )
             return Verdict.clean("a red run is on record")
         rejected.append((run, reason))
     # "Not yet proven", not "cannot be proven". A `Verdict.fail` here says the
@@ -7130,19 +8065,16 @@ def _privacy_clean(ctx: RuleContext) -> Verdict:
             )
         if carried.text or carried.others or carried.trailers:
             scanned.append("commit message")
+        # The host's declared trailer is let through in the trailer block on
+        # the store route as on the repository's (ADR-024 D5).
+        reader = store_screen if store_screen is not None else scanner
         for text in (carried.text, *carried.others):
-            if text and store_screen is not None:
-                findings.extend(store_screen.scan_message(text))
-            elif text:
-                findings.extend(scanner.scan_message(text, ctx.host_attribution_trailers))
+            if text:
+                findings.extend(reader.scan_message(text, ctx.host_attribution_trailers))
         for trailer in carried.trailers:
             # A --trailer value is a line git adds to the trailer block. It is
             # read as any line is, and never admitted as the host's trailer.
-            findings.extend(
-                store_screen.scan_message(trailer)
-                if store_screen is not None
-                else scanner.scan_message(trailer)
-            )
+            findings.extend(reader.scan_message(trailer))
 
     if store_tree is not None:
         if store_screen is not None:
@@ -7616,9 +8548,7 @@ def _repo_changed_set(ctx: RuleContext) -> _ChangedSet:
     # changed" rather than as a question that could not be asked. Every gate
     # sharing this union then screens nothing at exactly the boundary that
     # publishes the work. Name the branch when we are not standing on it.
-    branch = str((ctx.session or {}).get("branch") or "")
-    tip = branch if branch and git.current_branch(ctx.cwd) != branch else "HEAD"
-    committed = git.branch_files(ctx.cwd, base, tip)
+    committed = git.branch_files(ctx.cwd, base, _work_tip(ctx))
     seen: dict[str, Path] = {}
     for path in [*git.changed_files(ctx.cwd), *(committed or []), *declared]:
         seen[str(path)] = Path(path)

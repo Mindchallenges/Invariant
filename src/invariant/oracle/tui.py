@@ -26,8 +26,9 @@ on ``y`` or the Run button. The output is shown when it finishes.
 
 **A new session, the same way** (IDEA_030, ADR-009 D16). ``n`` opens the "New
 session" modal: a picker of the registered projects, the highlighted row's
-preselected, an optional first message, an editable label, and what would
-start, the full name, the two facts (open windows, uncommitted changes in the
+preselected, an optional first message, an editable label, an optional model
+(blank: the configured window model, DEC_ADR_030_D6), and what would
+start, the full name, the model, the two facts (open windows, uncommitted changes in the
 main checkout) and the exact command, asked of the CLI's own
 :class:`~invariant.oracle.startsession.Starter` after every edit. Nothing runs
 until Start; Start prepares again from a fresh read and starts nothing if the
@@ -219,7 +220,9 @@ class StartScreen(ModalScreen["tuple[str, dict] | None"]):
             yield Select(self.choices, value=self.selected, allow_blank=False, id="project")
             yield Input(placeholder="first message (optional)", id="prompt")
             yield Input(placeholder="label (blank: the time, MMDD-HHMM)", id="label")
+            yield Input(placeholder="model (blank: the configured default)", id="model")
             yield Static(id="name")
+            yield Static(id="model-line")
             yield Static(id="refused")
             yield Static(id="message")
             yield Static(id="facts")
@@ -237,10 +240,10 @@ class StartScreen(ModalScreen["tuple[str, dict] | None"]):
         value = self.query_one("#project", Select).value
         return value if isinstance(value, str) else ""
 
-    def inputs(self) -> tuple[str, str, str]:
-        """``(project key, label, first message)`` as the fields hold them now."""
+    def inputs(self) -> tuple[str, str, str, str]:
+        """``(project key, label, first message, model)`` as the fields hold them now."""
         return (self.selected_key(), self.query_one("#label", Input).value,
-                self.query_one("#prompt", Input).value)
+                self.query_one("#prompt", Input).value, self.query_one("#model", Input).value)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         self._edited()
@@ -255,18 +258,19 @@ class StartScreen(ModalScreen["tuple[str, dict] | None"]):
         self._pending = self.set_timer(START_DEBOUNCE, lambda: self.ask(*self.inputs()))
 
     @work(thread=True, exclusive=True, group="start-prepare")
-    def ask(self, key: str, label: str, prompt: str) -> None:
-        """Ask the Starter what ``(key, label, prompt)`` would start; launches nothing."""
+    def ask(self, key: str, label: str, prompt: str, model: str = "") -> None:
+        """Ask the Starter what ``(key, label, prompt, model)`` would start; launches nothing."""
         try:
             prepared, why = self.starter.prepare_in(
-                self.document, key, label.strip() or None, prompt or None), None
+                self.document, key, label.strip() or None, prompt or None,
+                model.strip() or None), None
         except InvariantError as exc:
             prepared, why = None, str(exc)
         except Exception as exc:  # noqa: BLE001 - shown in the modal; the dashboard goes on
             prepared, why = None, f"{type(exc).__name__}: {exc}"
-        self.app.call_from_thread(self.show_answer, (key, label, prompt), prepared, why)
+        self.app.call_from_thread(self.show_answer, (key, label, prompt, model), prepared, why)
 
-    def show_answer(self, asked: tuple[str, str, str], prepared: dict | None,
+    def show_answer(self, asked: tuple[str, str, str, str], prepared: dict | None,
                     why: str | None) -> None:
         """Show one answer, unless the fields moved on since it was asked."""
         if asked != self.inputs():
@@ -275,13 +279,15 @@ class StartScreen(ModalScreen["tuple[str, dict] | None"]):
         start = self.query_one("#start", Button)
         if prepared is None:
             self.query_one("#refused", Static).update(Text(f"will not start: {why}"))
-            for part in ("#name", "#message", "#facts", "#command"):
+            for part in ("#name", "#model-line", "#message", "#facts", "#command"):
                 self.query_one(part, Static).update("")
             start.disabled = True
             return
         message = prepared.get("prompt")
         self.query_one("#refused", Static).update("")
         self.query_one("#name", Static).update(Text(f"name: {prepared['name']}"))
+        self.query_one("#model-line", Static).update(
+            Text(f"model: {prepared.get('model') or 'the host default'}"))
         self.query_one("#message", Static).update(
             Text(f"first message: {message}" if message else "first message: none"))
         self.query_one("#facts", Static).update(Text("\n".join(fact_lines(prepared["facts"]))))
@@ -377,7 +383,20 @@ class OracleApp(App):
             return
         self.call_from_thread(self._show, loaded)
 
+    def _torn_down(self) -> bool:
+        """Whether the app has begun shutting down (BUG_134).
+
+        Textual stops the app running before it removes the screens' widgets,
+        and only then stops the timers and cancels the workers. A freshness
+        tick or a read's result that lands in that window finds the widgets
+        gone; it has nothing left to show, so it shows nothing. Every caller
+        runs on the event loop, so the answer holds for the whole callback.
+        """
+        return not self.is_running
+
     def _show_failure(self, message: str) -> None:
+        if self._torn_down():
+            return
         banner = self.query_one("#banner", Static)
         banner.update(Text(f"could not read the machine: {message}"))
         banner.display = True
@@ -385,6 +404,8 @@ class OracleApp(App):
 
     def show_freshness(self) -> None:
         """``updated N s ago``, red once it is stale. Ages through failures."""
+        if self._torn_down():
+            return
         age = None if self.read_at is None else self.read_age + max(
             0.0, self.clock() - self.read_at
         )
@@ -394,6 +415,8 @@ class OracleApp(App):
         fresh.set_class(stale, "stale")
 
     def _show(self, loaded: Loaded) -> None:
+        if self._torn_down():
+            return
         banner = self.query_one("#banner", Static)
         banner.update(Text(loaded.banner))
         banner.display = bool(loaded.banner)
@@ -496,7 +519,7 @@ class OracleApp(App):
         starter: Starter = self.starter  # type: ignore[assignment]
         try:
             again, why = starter.again(document, key, prepared["label"], prepared["name"],
-                                       prepared["prompt"])
+                                       prepared["prompt"], prepared.get("model"))
             if again is None:
                 return Outcome(False, f"did not start: {why}")
             return Outcome(True, f"started as {again['name']}\n{starter.launch(again)}")

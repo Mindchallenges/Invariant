@@ -20,7 +20,23 @@ have shipped ("The control panel" below, ADR-009), and increment 7 is to
 come. IDEA_030 lets the oracle start a new Claude window, Remote Control on,
 in any registered project; its CLI core and shared launcher, the phone's
 "New session" sheet and the dashboard's ``n`` have shipped ("Start a session"
-below, ADR-009 D16).
+below, ADR-009 D16). IDEA_057 moves the choice of the next session to the
+oracle (ADR-027); its increment 1, the queue, ``session report`` and
+``oracle next``, which decides and starts nothing, has shipped ("What runs
+next" below), and so has increment 2, the watcher's chain step that starts it
+("The chain step" below), and increment 2b, the plan's usage, its hold and
+stalls ("Usage and stalls" below), increment 3, the chain on the phone ("The
+chain on the phone" below), and increment 4, web push, which folds IDEA_013
+in: every alert and chain notice reaches each phone that turned it on ("Web
+push" below). IDEA_060 is the page talking to running sessions: reading
+their conversation, sending to them, interrupting them and answering their
+prompts. Its record, ADR-029, is accepted; its increment 1, a live window's
+last message on its card and in its detail, has shipped ("Shipped: a
+window's last message" below), and so has increment 2, the live
+conversation view ("Shipped: a window's conversation" below), increment 3,
+sending a message ("Shipped: sending to a window" below), and increment 4's
+interrupt and slash commands ("Shipped: stopping a turn and slash commands"
+below); increments 5 to 7 are planned ("Planned: talking to sessions" below).
 
 +---+----------------------------------------------------+-------------+
 | # | Increment                                          | Status      |
@@ -76,6 +92,11 @@ Where it sits
            CLOSEHOST["closehost (IDEA_027 inc 6)"]
            START["startsession (IDEA_030; inc 2: Starter, find_started; inc 3: Starter.again)"]
            BUILD["build (BUG_089)"]
+           CHAIN["chain (IDEA_057, ADR-027 inc 1): decide"]
+           CHAINSTEP["chainstep (ADR-027 inc 2, ruling 9; inc 2b: usage hold, stalls, release)"]
+           USAGE["usage (ADR-027 inc 2b, ruling 10): plan_usage, hold"]
+           PUSH["push (ADR-027 inc 4, ruling 17): web push"]
+           TALK["talk (ADR-029 inc 1): SessionTalk, last_message"]
        end
 
        subgraph core["core/"]
@@ -84,6 +105,7 @@ Where it sits
            GIT[git]
            RULES[rules]
            PRIVACY[privacy]
+           QUEUE["queue (ADR-027 D2)"]
        end
 
        DOMAINS["domains/ (session, pipeline)"]
@@ -187,6 +209,32 @@ Where it sits
        BUILD --> MANIFEST
        WEBSVC --> BUILD
        CLI -- "stamp for status and doctor; reexec through _oracle_restart" --> BUILD
+       CLI -- "oracle next, chain start: decide, read_inputs, by_hand" --> CHAIN
+       CHAIN -- "read_queue, queue_path: read only" --> QUEUE
+       CHAIN -- "ROW_SESSION" --> SCAN
+       CHAIN -- "read_inputs: the backlog; session_end: an ended session, inert" --> DOMAINS
+       CLI -- "oracle next: QUEUED" --> QUEUE
+       WATCH -- "the chain step, after the alerts" --> CHAINSTEP
+       CHAINSTEP --> CHAIN
+       CHAINSTEP -- "open_windows" --> START
+       CHAINSTEP -- "oracle/chain.json, locks/chain.lock" --> HOME
+       CHAINSTEP --> NOTIFY
+       CLI -- "oracle chain status, pause, resume, start" --> CHAINSTEP
+       CLI -. "injects ChainHands: start-session's launch; domains/queue's begin, mark, fail" .-> CHAINSTEP
+       CLI -- "hook statusline: record_usage; read_usage, weekly_max" --> USAGE
+       USAGE -- "oracle/usage.json" --> HOME
+       CHAINSTEP -- "hold, spent" --> USAGE
+       CLI -- "oracle chain greenlight, continue, retry, close" --> CHAINSTEP
+       CLI -. "injects the plan_usage reader; ChainHands' nudge (TerminalTyper), close (close_host) and requeue" .-> CHAINSTEP
+       CLI -. "parses the status line, installs it, types into a tab, through" .-> HOST
+       CLI -- "_oracle_notifier: FanOutNotifier of the Mac and push; revoke: drop_device" --> PUSH
+       CLI -. "injects the POST (_oracle_push_post: urllib_post)" .-> PUSH
+       PUSH -- "PushNotifier is a Notifier; NobodyToNotify, Outcome" --> NOTIFY
+       PUSH -- "web/push.json, locks/push.lock" --> HOME
+       PUSH -- "a send skips an unpaired device" --> DEVICES
+       WEB -- "the key and this device's subscription, subscribe, unsubscribe" --> PUSH
+       WEB -- "each live window's last message, for the view (ADR-029 inc 1)" --> TALK
+       CLI -. "injects SessionTalk (_oracle_talk: ClaudeCodeTalk) from" .-> HOST
 
 **The dependency rule.** ``oracle/`` is a layer above ``domains/`` and below the
 CLI. Nothing in ``core/``, ``domains/`` or ``adapters/`` imports it, and a test scans
@@ -379,6 +427,9 @@ applies the signal through one guarded helper, ``_record_attention``.
 |                        |                        | and ``degraded`` cleared,   |
 |                        |                        | ``ended: false``. The       |
 |                        |                        | ledger is kept.             |
+|                        |                        | ``prompts`` counts one more |
+|                        |                        | and ``prompted`` is now     |
+|                        |                        | (ADR-027 ruling 21).        |
 +------------------------+------------------------+-----------------------------+
 | ``UserPromptSubmit``   | ``background-done``    | The entries it names        |
 | of a task-notification |                        | closed; ``turn: running``,  |
@@ -858,7 +909,11 @@ with no turn yet, or one whose tail is a single line longer than 2 MiB. A
 file is only written after its last turn, so the fallback errs towards
 "active", as the old formula always did. The reader also returns the turn's
 role and its text (capped at 4000 characters), and takes a predicate, so
-IDEA_029 can ask it for the newest entry with text.
+IDEA_029's Read half can ask it for the newest entry with text. That half
+shipped as ADR-029's increment 1 (IDEA_060 took it in) through its own
+reader, ``hosts/claude_code_talk``, on the same ``scan_tail``: the web server,
+not the scan, asks for it, so no transcript text enters the ``assess``
+document (ADR-009 D17; "Shipped: a window's last message" below).
 
 **Host facts are injected** (ADR-007 D11). Which transcripts belong to a
 project and whether a pid is ``claude`` are Claude Code knowledge. The scan
@@ -945,6 +1000,20 @@ nothing else. Alerts come first in the list it returns.
 |                      |       |              | BUG_094) and the last  |                        |
 |                      |       |              | activity is older than |                        |
 |                      |       |              | 20 minutes             |                        |
++----------------------+-------+--------------+------------------------+------------------------+
+| ``stalled``          | yes   | medium       | a ``session`` row      | when the quiet began   |
+|                      |       |              | whose current host is  | (``last_activity``)    |
+|                      |       |              | known alive, with no   |                        |
+|                      |       |              | activity for the       |                        |
+|                      |       |              | project's              |                        |
+|                      |       |              | ``stall_after`` of     |                        |
+|                      |       |              | ``oracle.chain`` (2 h),|                        |
+|                      |       |              | not ``waiting``; cause |                        |
+|                      |       |              | ``limit``, ``error``   |                        |
+|                      |       |              | or ``unknown`` from    |                        |
+|                      |       |              | the host's last turn   |                        |
+|                      |       |              | (ADR-027 ruling 11,    |                        |
+|                      |       |              | D26, D27)              |                        |
 +----------------------+-------+--------------+------------------------+------------------------+
 | ``finished``         | yes   | low          | the session is in its  | ``reviewed`` /         |
 |                      |       |              | reviewed stage         | ``ready``              |
@@ -1221,6 +1290,11 @@ table that holds wins.
 | ``your_turn``        | info     | none                                                                         | —                 |
 +----------------------+----------+------------------------------------------------------------------------------+-------------------+
 
+``recommend`` never answers a prompt, and ADR-029 keeps that: the answers
+the phone gives are typed through a path of their own (``oracle/talk``),
+never offered as a step here (a question's since increment 5, "Shipped:
+answering a question" below; a permission prompt's in increment 6).
+
 The close guards are ADR-009 D7's and D15's: the host is alive by a
 verified source (``pid_source`` ``record`` or ``both``, or ``attention+ps`` since
 BUG_099), with a start token and no ``pid_conflict``; it is ``rooted_here``;
@@ -1361,6 +1435,9 @@ at a time. A tick does four things in order:
    ``interval``, written atomically, so a reader never sees half of one.
 4. **De-duplicate and notify** through the ledger,
    ``<oracle home>/oracle/alerts.json``.
+5. **The chain step**, unless ``--no-chain``: follow, decide and start the
+   next session in each project ("The chain step" below). The tick's result
+   carries what it did as ``chain``.
 
 ``run(once, max_ticks, on_tick)`` repeats the tick and sleeps so that ticks
 start one ``interval`` apart. A tick that raises is logged to stderr, and the
@@ -1442,6 +1519,16 @@ with room to spare.
 ``Notification`` has a ``title``, a ``message``, an optional ``subtitle`` and an
 optional ``sound``.
 
+- ``FanOutNotifier`` (ADR-027 increment 4, :need:`DEC_ADR_027_D38`) is what
+  the seam returns: the Mac banner first, then web push to every phone that
+  turned it on ("Web push" below), each channel on its own, so one failing
+  never stops or delays the other. It counts as delivered once any channel
+  delivered, so the ledgers do not owe a notification the Mac showed; a
+  channel that failed beside one that delivered is reported through its
+  ``log`` (``oracle watch``'s stderr) and its ``last`` outcomes, and is not
+  retried. A channel with nobody to send to raises ``NobodyToNotify``, which
+  is neither a delivery nor a failure. Without ``cryptography`` it is the Mac
+  alone.
 - ``OsascriptNotifier`` runs ``osascript -e 'display notification … with title … subtitle … sound name …'``. The script is one argument, with no shell in
   between. A refusal or a missing ``osascript`` raises ``NotifyError``, which
   exits 1.
@@ -1470,7 +1557,10 @@ posts nothing.
 ticks that have news. With ``--json`` it prints one line per tick. ``--once`` runs
 a single tick and prints its result. ``--no-notify`` sends nothing, and the edges
 it sees stay owed to a watcher that does notify. ``notify-test`` posts one
-notification through the same seam. See :doc:`cli.md </architecture/cli>`, "Oracle".
+notification through the same seam and prints each channel's outcome: the
+Mac banner and each device with web push on, or why push is not available.
+Any channel that failed exits 1, naming it, even when another delivered
+(:need:`DEC_ADR_027_D43`). See :doc:`cli.md </architecture/cli>`, "Oracle".
 
 Shipped: the gate cache
 -----------------------
@@ -1677,12 +1767,22 @@ and ``plist_bytes`` writes it with ``plistlib``:
 +--------------------------+-------------------------------------------------------------+------------------------------------+
 | ``EnvironmentVariables`` | ``PATH``, and ``INVARIANT_HOME`` only if it was set         | launchd's ``PATH`` is minimal.     |
 |                          |                                                             | This one is the directories        |
-|                          |                                                             | ``git`` and ``osascript`` are      |
-|                          |                                                             | found in now, then                 |
+|                          |                                                             | ``git``, ``osascript`` and         |
+|                          |                                                             | ``claude`` (the chain step opens   |
+|                          |                                                             | it, ADR-027) are found in now,     |
+|                          |                                                             | then                               |
 |                          |                                                             | ``/usr/bin:/bin:/usr/sbin:/sbin``. |
-|                          |                                                             | An unset ``INVARIANT_HOME`` stays  |
-|                          |                                                             | unset, so it keeps meaning         |
-|                          |                                                             | ``~/.invariant``.                  |
+|                          |                                                             | A program this ``PATH`` lacks is   |
+|                          |                                                             | looked for in                      |
+|                          |                                                             | ``/opt/homebrew/bin``,             |
+|                          |                                                             | ``/usr/local/bin``,                |
+|                          |                                                             | ``~/.local/bin`` and               |
+|                          |                                                             | ``~/.claude/local``; one found     |
+|                          |                                                             | nowhere is a warning naming it,    |
+|                          |                                                             | never dropped in silence (BUG_155, |
+|                          |                                                             | ADR-028). An unset                 |
+|                          |                                                             | ``INVARIANT_HOME`` stays unset, so |
+|                          |                                                             | it keeps meaning ``~/.invariant``. |
 +--------------------------+-------------------------------------------------------------+------------------------------------+
 
 ``LaunchdInstaller(agents_dir, uid, run, sleep)`` owns the plist file and the
@@ -1719,11 +1819,21 @@ and ``plist_bytes`` writes it with ``plistlib``:
 | ``status()``            | Whether the plist exists, whether          |
 |                         | ``print`` finds the agent, the interpreter |
 |                         | it names and whether that still exists,    |
-|                         | and its interval.                          |
+|                         | its interval, and ``missing_programs``:    |
+|                         | the programs its label needs               |
+|                         | (``AGENT_PROGRAMS``) that the plist's own  |
+|                         | ``PATH`` cannot find, asked of             |
+|                         | ``shutil.which`` as the agent would        |
+|                         | (BUG_155).                                 |
 +-------------------------+--------------------------------------------+
 | ``interpreter_check()`` | ``doctor``'s row. Reads the plist only,    |
 |                         | asks launchd nothing. ``None`` with no     |
 |                         | plist.                                     |
++-------------------------+--------------------------------------------+
+| ``programs_check()``    | ``doctor``'s programs row: the same read   |
+|                         | as ``missing_programs``. ``None`` with no  |
+|                         | plist or an unreadable one, which the      |
+|                         | interpreter row reports.                   |
 +-------------------------+--------------------------------------------+
 
 ``RecordingLaunchctl`` is a fake launchd for tests: it records every call,
@@ -1740,7 +1850,11 @@ the plist. ``status`` reports the agent and the snapshot: the snapshot's age is
 its modification time (``watcher.snapshot_status``), and it is **stale** when it
 is older than three of its own intervals, or missing. ``doctor`` adds one row
 when the plist exists: ``oracle agent interpreter``, failing when the
-interpreter has moved. See :doc:`cli.md </architecture/cli>`, "Oracle".
+interpreter has moved. ``install`` prints a note for each program it found only
+in a well-known directory and a warning naming each it found nowhere, and
+``status`` a ``programs`` line naming each the plist's ``PATH`` cannot find;
+``doctor``'s ``oracle agent programs`` row warns of the same, and never fails
+(BUG_155, ADR-028). See :doc:`cli.md </architecture/cli>`, "Oracle".
 
 Both also say whether the processes run the installed invariant (BUG_089).
 ``status`` stamps the installed tree (``build.stamp``) and compares it with the
@@ -1835,7 +1949,9 @@ under the banner says ``updated N s ago``, every second: the rows' age when
 read (the snapshot's age, or 0 for an in-process scan) plus the time since.
 It turns red with ``STALE`` once that is older than three intervals.
 ``dashboard.freshness`` words it, and the web page and ``oracle status`` use the
-same rule.
+same rule. Once the app has begun shutting down, a freshness tick or a read's
+result that arrives shows nothing: textual removes the widgets before it
+stops the timers and cancels the read (BUG_134).
 
 **The table.** Project by project: each live session, with its hosts nested
 under it (current first, then earlier ones), then the orphan hosts, the
@@ -1921,8 +2037,10 @@ two runs whose values mask alike are still two commands: a confirm for one
 does not run the other.
 
 ``refusal`` refuses a runnable step on a row whose host is waiting on a prompt:
-the oracle never answers one, and a waiting row recommends nothing to run in
-the first place. It also refuses an ``argv`` that is not an ``invariant``
+no confirmed action answers one, and a waiting row recommends nothing to run in
+the first place. As built the oracle answers no prompt at all; ADR-029
+(proposed) plans answers from the phone on a separate path, and this refusal
+stays as it is. It also refuses an ``argv`` that is not an ``invariant``
 command, a ``cwd`` that does not exist, and a kind it does not know, because
 the snapshot is a file and a file is not a reason to run a program.
 
@@ -2107,6 +2225,17 @@ Who gets an answer
 | ``/icon-192.png``,             |                      | ``webpage.icon``; reads nothing                                     |
 | ``/icon-512.png``              |                      |                                                                     |
 +--------------------------------+----------------------+---------------------------------------------------------------------+
+| ``GET /sw.js``                 | 401                  | the service worker (ADR-027 inc 4), ``text/javascript``, under its  |
+|                                |                      | own ``default-src 'none'; img-src 'self'``; while push is offered,  |
+|                                |                      | else 404                                                            |
++--------------------------------+----------------------+---------------------------------------------------------------------+
+| ``POST /api/push/subscribe``   | 401                  | needs a same-origin ``Origin``: keeps the browser's subscription    |
+| (JSON)                         |                      | for this device, 200 ``{on}``; 403 (origin), 400 (not one the       |
+|                                |                      | oracle keeps), 409 (push not offered now), 413, 503 (cannot write)  |
++--------------------------------+----------------------+---------------------------------------------------------------------+
+| ``POST /api/push/unsubscribe`` | 401                  | needs a same-origin ``Origin``: drops ``endpoint``, or every one    |
+| (JSON ``{endpoint}``)          |                      | of this device's; 200 ``{removed}``, over HTTP too                  |
++--------------------------------+----------------------+---------------------------------------------------------------------+
 | anything else                  | 401                  | 404, or 405 for a method that is not ``GET``                        |
 +--------------------------------+----------------------+---------------------------------------------------------------------+
 
@@ -2119,7 +2248,8 @@ it, never leaves the origin, while the page's own form ``POST`` keeps its real
 and the pairing form refused itself (BUG_079, ADR-008 D5). The page's
 Content-Security-Policy admits only its own nonce-tagged script and style,
 ``connect-src 'self'``, and, for the home-screen app, ``manifest-src 'self'``
-and ``img-src 'self'`` (ADR-009 D10).
+and ``img-src 'self'`` (ADR-009 D10), and, for web push, ``worker-src 'self'``
+(ADR-027 increment 4).
 
 **The home-screen app** (IDEA_027 increment 4, ADR-009 D10). The panel's
 ``<head>`` links the manifest with ``crossorigin="use-credentials"``, so the
@@ -2160,9 +2290,10 @@ are served.
    graph LR
        DOC["assess document"] --> PV["panel.view"]
        JOBS["device's jobs"] --> PV
+       CHAINS["ChainReader.read: ledger, queues, usage hold (ADR-027 inc 3)"] --> PV
        PV --> STATE["/api/state: view"]
        WORDS["panel.WORDS"] --> PAGE["GET /: the page, WORDS embedded"]
-       STATE --> SCRIPT["ORACLE.screen: overview, detail or leftovers"]
+       STATE --> SCRIPT["ORACLE.screen: overview, detail, leftovers or chain"]
        PAGE --> SCRIPT
 
 **The page holds no vocabulary** (ADR-009 D3). The fixed strings are
@@ -2197,7 +2328,9 @@ A card in needs you or problems whose step is ``run`` or ``terminal`` has a
 primary button named from the wording table ("Re-run tests…", "Merge…",
 "Resume…"), and so does the step in its detail. An ``info`` step, a row with no
 step and a step the table does not know have none. A row waiting on a prompt
-has no button at all: its card opens its detail (ADR-009 D8). The actions are
+has no button at all: its card opens its detail (ADR-009 D8). ADR-029
+(proposed, not built) plans an "Answer…" or "Reply…" button on such a row,
+which opens the session's conversation rather than a step's confirm. The actions are
 the TUI's, under the TUI's rules (ADR-007 D18, ADR-008 D8–D13):
 
 +----------------------------------+----------------------------------+
@@ -2267,6 +2400,13 @@ the TUI's, under the TUI's rules (ADR-007 D18, ADR-008 D8–D13):
 |                                  | reload still shows the result    |
 +----------------------------------+----------------------------------+
 
+**A chain action** (ADR-027 increment 3) takes the same three steps. Its
+button names a chain key, ``<project key>|chain:<action>[:<entry>]``, in
+place of a row key; the server derives its ``invariant`` argv from a fresh
+chain read (``oracle/chainview``) instead of a row's recommendation, and
+keys its job by the project's chain, so one chain action runs per project at
+a time. "The chain on the phone" below has the rest.
+
 **Copy.** The detail's step and every confirm carry Copy, which puts
 ``panel.copy_line`` on the clipboard: ``shlex.join`` of the argv, its pinned
 variables leading as ``NAME=value``. It runs nothing and spends no nonce. A
@@ -2315,7 +2455,10 @@ it lives in ``web/``. The format is in :doc:`state_model.md </architecture/state
 **What the server never does.** It does not run an ``argv``, ``cwd`` or
 environment a client sent, and it does not trust the snapshot for an action.
 It does not answer a permission prompt, and it does not run a step on a row
-that waits on one.
+that waits on one. Both hold for the action routes as built. ADR-029
+(proposed) plans talk routes that do answer prompts, under their own
+fingerprint, receipt and confirm ("Planned: talking to sessions" below); the
+action routes keep this rule.
 
 **The listener.** Each connection reads with a 10-second socket timeout,
 carries at most 40 headers (431 past that), and at most 32 are served at
@@ -2419,7 +2562,14 @@ removes the page alone and ``oracle uninstall`` removes both (ADR-008 D15).
 |                          |                                                               | the interpreter's own |
 |                          |                                                               | directory, then the   |
 |                          |                                                               | system directories.   |
-|                          |                                                               | No ``TERM``, which    |
+|                          |                                                               | Built as the          |
+|                          |                                                               | watcher's, with the   |
+|                          |                                                               | same well-known       |
+|                          |                                                               | fallback and the same |
+|                          |                                                               | warning for a program |
+|                          |                                                               | found nowhere         |
+|                          |                                                               | (ADR-028). No         |
+|                          |                                                               | ``TERM``, which       |
 |                          |                                                               | launchd does not set  |
 |                          |                                                               | either:               |
 |                          |                                                               | ``web.run_program``   |
@@ -2622,6 +2772,16 @@ tokens, wording, the increment plan) is
   ``oracle start-session``'s own path; the start is a "Starting…" card under
   Working until a scan sees its window ("Start a session" below, ADR-009
   D16).
+- **ADR-027 increment 3 has shipped**: the chain on the phone. Its cards
+  join Needs you, each project's row gains a chain line that opens its Chain
+  screen, and every chain action runs the CLI's own verb through the confirm
+  and the action above ("The chain on the phone" below).
+- **IDEA_060's increment 1 has shipped** (ADR-029, accepted): each live
+  window's last message on its card, its leftover row and its detail,
+  IDEA_029's Read half ("Shipped: a window's last message" below).
+  Increments 2 to 7, the conversation, sending, interrupting and answering
+  its questions and permission prompts, are planned ("Planned: talking to
+  sessions" below).
 - **Increment 7** adds the clean-up and unstick actions (IDEA_017). Each
   destructive action is confirmed, re-checks its precondition at confirm
   time, runs as an ``invariant`` command with no refusal override, and is
@@ -3208,6 +3368,1522 @@ app, and the modal's workers are in their own group. The tests drive the
 modal through ``App.run_test()`` with a recording Starter, and through the
 CLI's own Starter behind the suite's launcher and successor seams, so no
 test opens a window.
+
+What runs next (IDEA_057, ADR-027 increment 1)
+-----------------------------------------------
+
+``invariant oracle next <project> [--json]`` prints what the oracle would
+start next in one registered project, and why. It starts nothing; the
+watcher's chain step acts on the same verdict ("The chain step" below), and
+``invariant oracle chain start`` starts it by hand. The rules are
+:need:`DEC_ADR_027_D3` and :need:`DEC_ADR_027_D12`, with increment 2's caps,
+resume and proposals (:need:`DEC_ADR_027_D16`, :need:`DEC_ADR_027_D17`,
+:need:`DEC_ADR_027_D20`).
+
++------------------+-------------------------------------+---------------------------+
+| Module           | Owns                                | Never does                |
++==================+=====================================+===========================+
+| ``chain``        | ``decide`` (pure), ``rank``,        | Read a store or a clock;  |
+|                  | ``in_hours``, ``ChainSettings``;    | start anything; import    |
+|                  | ``ready_items`` and                 | ``hosts/``                |
+|                  | ``live_sessions``, the inputs read  |                           |
++------------------+-------------------------------------+---------------------------+
+| ``core/queue``   | The record the oracle reads         | Know what runs next       |
+|                  | (``read_queue``, ``queue_path``)    |                           |
++------------------+-------------------------------------+---------------------------+
+| CLI              | ``cmd_oracle_next``: the index      | Decide anything ``decide``|
+|                  | match, one scan of the project, the | decides                   |
+|                  | reads, the verdict printed          |                           |
++------------------+-------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Cmd as oracle next
+       participant Index as oracle/index
+       participant Scan as oracle/scan
+       participant Ledger as oracle/chainstep
+       participant Chain as oracle/chain
+       Cmd->>Index: match(project): key, root or name
+       Note over Cmd: not registered, or no manifest at its root: refused (exit 2)
+       Cmd->>Chain: read_inputs(root): the queue (core/queue), the ready items (domains/workitem), oracle.chain
+       Cmd->>Scan: scan_all(select=key), assess: live sessions (with their latest report), windows
+       Cmd->>Ledger: limits(home, key): the pause, the last resume, the day's starts, the live chains
+       Cmd->>Chain: decide(queue, ready, oracle.chain, live, windows, now, pause, resume, caps)
+       Chain-->>Cmd: start (auto or propose), wait, paused or idle, and the reasons
+       Note over Cmd: printed; nothing is launched
+
+**The order.** A pause first: the chain ledger's, then a live session whose
+latest report is ``blocked`` or ``needs-user`` and was made after the last
+resume. Then the candidate: the queue's first ``queued`` entry of no
+``propose`` mode, else the backlog's first ready item no entry names (in any
+state, :need:`DEC_ADR_027_D18`) and no live entry serves
+(:need:`DEC_ADR_027_D48`), ranked by tier, priority and natural id;
+queued entries of ``propose`` mode ride the verdict as ``proposals``. An
+entry the backlog mirror wrote (``added_by: backlog``, increment 5) takes
+``oracle.chain.backlog``'s mode, not ``oracle.chain.queue``'s: under
+``propose`` the first one rides ``proposals`` and under ``off`` they are
+passed over, and the hand-queued work behind them runs
+(:need:`DEC_ADR_027_D49`). A candidate naming a bug not yet reproduced
+starts reproduce-first (:need:`DEC_ADR_027_D50`). A setting of ``off`` for a
+hand-queued head is ``idle``, and that head never falls through to the
+backlog. Then one at a time: any live session, or any live
+Claude window the scan knows of (``startsession.open_windows``), is ``wait``,
+naming the candidate it holds back; a session that reported ``done`` waits for
+its teardown. Then the caps, which hold an ``auto`` start as a ``wait`` naming
+the ``limit``: the day's chained starts against ``oracle.chain.daily_cap``,
+the machine's live chains against ``chain.machine_cap``. Last,
+``oracle.chain.hours``: outside it an ``auto`` start is proposed instead.
+
++-------------+---------------------------------------------------------------+
+| Verdict     | When                                                          |
++=============+===============================================================+
+| ``start``   | a candidate, its setting ``auto`` or ``propose``, nothing     |
+|             | live in the project                                           |
++-------------+---------------------------------------------------------------+
+| ``wait``    | a candidate, and a live session, a window or a cap holds it   |
++-------------+---------------------------------------------------------------+
+| ``paused``  | the ledger's pause, or a live session's stop report           |
++-------------+---------------------------------------------------------------+
+| ``idle``    | nothing queued and nothing ready, or the candidate's setting  |
+|             | is ``off``                                                    |
++-------------+---------------------------------------------------------------+
+
+**What it reads.** Everything read-only: the queue from the main checkout (or
+the store, D10), the backlog through ``domains/workitem`` with each type's
+``ready`` states (the shipped machines mark ``proposed`` and ``accepted``
+ideas and ``reproduced`` bugs) and ``reproduce`` states with the residue each
+item owes (the shipped bug machine's ``filed``, increment 5),
+``oracle.chain`` from the project's manifest,
+and one scan of the project through ``_oracle_cache``, which the suite
+replaces, so no test reads a process table. The scan's session row carries
+the session's latest ``session report`` as ``report`` (:need:`DEC_ADR_027_D11`).
+The chain ledger is read without its lock (``chainstep.limits``), and one
+that cannot be read is reported as a pause, as the step treats it.
+
+The chain step (IDEA_057, ADR-027 increment 2)
+-----------------------------------------------
+
+Every ``oracle watch`` tick, after the alerts, runs the chain step: it
+follows the start it made in each project, decides what runs next and acts on
+it. ``--no-chain`` opts a watcher out; each project's ``oracle.chain``
+settings are the switch (:need:`DEC_ADR_027_D13`). A failed start is triaged,
+not paused (:ref:`ruling 9 <adr-027-ruling-9>`).
+
++------------------+---------------------------------------+---------------------------+
+| Module           | Owns                                  | Never does                |
++==================+=======================================+===========================+
+| ``chainstep``    | ``ChainStep.step`` (follow, the       | Write a project's record; |
+|                  | report pause, decide, reserve,        | open a window itself;     |
+|                  | launch, triage), ``start_now``, the   | import ``hosts/``;        |
+|                  | ledger ``oracle/chain.json``          | replace a ledger it       |
+|                  | (``pause``, ``resume``, ``status``,   | cannot read               |
+|                  | ``limits``), ``ChainHands``           |                           |
++------------------+---------------------------------------+---------------------------+
+| ``chain``        | ``decide`` with the caps, the resume  | Read a clock; start       |
+|                  | time and ``proposals``;               | anything                  |
+|                  | ``read_inputs``, ``session_end``,     |                           |
+|                  | ``render_prompt``, ``label_for``,     |                           |
+|                  | ``by_hand``, ``on_failure``           |                           |
++------------------+---------------------------------------+---------------------------+
+| CLI              | ``_chain_hands`` (a seam):            | Decide anything the step  |
+|                  | ``start`` is ``_start_prepare`` and   | decides                   |
+|                  | ``_start_launch``; ``begin``,         |                           |
+|                  | ``mark``, ``fail`` are                |                           |
+|                  | ``domains/queue``'s; ``oracle chain`` |                           |
+|                  | status, pause, resume, start          |                           |
++------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant W as watcher tick
+       participant S as chainstep
+       participant L as oracle/chain.json (locks/chain.lock)
+       participant C as oracle/chain
+       participant H as ChainHands (the CLI)
+       W->>S: step(assess document, now), after the alerts
+       S->>L: lock, read (unreadable: do nothing, say so once)
+       loop each project the tick read
+           S->>S: follow the current start: bind, done, or failed
+           Note over S,H: failed: H.fail marks it, queues triage Qn at the head and one retry behind it; a failed triage pauses
+           S->>S: a blocked or needs-user report after the last resume: pause
+           Note over S: paused, a start to follow, a live session or window: nothing more
+           S->>C: read_inputs(root), decide(..., caps, resumed)
+           S->>H: start auto: begin(entry) marks it started; reserve the slot
+           S->>S: propose, or a cap that holds: one notice
+       end
+       S->>L: write, unlock
+       S->>H: start(key, label, prompt): start-session's launch, outside the lock
+       S->>L: lock: running (name, pid), or failed and triaged
+       S->>S: deliver the owed notices
+
+**Following a start** (:need:`DEC_ADR_027_D15`). The start is bound to the
+session row whose host was launched with its name, or has the pid the launch
+returned. Once that session has ended, ``chain.session_end`` reads its record
+through an inert store: torn down with no deliverable open is ``done``, and the
+entry is marked so.
+
++------------------------------------------------+----------------------------------+
+| A chained start fails when                     | Its reason on the entry          |
++================================================+==================================+
+| the launch raises (no successor, one outside   | the launch failed (the launcher's|
+| the main checkout, not macOS, no ``claude``)   | words stay in the ledger)        |
++------------------------------------------------+----------------------------------+
+| the reservation's process is gone, or it is    | the launch was interrupted       |
+| older than 120 s                               |                                  |
++------------------------------------------------+----------------------------------+
+| no session is bound 10 minutes after the       | no invariant session was bound   |
+| window appeared                                | 10 minutes after the window      |
+|                                                | appeared                         |
++------------------------------------------------+----------------------------------+
+| every host of the session (or the unbound      | the window closed without a      |
+| window) is seen not alive, no other Claude     | teardown or a report             |
+| window lives in the project, for 60 s; unknown |                                  |
+| liveness never counts, a ``done`` report waits |                                  |
++------------------------------------------------+----------------------------------+
+| the session ended torn down with a deliverable | the session was torn down with   |
+| open, abandoned, or its record is gone         | deliverables open / abandoned /  |
+|                                                | cannot be found                  |
++------------------------------------------------+----------------------------------+
+
+**Ruling 9** (:need:`DEC_ADR_027_D18`, :need:`DEC_ADR_027_D23`). A failure
+marks the entry ``failed`` and, through ``ChainHands.fail``, queues in one
+locked edit a retry of the same work at the head (``retry_of``; none when the
+failed entry was already a retry) and the triage ``triage Qn`` in front of it
+(``triage_of``), whose brief is ``oracle.chain.triage_prompt``. The triage
+session files and reproduces the bug and judges: a severe bug's fix goes on
+the queue as a proposal (``queue add --propose``) and the retry comes off; an
+unsafe project gets ``session report --outcome needs-user``, which pauses;
+otherwise the retry runs. A triage that fails pauses the chain, and so does a
+triage the recorder cannot queue.
+
+**What stops the chain:** a ``blocked`` or ``needs-user`` report made after
+the last resume (the pause outlives the session), a failed triage, ``oracle
+chain pause``, and nothing left to start. ``oracle chain resume`` lifts a
+pause and retries nothing (:need:`DEC_ADR_027_D17`).
+
+**The limits** (:need:`DEC_ADR_027_D16`). A day's starts, counted by the
+machine's local calendar day, against ``oracle.chain.daily_cap``; the
+projects with a start to follow against the user config's
+``chain.machine_cap``. Either turns an ``auto`` start into a ``wait``, said
+once per cap and day. A proposal is never held, and neither is ``oracle chain
+start``.
+
+**Proposals.** A backlog item under ``oracle.chain.backlog: propose``, any
+start outside ``oracle.chain.hours``, and every queued entry of its own
+``propose`` mode (:need:`DEC_ADR_027_D20`) is said once, naming ``invariant
+oracle chain start <project> [--entry Qn]``. The first entry of no mode behind
+a proposed one runs meanwhile.
+
+**The start.** The window is ``oracle start-session``'s own, named
+``<project>-<ref>`` (the ref cut to 40 characters), its first prompt the
+entry's brief or ``oracle.chain.prompt`` (:need:`DEC_ADR_027_D19`). A backlog
+start is recorded as an entry of its own (``added_by: oracle``). The window
+binds only once it has run ``invariant session start`` itself, so each shipped
+default (the start, triage and reproduce prompts) opens by telling it to run
+``invariant session start`` (``{ref}-{entry}``, ``triage-{entry}``,
+``reproduce-{ref}-{entry}``), ``session isolate --execute`` and ``session plan
+add`` before the work (BUG_158, :need:`DEC_ADR_027_D62`). A brief, or a
+project's own template, must carry the same step to bind.
+
+**The ledger** (:need:`DEC_ADR_027_D14`) is described in
+:doc:`state_model.md </architecture/state_model>`, "The chain ledger". One
+that cannot be read halts the chain until it is mended; it is never replaced.
+
+**Notices** (:need:`DEC_ADR_027_D21`) go through the watcher's notifier and
+stay owed in the ledger until one is delivered.
+
+The seams are ``_chain_hands`` and, under it, start-session's:
+``_oracle_names_in_use``, ``_handoff_launcher`` and ``_handoff_successor``,
+which the suite replaces, so a chained start in a test opens no window and
+fails, and is triaged.
+
+Usage and stalls (IDEA_057, ADR-027 increment 2b)
+-------------------------------------------------
+
+Increment 2b adds two things the chain step acts on: the plan's weekly usage,
+which holds it (:ref:`ruling 10 <adr-027-ruling-10>`), and the ``stalled``
+signal, which nudges a chained session once (:ref:`rulings 11 <adr-027-ruling-11>`
+and :ref:`12 <adr-027-ruling-12>`). A chained session the chain has finished
+with no longer holds its project (:ref:`ruling 13 <adr-027-ruling-13>`).
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module                         | Owns                                  | Never does                |
++================================+=======================================+===========================+
+| ``usage``                      | ``PlanUsage``, ``oracle/usage.json``  | Parse a host's output;    |
+|                                | (``record_usage``, ``read_usage``),   | start or hold anything    |
+|                                | ``weekly_max``, the pure ``hold``     |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``chainstep``                  | the hold once a tick and its notice,  | Type into or close a      |
+|                                | ``greenlight``; ``current.stall``,    | window itself; pause on a |
+|                                | the nudge outside the lock,           | stall                     |
+|                                | ``stall_action``; ``released``        |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``signals`` / ``scan``         | ``stalled``; ``HostView.turn_end``,   | Read a clock or a store   |
+|                                | ``Row.stall_after``                   | in ``classify``           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_usage``    | the status line's JSON into the fact, | Import the oracle         |
+|                                | its text, ``install_statusline``      |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_launch``,  | ``TerminalTyper``; ``turn_ends``: a   | Type into a tab where     |
+| ``claude_code_telemetry``      | failed request's code and its quota   | only a shell runs         |
+|                                | window                                |                           |
++--------------------------------+---------------------------------------+---------------------------+
+
+**The reading** (:need:`DEC_ADR_027_D24`). Claude Code writes no usage file.
+``invariant hook statusline``, installed by the user with ``invariant hooks
+statusline`` (which never replaces a ``statusLine`` already there), reads
+the status line's ``rate_limits`` on stdin, records ``{weekly,
+weekly_resets_at, five_hour, five_hour_resets_at, read_at, host}`` in
+``<oracle home>/oracle/usage.json`` and prints ``week 41% · 5h 12%``.
+
+.. mermaid::
+
+   sequenceDiagram
+       participant CC as Claude Code status line
+       participant Cmd as invariant hook statusline
+       participant Host as hosts/claude_code_usage
+       participant U as oracle/usage
+       participant S as chainstep (each tick)
+       CC->>Cmd: JSON on stdin: rate_limits.seven_day, five_hour
+       Cmd->>Host: reading_from_statusline(payload, now)
+       Cmd->>U: record_usage(home, fact): oracle/usage.json
+       Cmd-->>CC: "week 41% · 5h 12%"
+       S->>U: read_usage (the injected seam), hold(reading, now, cap, greenlight)
+       Note over S: over or unknown: no auto-start, no proposal, one notice
+
+**The hold** (:need:`DEC_ADR_027_D25`). Judged once a tick for the whole
+machine: a reading under 30 minutes old with a weekly figure at or over
+``chain.weekly_usage_max`` (default 95, the user config) holds as ``over``;
+a missing or stale one, or one without a weekly figure, holds as
+``unknown`` until ``invariant oracle chain greenlight``, which a reading
+newer than it spends. ``decide`` answers a ``wait`` naming ``weekly_usage``
+for an auto-start and a proposal alike, after one at a time and before the
+caps; ``oracle next`` and ``oracle chain status`` show it. A start the user
+asks for is never held.
+
+**Stalled** (:need:`DEC_ADR_027_D26`, :need:`DEC_ADR_027_D27`). The signal
+table above. Its cause reads ``HostView.turn_end``, which the probe's
+transcripts answer from the last turn: Claude Code writes a failed request
+as an entry with ``isApiErrorMessage``, an ``error`` code and, for a usage
+limit, ``quotaLimits`` (``rateLimitType``, ``resetsAt``). A hand-started
+session's stall is the watcher's alert and nothing more.
+
+**The nudge** (:need:`DEC_ADR_027_D28`). Only the session bound to a
+project's chained start, with no report made:
+
+.. mermaid::
+
+   stateDiagram-v2
+       [*] --> stalled: the scan reads stalled
+       stalled --> waiting_reset: a usage limit, before its reset + 60 s
+       waiting_reset --> nudged: the reset passed
+       stalled --> nudged: typed "continue" into its tab
+       stalled --> not_nudged: no tab, no typer, or typing failed (a notice)
+       nudged --> [*]: activity again (the stall clears)
+       nudged --> still_stalled: one fuse later, or a new stall within one fuse of the nudge
+       still_stalled --> nudged: oracle chain continue
+       still_stalled --> [*]: oracle chain retry or close (released)
+       not_nudged --> [*]: oracle chain retry or close (released)
+
+The nudge is reserved under the chain lock and typed outside it through
+``ChainHands.nudge``: ``TerminalTyper`` finds the Terminal tab by the host's
+tty, refuses one where only a shell runs, and sends ``continue`` and a lone
+Return. A stall never pauses the chain.
+
+**Continue, Retry, Close** (:need:`DEC_ADR_027_D29`). ``invariant oracle chain
+continue|retry|close <project>`` need a recorded stall on the project's
+chained start. Continue types once more and re-arms the fuse. Retry and
+Close end the window through ``closehost.close_host`` (close-host's seams,
+every fact checked again); Retry puts the same entry back at the head
+(``domains/queue.requeue``, not ruling 9's retry), Close marks it failed with
+no triage.
+
+**Released** (:need:`DEC_ADR_027_D30`). Every failed chained start and every
+Retry or Close adds the session to the ledger's ``released``; one at a time
+skips those sessions in the step and in ``oracle next``, so the next work
+starts beside the parked session, whose worktree is the user's to land or
+abandon. A live Claude window still holds its project.
+A chained session that landed is released too once the oracle closed its
+window on its consent ("A landed window asks to close", ruling 21).
+
+The chain on the phone (IDEA_057, ADR-027 increment 3)
+------------------------------------------------------
+
+The phone shows each project's chain and acts on it through the verbs
+increments 2 and 2b built (:ref:`rulings 14 to 16 <adr-027-ruling-14>`,
+:need:`DEC_ADR_027_D31` to :need:`DEC_ADR_027_D37`). Every action is
+confirmed with its command, nonce and expiry; Retry and Close on the
+destructive sheet. The screens and every word are
+:doc:`oracle-panel.md </architecture/oracle-panel>`'s.
+
++------------------+---------------------------------------+---------------------------+
+| Module           | Owns                                  | Never does                |
++==================+=======================================+===========================+
+| ``chainview``    | ``ChainReader``: the ledger           | Write anything; run or    |
+|                  | (``chainstep.read_ledger``), each     | launch anything; import   |
+|                  | project's queue, the usage hold; each | ``hosts/``                |
+|                  | project's status and offered actions; |                           |
+|                  | the chain keys; ``derive``            |                           |
++------------------+---------------------------------------+---------------------------+
+| ``panel``        | the chain's cards, the Projects row's | Decide what is offered    |
+|                  | chain line, the Chain screen,         |                           |
+|                  | ``chain_confirm_words``; a chain      |                           |
+|                  | step's deed in its result             |                           |
++------------------+---------------------------------------+---------------------------+
+| ``webactions``   | a chain key's confirm and action      | Run an argv the page sent |
+|                  | (``_chain_confirm``, ``_chain_act``), |                           |
+|                  | one per project at a time             |                           |
++------------------+---------------------------------------+---------------------------+
+| ``web``          | the chain's read in ``/api/state``'s  | Add a route               |
+|                  | view                                  |                           |
++------------------+---------------------------------------+---------------------------+
+| CLI              | ``_oracle_chain_reader`` (the usage   | Decide anything the       |
+|                  | seam and the cap); ``queue move``     | reader decides            |
+|                  | and ``queue remove``                  |                           |
+|                  | ``--if-queued-at``; ``oracle chain    |                           |
+|                  | start --item``                        |                           |
++------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Page as Phone (Chain screen or a card)
+       participant Srv as webactions
+       participant View as chainview (ChainReader, derive)
+       participant Cmd as invariant (queue / oracle chain)
+       Page->>Srv: GET /api/confirm?row=KEY|chain:move_up:Q4
+       Srv->>Srv: fresh scan
+       Srv->>View: read(scan, only=KEY): ledger, queue, usage hold, offered
+       Srv->>View: derive: offered now? the argv, its folder, the facts
+       Note over Srv,View: not offered: the sheet says why, no deed
+       Srv-->>Page: the sheet's words, a nonce bound to the command
+       Page->>Srv: POST /api/act {row: KEY|chain:move_up:Q4, nonce}
+       Srv->>View: fresh read and derive again
+       Note over Srv: not offered any more, or another command: 409, nothing ran
+       Srv->>Srv: reserve KEY|chain, audit start line
+       Srv->>Cmd: queue move Q4 --to 3 --if-queued-at 4, in the project's root
+       Note over Cmd: under the queue's lock: Q4 still queued at 4? else exit 2, nothing moved
+       Cmd-->>Srv: exit and output
+       Srv-->>Page: result sheet (Why from invariant's own line)
+
++-------------------------------+---------------------------------------------------+
+| Action                        | Offered when, and what runs                       |
++===============================+===================================================+
+| Move up, move down            | A queued entry that is not first (up) or last     |
+|                               | (down) among the queued ones. ``queue move Qn     |
+|                               | --to <the neighbour's position> --if-queued-at    |
+|                               | <its own>``                                       |
++-------------------------------+---------------------------------------------------+
+| Remove                        | Any queued entry. ``queue remove Qn               |
+|                               | --if-queued-at <its position>``                   |
++-------------------------------+---------------------------------------------------+
+| Start                         | No chained start to follow, and a queued          |
+|                               | propose-mode entry or a proposal the step made.   |
+|                               | ``oracle chain start <key> --entry Qn``, or       |
+|                               | ``--item <id>`` for a backlog proposal            |
++-------------------------------+---------------------------------------------------+
+| Pause, Resume                 | Pause while not paused, Resume while paused.      |
+|                               | ``oracle chain pause <key>`` or ``oracle chain    |
+|                               | resume <key>``                                    |
++-------------------------------+---------------------------------------------------+
+| Continue, Retry, Close        | A stall recorded on the project's current chained |
+|                               | start (D29). ``oracle chain continue <key>``,     |
+|                               | ``retry`` or ``close``. A hand-started session's  |
+|                               | stall offers none                                 |
++-------------------------------+---------------------------------------------------+
+| Go ahead (the greenlight)     | The weekly hold is ``unknown`` (D25). ``oracle    |
+|                               | chain greenlight``, in the oracle home            |
++-------------------------------+---------------------------------------------------+
+
+**What it reads.** On every ``/api/state``, and again for each confirm and
+action, the chain ledger without its lock, each registered project's queue
+and the plan's last usage reading: the read is never older than the page.
+A queue's path is found again once a minute. A ledger that cannot be read
+offers nothing anywhere; a queue that cannot be read offers nothing in its
+project; either is named under the Chain screen's Technical details.
+
+**The seams** are the chain step's: ``_oracle_plan_usage`` (the suite
+replaces it where a test needs a reading), and the page's runner,
+``_oracle_runner``, so no test runs a chain verb from the page. The queue
+and chain verbs a confirmed action runs are the CLI's own, with their own
+refusals.
+
+Web push (IDEA_057, ADR-027 increment 4)
+----------------------------------------
+
+Every oracle alert and every chain notice also reaches each phone that turned
+push on, under the same rising-edge de-dup and owed-until-delivered ledgers
+(:ref:`ruling 17 <adr-027-ruling-17>`, IDEA_013, :need:`DEC_ADR_027_D38` to
+:need:`DEC_ADR_027_D43`). Push is one more notifier behind the seam: the
+watcher and the chain step are unchanged, and push has no filter of its own.
+
++------------------+----------------------------------------+---------------------------+
+| Module           | Owns                                   | Never does                |
++==================+========================================+===========================+
+| ``push``         | ``PushBook`` (``web/push.json``: the   | Reach the network but     |
+|                  | VAPID key pair, each paired device's   | through the injected      |
+|                  | subscriptions), ``check_subscription``,| POST; send to an unpaired |
+|                  | ``payload``, ``encrypt`` (RFC 8291),   | device; send more than    |
+|                  | ``vapid_authorization`` (RFC 8292),    | the banner's text; import |
+|                  | ``PushNotifier``, ``urllib_post``      | ``hosts/``                |
++------------------+----------------------------------------+---------------------------+
+| ``notify``       | ``FanOutNotifier``, ``Outcome``,       | Decide what deserves a    |
+|                  | ``NobodyToNotify``                     | notification              |
++------------------+----------------------------------------+---------------------------+
+| ``web``          | ``/sw.js``, ``/api/push/subscribe``    | Offer push over plain     |
+|                  | and ``unsubscribe``; this device's     | HTTP or without           |
+|                  | push in ``/api/state``'s view          | ``cryptography``          |
++------------------+----------------------------------------+---------------------------+
+| ``webpage``,     | the service worker; the Notifications  | Hold a word of its own    |
+| ``panel``        | row and its words                      |                           |
++------------------+----------------------------------------+---------------------------+
+| CLI              | ``_oracle_notifier`` (the fan-out),    | Send a push itself        |
+|                  | ``_oracle_push_post`` (a seam);        |                           |
+|                  | ``oracle web`` hands the page the      |                           |
+|                  | book; ``web revoke`` drops a device's  |                           |
+|                  | subscriptions; ``notify-test``         |                           |
++------------------+----------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Phone as Phone (the page, then its service worker)
+       participant Web as oracle web
+       participant Book as web/push.json
+       participant W as oracle watch (a tick)
+       participant Fan as FanOutNotifier
+       participant PS as push service (Apple, Google, Mozilla, Windows)
+       Phone->>Web: GET /api/state: the VAPID key, made on first need
+       Phone->>Phone: register /sw.js; Turn on: pushManager.subscribe (the browser asks)
+       Phone->>Web: POST /api/push/subscribe {endpoint, keys}, same origin
+       Web->>Book: check_subscription; keep it for this device
+       W->>Fan: notify(title, subtitle, message): a rising edge or an owed notice
+       Fan->>Fan: the Mac banner (osascript), first
+       Fan->>Book: the subscriptions of devices still paired
+       Fan->>PS: POST aes128gcm ciphertext, VAPID, TTL 12 h, 5 s timeout
+       PS-->>Fan: 201; 404 or 410 (pruned); a failure (reported, the endpoint rests 60 s)
+       PS->>Phone: the ciphertext, which the browser decrypts
+       Phone->>Phone: showNotification(title, subtitle and message); a tap opens the panel
+
+**What is sent** (:need:`DEC_ADR_027_D40`). The banner's own text, as JSON
+``{title, subtitle, message, silent}``, cut to 120, 160 and 600 characters:
+the title ``invariant: <project>``, the row's label or ``chain <action>``,
+and the notice's one line. Never a brief, a prompt, a transcript or a path.
+It is sealed for the browser's key and auth secret (RFC 8291, one
+``aes128gcm`` record of 4096 bytes), so the push service relays ciphertext.
+Each POST carries ``TTL: 43200`` (a phone that is off gets it within 12
+hours), ``Urgency: high`` for an alert that sounds and ``normal`` for a silent
+one, and a VAPID token (ES256, 12 hours) whose ``aud`` is the push service and
+whose ``sub`` is the page's own https origin, the one the device subscribed
+from.
+
+**Where it is kept** (:need:`DEC_ADR_027_D39`). ``<oracle home>/web/push.json``,
+beside ``devices.json``: a record, owner-only from creation, under
+``locks/push.lock``, never in a manifest (:doc:`state_model.md
+</architecture/state_model>`, "Web push"). The VAPID key is made the first
+time the page offers push. A subscription belongs to the device whose token
+posted it, at most four per device; ``oracle web revoke`` drops it, a send
+skips any subscription whose device is no longer paired, and nothing is sent
+when the paired devices cannot be read.
+
+**When it is offered** (:need:`DEC_ADR_027_D41`). Only over HTTPS (a service
+worker and the Push API need a secure context) and only where
+``cryptography``, in the ``invariant[oracle]`` extra, is installed on the Mac.
+Otherwise the page's Notifications row says why and offers nothing. An
+endpoint is kept only when it is https on port 443 at one of the push services
+browsers use (``push.apple.com``, ``fcm.googleapis.com``,
+``push.services.mozilla.com``, ``notify.windows.com``, or a host below one),
+so a paired device cannot point the oracle's POSTs elsewhere. Opting in is the
+device's own setting, not an oracle action: it runs nothing on the Mac, and
+the browser's own permission prompt is its confirm, so it has no confirm
+sheet. On an iPhone, push works in the home-screen app (ADR-009 D10).
+
+**When a channel fails** (:need:`DEC_ADR_027_D38`). The Mac banner goes first,
+so push never delays it. A POST takes at most 5 s; an endpoint that could not
+be reached, or answered 429 or a 5xx, rests 60 s, so a slow push service costs
+one timeout per device a minute, not one per notification. A 404 or 410
+removes the subscription. One device failing never stops another. The
+fan-out counts a notification delivered once any channel delivered it: the
+ledger does not owe it again, the failure is a line in ``oracle watch``'s
+output (``oracle watch: push to iPhone could not notify: …``), and that
+device's row reads "On, but the last one did not arrive". A notification no
+channel delivered stays owed, as before.
+
+**The seams.** ``_oracle_push_post`` is the POST; ``conftest.py`` replaces it
+for every test with one that refuses, and the socket guard refuses anything
+past loopback besides. The tests run the real cryptography: RFC 8291's
+example reproduced byte for byte, a round trip through a browser key made in
+the test, and the VAPID signature verified with the public key the page is
+given. The page's script and the service worker run whole under ``node`` or
+``jsc`` against fakes of the push API.
+
+The backlog on the queue (IDEA_057, ADR-027 increment 5)
+--------------------------------------------------------
+
+Every open backlog item is on its project's queue, the chain works through it
+on its own, and a filed bug is reproduced before anyone fixes it
+(:ref:`rulings 18 to 20 <adr-027-ruling-18>`, :need:`DEC_ADR_027_D44` to
+:need:`DEC_ADR_027_D52`). The shipped defaults are on for every project; a
+project opts out in its manifest (``oracle.chain.mirror``,
+``oracle.chain.backlog``, ``oracle.chain.reproduce_first``,
+:doc:`manifest.md </architecture/manifest>`).
+
++------------------+---------------------------------------+---------------------------+
+| Module           | Owns                                  | Never does                |
++==================+=======================================+===========================+
+| ``domains/queue``| ``mirror`` (the reconcile), ``link``, | Read the oracle's ledger; |
+|                  | ``add --serves``, ``after_reproduce`` | start anything            |
++------------------+---------------------------------------+---------------------------+
+| ``core/queue``   | ``serves``, ``blind``, ``mirrored``,  | Know what is mirrored     |
+|                  | ``BACKLOG``, ``rank_key``, the        |                           |
+|                  | reproduction's outcome words          |                           |
++------------------+---------------------------------------+---------------------------+
+| ``chain``        | mirrored entries under                | Write anything; parse an  |
+|                  | ``oracle.chain.backlog``;             | agent's verdict words     |
+|                  | ``reproducing``,                      |                           |
+|                  | ``reproduce_outcome``, the reproduce  |                           |
+|                  | prompt                                |                           |
++------------------+---------------------------------------+---------------------------+
+| ``chainstep``    | the mirror once a minute on an idle   | Write the queue itself    |
+|                  | tick; a reproduce start in the        |                           |
+|                  | ledger; the verdict routed when its   |                           |
+|                  | session lands                         |                           |
++------------------+---------------------------------------+---------------------------+
+| CLI              | ``ChainHands.mirror`` and             | Decide what is mirrored   |
+|                  | ``.reproduced`` over                  |                           |
+|                  | ``domains/queue``; ``queue mirror``,  |                           |
+|                  | ``queue link``, ``queue add           |                           |
+|                  | --serves``                            |                           |
++------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant W as watcher tick (chainstep)
+       participant H as ChainHands (the CLI)
+       participant Q as domains/queue
+       participant B as main checkout's backlog (domains/workitem)
+       participant C as oracle/chain
+       W->>H: an idle project, once a minute: mirror(key)
+       H->>Q: mirror()
+       Q->>B: every item, its machine's mirror states, live sessions
+       Note over Q: under the queue's lock: closed or served mirrored entries leave; new items go in by rank
+       W->>C: read_inputs: queue, ready, unreproduced bugs; decide
+       C-->>W: start Qn (auto; reproduce-first for a filed bug)
+       W->>H: begin, start: the reproduce prompt
+       Note over W: the session lands (torn down, plan complete)
+       W->>C: reproduce_outcome(root, bug, residue at the start)
+       W->>H: reproduced(key, Qn, red|closed|owed|blind)
+       H->>Q: after_reproduce: red at the head, closed done, owed or a second blind a proposal, blind at the head
+
+**The mirror** (:need:`DEC_ADR_027_D44` to :need:`DEC_ADR_027_D47`). One
+idempotent reconcile over the backlog of the main checkout (or the store),
+under the queue's lock, writing only when something changed. An item in a
+state its machine marks ``mirror`` (the shipped bug machine ``filed`` and
+``reproduced``; ideas ``proposed``, ``accepted`` and ``in_progress``), or one
+``oracle.chain.mirror_states`` names, gets one entry ``added_by: backlog``,
+before the first queued mirrored entry whose item ranks after it, else at the
+end. It is skipped while any entry names it in any state, while a live entry
+serves it, while a live session names it in its name or an open deliverable,
+and once the mirror has added it in its current open spell (the queue's
+``mirrored``), so an entry the user removed stays off. A queued mirrored
+entry leaves when its item leaves the mirrored states or another live entry
+serves it. The chain step has the hands run it for an idle project at most
+once a minute; ``invariant queue mirror`` runs it by hand.
+
+**Serves** (:need:`DEC_ADR_027_D48`). ``invariant queue add REF --serves
+ITEM`` and ``invariant queue link ID ITEM`` (``--clear``) say which open item
+an entry serves; the mirror, the fallback and ``oracle chain start --item``
+pass over that item while the entry is queued or started.
+
+**Backlog work starts on its own** (:need:`DEC_ADR_027_D49`). A mirrored entry
+starts under ``oracle.chain.backlog``, ``auto`` by default, with every limit of
+increment 2 and 2b: one at a time, the caps, the hours, the weekly hold.
+
+**Reproduced first** (:need:`DEC_ADR_027_D50`, :need:`DEC_ADR_027_D51`). A
+queued entry naming an item in a ``reproduce`` state (a filed bug) starts with
+``oracle.chain.reproduce_prompt``, which names the bug-reproducer agent and
+says to land the verdict on the item and fix nothing; the ledger's ``current``
+records ``reproduce`` and the residue the bug owed. When the session lands,
+the item says the verdict:
+
++--------------------------------------+------------+--------------------------------------+
+| The bug, once the session landed     | Outcome    | The same entry                       |
++======================================+============+======================================+
+| in a ``ready`` state (reproduced)    | ``red``    | back at the head, queued: the fix    |
+|                                      |            | starts on this or the next tick      |
++--------------------------------------+------------+--------------------------------------+
+| in no ``reproduce`` state, or gone   | ``closed`` | done                                 |
++--------------------------------------+------------+--------------------------------------+
+| unreproduced, owing more residue     | ``owed``   | a propose entry where it stands,     |
+| than at the start                    |            | for the user's live repro            |
++--------------------------------------+------------+--------------------------------------+
+| unreproduced, nothing more owed      | ``blind``  | at the head for one more run; after  |
+|                                      |            | a second, a propose entry            |
++--------------------------------------+------------+--------------------------------------+
+
+A verdict that cannot be read marks the entry done. A reproduce session that
+fails is ruling 9's, and nothing here pauses the chain.
+
+**The seams** are the step's ``outcome`` (``chain.reproduce_outcome``, which
+the suite replaces) and the hands' ``mirror`` and ``reproduced``, which
+``_chain_hands`` builds over ``domains/queue``; no test writes the main
+checkout's queue.
+
+A landed window asks to close (IDEA_062, ADR-027 ruling 21)
+------------------------------------------------------------
+
+A chained session that lands (torn down with its plan complete) leaves its
+Claude window open, and a live window holds its project under one at a time
+(:need:`DEC_ADR_027_D5`). The chain step follows that window until it closes:
+once it has been quiet it asks the session, in its own tab, whether the
+window may close, and closes it when the session consents
+(:ref:`ruling 21 <adr-027-ruling-21>`, :need:`DEC_ADR_027_D53` to
+:need:`DEC_ADR_027_D61`). Consent is an engine record the session writes with
+a command, never text read from its transcript. A window the user typed in
+since the teardown is the user's, and is never asked or closed.
+
+**Becoming the fallback** (:need:`DEC_ADR_031`, proposed). If ADR-031 is
+approved and built, a chained session's final teardown ends its own window, and this ask
+is the fallback for a landed chained window that did not end itself (no
+closer on its host, the exit failed or was not scheduled, a session from
+before the record). The user's window and one left open then stop holding
+the project. Until then this section describes the oracle as built; see
+"Planned: finished sessions end their own window" below.
+
++------------------+---------------------------------------+---------------------------+
+| Module           | Owns                                  | Never does                |
++==================+=======================================+===========================+
+| ``chainstep``    | ``landed`` from the tick a start is   | Type into or close a      |
+|                  | done; the quiet check, the ask        | window itself; read       |
+|                  | reserved and typed outside the lock,  | consent from a transcript;|
+|                  | the close on consent, the notice;     | close the user's window   |
+|                  | ``consent``, ``landed_action``;       |                           |
+|                  | ``landings``                          |                           |
++------------------+---------------------------------------+---------------------------+
+| ``chain``        | ``ask_line``, ``session_landed``      | Read a clock              |
+|                  | (the teardown's heartbeat), the       |                           |
+|                  | ``close_*`` settings                  |                           |
++------------------+---------------------------------------+---------------------------+
+| ``attention``    | ``prompts`` and ``prompted``: the     | Count a background task's |
+|                  | person's prompts                      | notice                    |
++------------------+---------------------------------------+---------------------------+
+| ``chainview``,   | the landed window in the read, its    | Offer Close or Leave open |
+| ``panel``        | offers, card, Now line and sheets     | before the notice         |
++------------------+---------------------------------------+---------------------------+
+| CLI              | ``oracle chain consent``,             | Close a window by any     |
+|                  | ``close-window``, ``leave-open``;     | rule of its own           |
+|                  | ``_chain_landed_host`` (a fresh scan);|                           |
+|                  | the typer and closer the hands carry  |                           |
++------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   stateDiagram-v2
+       [*] --> watching: the start is done (its session torn down, plan complete)
+       watching --> asking: quiet close_ask_after minutes (idle turn, no activity)
+       asking --> asked: typed into its tab
+       asking --> notified: no tab, a shell-only tab, no typer, typing failed
+       asked --> consented: consent --close
+       asked --> watching: consent --not-yet (asked again close_ask_again minutes later)
+       asked --> notified: no answer within close_answer_within, or the last "not yet"
+       consented --> closing: its turn idle, or 60 s after the consent
+       closing --> [*]: closed through close-host's path (released, the chain goes on)
+       closing --> notified: the close failed
+       notified --> consented: a late consent --close
+       notified --> [*]: close-window (the user)
+       notified --> left_open: leave-open (the user)
+       watching --> users: a turn the user typed since the teardown
+       asked --> users: more prompts than the oracle's asks
+       watching --> notified: the attention record cannot be read
+       left_open --> [*]: the window closed
+       users --> [*]: the window closed
+
+**Finding the window** (:need:`DEC_ADR_027_D53`). By its launched name or pid,
+as a start is bound, on the orphan host row it becomes once its session is
+torn down. Seen gone for 60 s it ends as ``gone``. While it lives it holds the
+project as any live window does, so ``decide`` is unchanged; the settings of
+the day (:need:`DEC_ADR_027_D60`, four ``oracle.chain.close_*`` numbers) are
+read once, when it lands.
+
+**The user's window** (:need:`DEC_ADR_027_D54`). The attention record counts
+the person's prompts (``prompts``) and stamps the last (``prompted``). Before
+the first ask, a prompt later than the session's teardown (its record's last
+``heartbeat``) makes the window the user's; after it, more prompts than the
+oracle's own asks do. A live session in the window is the user's too. One
+notice says the window holds the project; it is never asked and never closed.
+A record that cannot be read is never taken for quiet: the user is asked
+instead, with the notice below.
+
+**The ask** (:need:`DEC_ADR_027_D55`, :need:`DEC_ADR_027_D56`). Quiet is the
+window's turn ``idle`` and its last activity ``close_ask_after`` minutes old.
+The line, ``chain.ask_line``, is reserved under the chain lock and typed
+outside it through ``ChainHands.nudge``, the "continue"'s typer: the tab by
+its tty, never a tab where only a shell runs, then a lone Return.
+
+**The answer** (:need:`DEC_ADR_027_D57`). ``invariant oracle chain consent
+<project> --close | --not-yet --note TEXT``, run by the session, records it
+under the chain lock; the note is vetted as a handoff note is. An answer from
+another Claude (``CLAUDE_PID``) is refused, and so is one nobody asked for.
+"Not yet" is asked again ``close_ask_again`` minutes later, once quiet,
+``close_asks`` times in all.
+
+**The close** (:need:`DEC_ADR_027_D58`). The command only records; the next
+tick, once the answering turn is over or 60 s later, closes the window
+through ``ChainHands.close`` (``closehost.close_host`` with close-host's
+seams, every fact checked again) and releases the session. The next tick
+after that starts the next work.
+
+**The notice** (:need:`DEC_ADR_027_D59`). No answer within
+``close_answer_within`` minutes, the last "not yet", an ask that could not be
+typed, a record that cannot be read, or a close that failed: one notice, with
+a sound, naming ``invariant oracle chain close-window <project>`` and
+``leave-open <project>``, and no more asks. Close ends the window the same
+way; Leave open keeps it, holding the project, never asked again. The phone
+offers both on a card (:need:`DEC_ADR_027_D61`, :doc:`oracle-panel.md
+</architecture/oracle-panel>`).
+
+**The seams** are the hands' ``nudge`` and ``close`` (``_chain_typer``,
+``_chain_closer``), the step's ``landed_at`` (``chain.session_landed``), and
+the CLI's ``_chain_landed_host`` over ``_oracle_landed_rows``; the suite
+replaces each, so no test types into a terminal or closes a window.
+
+Planned: finished sessions end their own window (IDEA_064, ADR-031)
+-------------------------------------------------------------------
+
+**Planned, not built.** ADR-031 is proposed (2026-11-22) and awaits the
+user's approval of the plan; none of its five increments is built or queued. This section says where each part will live and how it
+joins what is built. Everything above describes the oracle as built.
+
+A chained session's final teardown records its consent to close on the
+session record and schedules its own exit; the closer ends the window once
+the landing's own work is over (its turn, and the background task that
+carried the teardown, which the host names), no other work is open and the
+person's prompt count is unchanged, and the
+chain step sees the window gone and starts the next entry on the next tick
+(:need:`DEC_ADR_031_D1` to :need:`DEC_ADR_031_D6`). A landed chained window
+the user keeps (typed into after the landing, or left open) stays open and no
+longer holds its project (:need:`DEC_ADR_031_D7`, :need:`DEC_ADR_031_D9`);
+one with other work still running holds it only until that work is over
+(:need:`DEC_ADR_031_D8`). Ruling 21's ask, above, is the fallback.
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module (planned)               | Owns                                  | Never does                |
++================================+=======================================+===========================+
+| ``domains/session``            | the ``landing`` record, written in    | Import ``oracle/`` or     |
+|                                | the final teardown's save; its        | ``hosts/``; end a process |
+|                                | ``outcome``, written by the closer    |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| CLI (``session teardown``,     | ``oracle.chain.end_window``, the      | Decide what runs next     |
+| ``cli/host_close``)            | stamp read from the attention record, |                           |
+|                                | the ``_landing_closer`` seam, the     |                           |
+|                                | detached closer's wait, check and end |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``chainstep``, ``chain``       | the landing record on ``landed``,     | Import ``hosts/``; end a  |
+|                                | ``ending`` and ``ongoing``,           | window on this path; read |
+|                                | ``ended_itself``, the ledger's        | consent from a transcript |
+|                                | ``kept``, which one at a time passes  |                           |
+|                                | over                                  |                           |
++--------------------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant R as compliance-reviewer (FINAL)
+       participant T as session teardown (CLI)
+       participant D as domains/session
+       participant K as cli/host_close (detached)
+       participant S as chainstep (watcher tick)
+       R->>T: invariant session teardown, plan complete
+       T->>D: torn_down, and the landing record (at, host, prompts, background, exit, wait)
+       T->>K: start the closer (CLAUDE_PID through the host seam)
+       T->>D: the host hook adds the carrier (main, or the background task that ran teardown)
+       Note over K: waits for the landing's own work (its turn and its carrier task) to end, at most end_window_wait
+       K->>K: prompts above the stamp is users, other work open is ongoing, unreadable is unread
+       K->>D: outcome (ended, users, ongoing, unread or failed)
+       S->>D: read the landing record (inert store)
+       S->>S: window gone after ended: ended_itself, next start on this tick
+       S->>S: users or left open go to kept and hold nothing, ongoing holds until idle
+       S->>S: no exit or a failed one: ruling 21's ask, as above
+
+The settings are ``oracle.chain.end_window`` (``chained``, ``all`` or
+``off``) and ``oracle.chain.end_window_wait`` (minutes), per project
+(:need:`DEC_ADR_031_D3`). Chain status counts every session started in the
+project beside the chained ones (:need:`DEC_ADR_031_D12`). A session's
+follow-up goes on the queue by rank, and ``session handoff`` is deprecated
+(:need:`DEC_ADR_031_D10`, :need:`DEC_ADR_031_D11`).
+
+Shipped: a window's last message (ADR-029 increment 1)
+------------------------------------------------------
+
+IDEA_029's Read half (:need:`DEC_ADR_009_D17`, :need:`DEC_ADR_029_D11`'s
+excerpt). Each live Claude window's last message reaches its card, its row on
+the Leftovers screen and its detail, on a paired device only; the screens and
+words are :doc:`oracle-panel.md </architecture/oracle-panel>`'s "As built for
+ADR-029 increment 1".
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module                         | Owns (increment 1)                    | Never does                |
++================================+=======================================+===========================+
+| ``talk`` (new)                 | ``SessionTalk`` with ``conversation`` | Import ``hosts/``; write  |
+|                                | only, ``TalkHost``, the shapes it     | a session's text          |
+|                                | reads, ``last_message``               | anywhere                  |
+|                                | (:need:`DEC_ADR_029_D14`)             |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``web``                        | ``excerpts``: on ``/api/state``, once | Read for an unpaired      |
+|                                | the token verifies, each live window  | request; put the text in  |
+|                                | read through the injected seam, one   | the ``assess`` document   |
+|                                | failure costing only its own window   |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``panel``                      | ``excerpt_hosts``, which window each  | Read a transcript; word   |
+|                                | row's text is read from; the card's,  | the text                  |
+|                                | row's and detail's excerpt and fold   |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``webpage``                    | the inset blocks, "Show all"; the     | Render the text as markup |
+|                                | text set with ``textContent``         |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_talk``     | ``ClaudeCodeTalk.conversation``: the  | Import the oracle; write  |
+| (new)                          | transcript read, fail closed, capped, | anything; read a shape it |
+|                                | kept in memory per transcript         | does not know as anything |
+|                                | (:need:`DEC_ADR_029_D15` to D17)      | but ``Unreadable``        |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_telemetry``| ``scan_tail`` and ``parse_timestamp``,| Stop at a shape it does   |
+|                                | public now for the talk reader        | not know (its own readers |
+|                                |                                       | skip)                     |
++--------------------------------+---------------------------------------+---------------------------+
+| CLI                            | ``_oracle_talk``, handed to           | Decide anything ``talk``  |
+|                                | ``WebApp`` by ``oracle web``          | decides                   |
++--------------------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Page as Phone (paired)
+       participant Web as web
+       participant Panel as panel
+       participant Talk as talk.last_message
+       participant Host as SessionTalk (ClaudeCodeTalk, injected)
+       Page->>Web: GET /api/state (token checked first)
+       Web->>Web: load: the assess document (snapshot or scan)
+       Web->>Panel: excerpt_hosts(document): row key to live window
+       loop each live window
+           Web->>Host: conversation(TalkHost(id))
+           Host->>Host: <id>.jsonl under the Claude home, read back at most 2 MiB, stop at an unknown shape
+           Host-->>Web: entries (oldest first), unreadable or none
+           Web->>Talk: last_message: Claude's newest text, the prompt before it
+       end
+       Web->>Panel: view(document, excerpts)
+       Web-->>Page: {document (no text), view (cards, rows, details with the text)}, no-store
+
+**Which windows.** ``panel.excerpt_hosts`` names, for each ``session`` and
+``host`` row, its current window (else its first) while its liveness is
+``True``; a gone window, one of unknown liveness, a worktree row and an error
+row are not read. The reader finds ``<host id>.jsonl`` under any directory of
+the Claude home's ``projects/``, so a window BUG_040 files under the wrong
+project still shows its own text (:need:`DEC_ADR_029_D17`).
+
+**What is read.** The newest entries with text, read backwards from the end
+of the transcript under the tail reader's rules (the open last line left out,
+at most 2 MiB): at most 512 KiB of text, each entry cut at 20 000
+characters, ending once 40 entries and Claude's newest text are held. Since
+increment 2 Claude's tool calls are entries too, one line each, and the read
+goes on past a run of them to Claude's text (:need:`DEC_ADR_029_D19`).
+Claude Code's own ``user`` entries, tool results, a subagent's entries,
+bookkeeping and entries without text are skipped; any other shape stops the
+read, and only what is newer stands (:need:`DEC_ADR_029_D15`,
+:need:`DEC_ADR_029_D16`). ``last_message`` takes Claude's newest text and the
+newest prompt before it (:need:`DEC_ADR_029_D14`).
+
+**What is kept.** Nothing on disk, nothing in the document: the
+``assess`` document, so the watcher's snapshot, ``oracle list`` and the TUI,
+never carry it, and the response is ``no-store`` like every other. The reader
+keeps each read in memory against the transcript's size and modification
+time, for at most 64 transcripts, so a quiet window is not read again on the
+next refresh. The page drops the text after 60 seconds in the background, as
+built with increment 2 (below, :need:`DEC_ADR_029_D24`).
+
+**The seam** is ``_oracle_talk``, read-only in this increment like
+``_oracle_cache``: a test that serves the state from the app ``oracle web``
+built replaces it with a recorder. The suite-wide recorder ADR-029 D4 names
+comes with ``deliver``, in increment 3.
+
+Shipped: a window's conversation (ADR-029 increment 2)
+------------------------------------------------------
+
+The live conversation view (:need:`DEC_ADR_029_D11`'s second bullet,
+:need:`DEC_ADR_009_D17`). A paired device opens a live window's recent
+conversation from its session's detail and watches it as it grows. Reading
+only: nothing is sent, offered or answered, and no talk nonce is issued. The
+screen and its words are :doc:`oracle-panel.md </architecture/oracle-panel>`'s
+"As built for ADR-029 increment 2".
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module                         | Owns (increment 2)                    | Never does                |
++================================+=======================================+===========================+
+| ``talk``                       | ``turns`` (the newest 40, capped      | Import ``hosts/``; write  |
+|                                | again, a stop among them said),       | a session's text          |
+|                                | ``read_turns`` (a read that raises is | anywhere; offer anything  |
+|                                | unreadable), ``cursor``, ``offered``  | in this increment         |
+|                                | (:need:`DEC_ADR_029_D21`,             |                           |
+|                                | :need:`DEC_ADR_029_D22`)              |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``web``                        | ``GET /api/session``: the token first,| Read a window that is not |
+|                                | the row's live window read through    | live; serve more than     |
+|                                | the seam, ``unchanged`` on the same   | 512 KiB                   |
+|                                | cursor, the oldest turns dropped to   |                           |
+|                                | 512 KiB                               |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``panel``                      | ``conversation_head`` (kicker, title, | Read a transcript; word   |
+|                                | chips); a detail's ``conversation``   | the text                  |
+|                                | (:need:`DEC_ADR_029_D23`); the words  |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``webpage``                    | the Conversation screen, its 2-second | Render the text as        |
+|                                | read, the bottom and the pill, the    | markup; keep any session  |
+|                                | 60-second background drop of every    | text past a minute in the |
+|                                | text (:need:`DEC_ADR_029_D24`)        | background                |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_talk``     | each tool call as one line            | Import the oracle; word a |
+|                                | (``tool_line``,                       | tool call it cannot read  |
+|                                | :need:`DEC_ADR_029_D20`); the read    | (it is ``Unreadable``)    |
+|                                | that goes on to Claude's newest text  |                           |
+|                                | (:need:`DEC_ADR_029_D19`)             |                           |
++--------------------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Page as Phone (Conversation, open and visible)
+       participant Web as web
+       participant Panel as panel
+       participant Talk as talk
+       participant Host as SessionTalk (ClaudeCodeTalk, injected)
+       Page->>Web: GET /api/session?row=K[&after=C] (token checked first)
+       Web->>Web: load: the assess document (snapshot or scan)
+       Web->>Panel: conversation_head(document, K), excerpt_hosts(document)
+       alt no such row
+           Web-->>Page: 404
+       else the row's window is not live
+           Web-->>Page: live false, no turns, offered why gone
+       else a live window
+           Web->>Talk: read_turns(talk, TalkHost(id))
+           Talk->>Host: conversation(TalkHost(id))
+           Host-->>Talk: entries with tool lines (kept in memory per transcript), unreadable or none
+           Talk-->>Web: the newest 40, capped, unreadable when the stop is among them
+           Web->>Web: drop the oldest turns to 512 KiB, the cursor of what is served
+           Web-->>Page: head, turns, unreadable, offered (all off, why), cursor, or unchanged when it equals C
+       end
+       Note over Page: again 2 s after each answer, and hidden 60 s every text is dropped
+
+**The route.** ``GET /api/session?row=<key>[&after=<cursor>]``, behind the
+token as every route is, checked before anything is read; an unpaired request
+gets "not paired" and reads no transcript. It loads the document as
+``/api/state`` does and reads only the row's live window, the one
+``panel.excerpt_hosts`` names for the excerpt. The answer is ``no-store``,
+at most 512 KiB as encoded, and holds ``row``, ``head`` (kicker, title,
+chips), ``live``, ``turns`` (each ``role`` ``user``, ``assistant`` or
+``tool``, ``text``, ``at``, ``cut``), ``unreadable``, ``offered`` (send,
+answer and interrupt off, with ``why`` ``reading_only``, ``unreadable`` or
+``gone``) and ``cursor``. Given the cursor of the same read as ``after``, it
+is ``unchanged: true`` with no turns and no text (:need:`DEC_ADR_029_D21`).
+A row the document does not have is 404; a load that fails is 503.
+
+**Fail closed.** A stop the host met among the newest 40 is ``unreadable``,
+and the page shows "Can't read this session here — use the Mac." above the
+newer turns; a read that raises is unreadable with no turns; a window no
+longer live reads nothing (:need:`DEC_ADR_029_D22`).
+
+**What is kept.** As for the excerpt: nothing on disk, nothing in the
+``assess`` document, the watcher's snapshot, ``oracle list`` or the TUI,
+nothing in a log, a notification or a push. The server holds only the
+request's read and the reader's in-memory tail; the page holds the last
+answer while the screen is open and drops it, with every other text, after a
+minute in the background (:need:`DEC_ADR_029_D24`).
+
+Shipped: sending to a window (ADR-029 increment 3)
+--------------------------------------------------
+
+The oracle's second power beside the confirmed action
+(:need:`DEC_ADR_029_D1`): a paired device sends a live Claude window a
+message, which the oracle types into its Terminal tab. Messages only; the
+interrupt, slash commands and the answers are increments 4 to 6. The screen
+and its words are :doc:`oracle-panel.md </architecture/oracle-panel>`'s "As
+built for ADR-029 increment 3".
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module                         | Owns (increment 3)                    | Never does                |
++================================+=======================================+===========================+
+| ``talk``                       | ``Talker``: the one-tap nonce, the    | Import ``hosts/``; keep   |
+|                                | Undo hold, the ``Fingerprint`` and    | the text past its typing; |
+|                                | its check, readiness, the ring, the   | retry a send; type while  |
+|                                | delivery loop, the quiet wait, the    | Claude waits on a prompt; |
+|                                | receipt; ``typist`` (the per-tab file | log the text              |
+|                                | lock); ``read_attention``;            |                           |
+|                                | ``RecordingTalk``                     |                           |
+|                                | (:need:`DEC_ADR_029_D25` to D33)      |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``web``                        | ``POST /api/talk``,                   | Take a talk post from     |
+|                                | ``/api/talk/cancel``; ``/api/session``| another origin, or a body |
+|                                | adds what is offered, this device's   | past 32 KiB               |
+|                                | sends and the nonce; ``boot`` on      |                           |
+|                                | ``/api/state``                        |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``panel``, ``webpage``         | "Reply…" on a card waiting for input; | Render the text as markup |
+|                                | the composer, a send's line, Undo and |                           |
+|                                | Cancel, the off lines; the words      |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``attention``                  | ``received: {kind, hash, at}``,       | Hold the text             |
+|                                | written with the turn a prompt starts |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``chainstep``                  | the chain's nudge under the same      | Nudge a tab another       |
+|                                | typist lock                           | typist holds              |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_talk``     | ``quiet`` (Claude Code's input box),  | Import the oracle; read a |
+|                                | ``deliver``, ``digest``               | box it does not know as   |
+|                                | (``prompt_digest``), ``refuses``      | anything but              |
+|                                | (``MODE_PREFIXES``)                   | ``Unreadable``            |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_launch``   | ``TerminalReader``, the tab's visible | Put text or a tty inside  |
+|                                | text; ``run_tab_script``, shared with | a script                  |
+|                                | the typer and the closer              |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code``          | the prompt signal's ``received``      | Pass the prompt's text on |
+|                                | digest                                |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| CLI                            | ``_oracle_talker`` (the audit log,    | Decide anything ``talk``  |
+|                                | the lock, the alert, the device       | decides                   |
+|                                | check); ``_apply_signal`` records the |                           |
+|                                | receipt                               |                           |
++--------------------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Page as Phone (Conversation)
+       participant Web as web
+       participant Talk as talk.Talker
+       participant Host as SessionTalk (ClaudeCodeTalk, injected)
+       participant Hook as invariant hook (UserPromptSubmit)
+       Page->>Web: GET /api/session?row=K: turns, offered, sends, nonce (bound to the fingerprint)
+       Page->>Web: POST /api/talk {row, nonce, kind: message, text}
+       Web->>Talk: post: spend the nonce, refuse what is not a message, hold
+       Talk->>Talk: talk-held (no record, no send: 503)
+       Web-->>Page: 202, the send: "Sending… · Undo" for 5 s
+       Note over Talk: Undo in the window: cancelled, nothing typed
+       Talk->>Talk: each second: due, or queued while the turn runs (ring of 8 per window, 64 in all)
+       loop until quiet 3 s, refused when busy 60 s
+           Talk->>Host: quiet(host): the input box's digest, empty or not
+       end
+       Talk->>Talk: take locks/type-TTY.lock
+       Talk->>Talk: fresh scan: same window, process, terminal; ready (and the same turn, for a send read while ready)
+       Talk->>Host: deliver(host, text): typed into the tab found by its tty
+       Talk->>Talk: half a second, then release the lock
+       Hook->>Hook: attention received {kind, hash, at}
+       Talk->>Talk: received, new and within 5 s, with the digest: Delivered; else Not confirmed and one alert
+       Page->>Web: GET /api/session again: the send's state
+
+.. mermaid::
+
+   stateDiagram-v2
+       [*] --> held: one tap (refused at the tap: not a message, a mode, no tab)
+       held --> cancelled: Undo
+       held --> queued: the turn still runs, or the window has a send under way
+       held --> due: the window ended, Claude waits for input
+       queued --> due: the turn ended (one send per turn end)
+       queued --> cancelled: Cancel
+       queued --> dropped: the ring overflowed, the device was unpaired, or the server restarted
+       due --> queued: the fresh scan finds the turn running
+       due --> refused: busy past 60 s, the window changed, no tab, shell only, unreadable
+       due --> typed: typed into the tab
+       typed --> delivered: a new receipt carries the digest
+       typed --> not_confirmed: no receipt in 5 s, or another hash (one alert)
+       delivered --> [*]
+       not_confirmed --> [*]
+       refused --> [*]
+       cancelled --> [*]
+       dropped --> [*]
+
+**The routes.** ``POST /api/talk`` takes ``{row, nonce, kind, text}`` as JSON
+or a form, behind the token, from the page's own origin (``Origin`` naming
+this server, ``Sec-Fetch-Site`` same-origin where sent), with a body of at
+most 32 KiB, which only the talk routes take. It answers 202 with the send,
+409 with one reason for a refusal, 403 for a nonce that is unknown, spent,
+expired or another device's or row's, and 503 when the ``talk-held`` line
+cannot be written. ``POST /api/talk/cancel`` takes ``{id}`` from the device
+that sent it. ``GET /api/session`` gains ``offered`` (``send``, ``why``
+``gone``, ``unreadable``, ``no_tab`` or ``no_claude``, and ``running``),
+``sends`` (this device's to the row: ``id``, ``state``, ``reason``,
+``what``, ``at``, ``length``, never the text), ``boot`` and ``nonce``, a new
+one on every read while a send is offered (:need:`DEC_ADR_029_D32`).
+
+**What may be sent.** A message of text and line breaks, at most 8000
+characters. One opening with ``!``, ``#`` or ``&`` is a command to Claude
+Code and is refused (:need:`DEC_ADR_029_D26`); one opening with ``/`` is a
+slash command, typed since increment 4 unless it opens a menu (below). A window with no tty, in another terminal, or
+whose tab holds only a shell, is not typed into.
+
+**When it is typed.** Only while Claude waits for input
+(:need:`DEC_ADR_029_D28`), after its input box has been unchanged and empty
+for 3 seconds (:need:`DEC_ADR_029_D29`), and after a fresh scan finds the
+same window, process and terminal. A send read while Claude waited must also
+find the same waiting identity; one read mid-turn, or queued, waits for the
+turn to end. The typist's lock, ``locks/type-<tty>.lock`` in the oracle
+home, is held for the fresh scan, the typing and half a second after; the
+chain's nudge takes it too.
+
+**The receipt.** The hook path records ``received`` on the sidecar for every
+prompt: the SHA-256 of the prompt, normalised (:need:`DEC_ADR_029_D27`). A
+new one within 5 seconds carrying the message's digest is "Delivered";
+anything else is "Not confirmed", with one alert through the watcher's
+notifier (Mac banner and push) naming the project and the session. Nothing
+is ever typed twice.
+
+**What is written.** The talk audit lines in ``web/actions.log`` (``event``,
+``send``, ``device``, ``device_name``, ``row``, ``host``, ``kind``,
+``length``, ``hash`` of the text as typed, and a refusal's ``reason`` and
+``what``), never the text; and ``received`` on the sidecar, written by the
+hook. The server holds a send's text in memory until it is typed or gone; a
+restart drops every waiting send, and the page shows it dropped from the
+boot id.
+
+**The seams.** ``_oracle_talk`` now types, so the suite installs
+``oracle/talk.RecordingTalk`` for every test; ``_oracle_talker`` builds the
+``Talker`` with the audit log, the typist's lock, the notifier and the device
+store. The delivery loop is a thread of the web server that starts with the
+first tap (:need:`DEC_ADR_029_D33`).
+
+Shipped: stopping a turn and slash commands (ADR-029 increment 4)
+-----------------------------------------------------------------
+
+The interrupt (:need:`DEC_ADR_029_D34` to D36): a paired device stops a
+running turn from the Conversation's Stop, which the oracle types into the
+window's Terminal tab as Esc. Slash commands (:need:`DEC_ADR_029_D37` to D39,
+ADR-029 ruling 15): a message opening with ``/`` is typed as a message,
+except a command that opens a menu when given no arguments, which is refused
+at the tap. The screen and its words are :doc:`oracle-panel.md
+</architecture/oracle-panel>`'s "As built for ADR-029 increment 4".
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module                         | Owns (increment 4)                    | Never does                |
++================================+=======================================+===========================+
+| ``talk``                       | the ``interrupt`` kind: offered while | Queue an interrupt; type  |
+|                                | a turn runs with no prompt open, held | it into an ended turn, an |
+|                                | for Undo, then the fresh check, one   | open prompt or text left  |
+|                                | look, the key and the transcript's    | on the line; import       |
+|                                | receipt (``Fingerprint.asking``); a   | ``hosts/``                |
+|                                | message's receipt from the window's   |                           |
+|                                | evidence where no hook answered;      |                           |
+|                                | ``TalkHost.pid``                      |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``web``                        | the talk nonce whenever send or Stop  | Take a stop with text     |
+|                                | is offered; ``kind: interrupt`` on    |                           |
+|                                | ``POST /api/talk``                    |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``panel``, ``webpage``         | Stop beside Send, alone when send is  | Touch the draft           |
+|                                | off; a stop's card and line; the      |                           |
+|                                | words                                 |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_talk``     | ``interrupt`` (the ``escape`` key),   | Import the oracle; read a |
+|                                | ``receipt`` (``first_after``: the     | line it cannot read as    |
+|                                | person's next entry, Claude Code's    | evidence                  |
+|                                | interrupt marker its digest, a        |                           |
+|                                | command's echo, the new session after |                           |
+|                                | ``/clear``, the process ending for    |                           |
+|                                | ``/exit``); ``MENU_COMMANDS``;        |                           |
+|                                | ``command_text``, a command as the    |                           |
+|                                | person's turn                         |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_launch``   | ``TerminalTyper.key`` and             | Type a key it does not    |
+|                                | ``TERMINAL_KEY_SCRIPT``: Esc as       | name; put a key's bytes   |
+|                                | ``ESC [ 27 u``, built in the script   | in an argument            |
++--------------------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Page as Phone (Conversation, a turn running)
+       participant Web as web
+       participant Talk as talk.Talker
+       participant Host as SessionTalk (ClaudeCodeTalk, injected)
+       Page->>Web: GET /api/session: offered.interrupt, nonce (bound to the running turn)
+       Page->>Web: POST /api/talk {row, nonce, kind: interrupt}
+       Web->>Talk: post: spend the nonce, refuse an ended turn or an open prompt, hold
+       Web-->>Page: 202: "Stop", "Sending… · Undo" for 5 s
+       Talk->>Talk: due: typed at once, never queued
+       Talk->>Talk: take locks/type-TTY.lock; fresh scan: same window, process, terminal, the same turn running, no prompt
+       Talk->>Host: quiet(host): one look, the input line must be empty
+       Talk->>Host: interrupt(host): the escape key, ESC [27u, into the tab found by its tty
+       Talk->>Host: receipt(host, interrupt, since): the person's next entry in the transcript
+       Talk->>Talk: Claude Code's interrupt marker: Delivered; a prompt or nothing in 5 s: Not confirmed and one alert
+
+**When it is offered and typed.** While the turn runs in a Terminal tab
+where Claude runs, with no question or permission prompt open; it stays when
+the session cannot be read. It is typed at the end of the Undo window, never
+queued and with no wait for quiet, after the fresh scan finds the same turn
+still running and one look finds Claude's input line empty
+(:need:`DEC_ADR_029_D35`). The key is Esc as Claude Code reads it, ``ESC [
+27 u``, since Terminal ends everything it types with a Return
+(:need:`DEC_ADR_029_D34`).
+
+**The receipt.** No hook fires for an interrupt, so the evidence is the
+transcript's first entry of the person's after the key: Claude Code's
+"[Request interrupted by user]" marker is "Delivered", anything else or
+nothing within 5 seconds "Not confirmed", with one alert
+(:need:`DEC_ADR_029_D36`). What is written is the audit lines, of the kind
+``interrupt`` with length 0; nothing else.
+
+**Slash commands.** A message opening with ``/`` is typed as any message
+(:need:`DEC_ADR_029_D37`). One that Claude Code opens a menu for when given
+no arguments, on the host layer's list with the version it was seen on, is
+refused at the tap, "This command opens a menu — use it on the Mac." (ADR-029
+ruling 15). A custom command or skill fires ``UserPromptSubmit`` and is
+confirmed by the hook's receipt; a built-in fires none, and while no hook
+has answered the oracle asks the host for the window's evidence: the
+command's echo, ``/compact``'s plain entry, the echo in the new session the
+same process runs after ``/clear``, or the process ending after ``/exit``
+(:need:`DEC_ADR_029_D38`). In the conversation a command is the person's
+turn, ``/name args``, and its output is not shown (:need:`DEC_ADR_029_D39`).
+
+Shipped: answering a question (ADR-029 increment 5)
+---------------------------------------------------
+
+A paired device answers the question a live Claude window waits on
+(:need:`DEC_ADR_029_D8`, :need:`DEC_ADR_029_D40` to D46): a choice, several
+for a multi-select, "Other" with its text, and several questions in one
+send. The Needs you card waiting on a question offers "Answer…"
+(:need:`DEC_ADR_029_D10`, :need:`DEC_ADR_029_D45`). Permission prompts are
+increment 6's. The screen and its words are :doc:`oracle-panel.md
+</architecture/oracle-panel>`'s "As built for ADR-029 increment 5".
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module                         | Owns (increment 5)                    | Never does                |
++================================+=======================================+===========================+
+| ``talk``                       | the ``question`` kind:                | Import ``hosts/``; queue  |
+|                                | ``read_question``, ``pending_view``,  | an answer; type one into  |
+|                                | ``picks`` (each question's choices by | a question that changed;  |
+|                                | index and an "Other"), the nonce      | log a label or an "Other" |
+|                                | bound to the question read, the       | text                      |
+|                                | fresh check and read before the host  |                           |
+|                                | types, the receipt; ``offered``'s     |                           |
+|                                | ``answer``; ``Look.shows``            |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``web``                        | ``pending`` on ``/api/session`` and   | Read a question for an    |
+|                                | in its cursor; ``answers`` on         | unpaired request; put it  |
+|                                | ``POST /api/talk``; ``prompts`` on    | in the ``assess``         |
+|                                | ``/api/state``, each waiting          | document                  |
+|                                | question's read for its card          |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``panel``, ``webpage``         | "Answer…" and the card's note; the    | Render the question as    |
+|                                | question block, its toggles, "Other…" | markup                    |
+|                                | and "Send answer"; the words          |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``attention``                  | ``received`` of the kind ``question`` | Hold the answers          |
+|                                | with the write that clears            |                           |
+|                                | ``waiting``                           |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_talk``     | ``pending`` (``read_pending``,        | Import the oracle; type a |
+|                                | ``question_call``),                   | step the tab did not      |
+|                                | ``question_screen``, ``answer`` (one  | follow from; read a call  |
+|                                | step a script, the tab read after     | or a view it does not     |
+|                                | each), ``answer_digest``,             | know as anything but      |
+|                                | ``answer_receipt``,                   | ``Unreadable``            |
+|                                | ``answered_after``                    |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_launch``   | ``TerminalTyper.keys`` and            | Put a move's bytes or the |
+|                                | ``TERMINAL_KEYS_SCRIPT``: arrow keys  | text inside a script      |
+|                                | (``MOVE_KEYS``) and a text, one       |                           |
+|                                | ``do script``                         |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code``, CLI     | ``PostToolUse`` of                    | Pass the answers on       |
+|                                | ``AskUserQuestion`` carries the       |                           |
+|                                | answers' digest; ``_apply_signal``    |                           |
+|                                | records it                            |                           |
++--------------------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   sequenceDiagram
+       participant Page as Phone (Conversation, a question waiting)
+       participant Web as web
+       participant Talk as talk.Talker
+       participant Host as SessionTalk (ClaudeCodeTalk, injected)
+       participant Hook as invariant hook (PostToolUse)
+       Page->>Web: GET /api/session?row=K
+       Web->>Host: pending(host): the open AskUserQuestion call in the transcript
+       Web-->>Page: turns, pending (the question's words), offered.answer, nonce (bound to the question)
+       Page->>Web: POST /api/talk {row, nonce, kind: question, answers: [{choices, other}]}
+       Web->>Talk: post: spend the nonce, check the indexes against the read, hold
+       Web-->>Page: 202: the "You" card, "Sending… · Undo" for 5 s
+       Talk->>Talk: due: never queued
+       loop until untouched and unchanged 3 s, refused when busy 60 s
+           Talk->>Host: quiet(host): shows question, nothing chosen
+       end
+       Talk->>Talk: take locks/type-TTY.lock; fresh scan: same window, process, terminal, the same question since
+       Talk->>Host: pending(host) again: the same call, the same words
+       Talk->>Host: answer(host, question, picks)
+       loop each step
+           Host->>Host: one do script: arrow keys, "Other" text, Terminal's Return
+           Host->>Host: read the tab until it shows the step's effect, else stop
+       end
+       Hook->>Hook: attention received {kind: question, hash, at}
+       Talk->>Talk: the answers' digest, new and within 5 s: Delivered; else Not confirmed and one alert
+
+**When it is offered and typed.** While the attention record says a question
+waits, in a Terminal tab where Claude runs, when the session and the question
+both read (:need:`DEC_ADR_029_D44`). An answer is held for its Undo window,
+never queued, typed after the question on the tab has been untouched and
+unchanged for 3 seconds, and only if the fresh scan finds the same question
+waiting and a fresh read the same call; otherwise "Claude is no longer
+waiting on that question.".
+
+**What may be sent.** One entry per question, its choices by index and an
+optional "Other" of one line; a single-select question takes one answer, a
+multi-select one at least one. The indexes are checked against the question
+the read served with the nonce (:need:`DEC_ADR_029_D42`).
+
+**The keys** (:need:`DEC_ADR_029_D40`). Each step is one Terminal script of
+arrow keys and, for "Other", its text, whose own Return picks, ticks, moves
+on or submits, as Claude Code 2.1.330 was seen to take them; the tab is read
+after every step and typing stops at one it did not follow.
+
+**The receipt** (:need:`DEC_ADR_029_D43`). ``PostToolUse`` of
+``AskUserQuestion`` records the hash of the call's id and its answers on the
+sidecar, ``received`` of the kind ``question``; while none has come, the
+transcript's tool result for the call is the window's evidence. What is
+written is the audit lines, with each question's choice indexes (``choice``)
+and never a label, and the receipt's hash.
+
+**On the cards.** ``/api/state`` reads each waiting question: its first line
+is the card's note and the page offers "Answer…"; one that cannot be read
+says so (:need:`DEC_ADR_029_D45`).
+
+Planned: talking to sessions (IDEA_060, ADR-029)
+------------------------------------------------
+
+**Planned, not built, after increments 1 to 5.** ADR-029 is accepted
+(2026-11-20) and its increments 6 and 7 are queued. This section is the plan's
+architecture for what is left: permission answers, the phone rules and
+``doctor``'s drift row. Increments 1 to 5, the last message, the
+conversation, sending a message, the interrupt and slash commands, and
+answering a question, have shipped (above); every "never answers a
+permission prompt" above describes the oracle as built.
+
+The action path, ``refusal`` and ``recommend`` stay unchanged
+(:need:`DEC_ADR_029_D1`).
+
++--------------------------------+---------------------------------------+---------------------------+
+| Module (inc 6 and 7, planned)  | Owns                                  | Never does                |
++================================+=======================================+===========================+
+| ``talk``                       | the ``permission`` kind: ``pending``  | Import ``hosts/``; answer |
+|                                | for a prompt, the confirm nonce bound | a permission with no      |
+|                                | to the choice, no Undo hold           | confirm sheet             |
++--------------------------------+---------------------------------------+---------------------------+
+| ``web``                        | ``/api/talk/confirm``,                | Read anything for an      |
+|                                | ``/api/rules``,                       | unpaired request          |
+|                                | ``/api/rules/remove``                 |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``panel``, ``webpage``         | the permission block and its confirm  | Render the prompt as      |
+|                                | sheet, the Phone rules screen, their  | markup                    |
+|                                | words                                 |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| ``webactions``                 | the phone-rule removal's confirm      | Record a rule's text in   |
+|                                |                                       | the log                   |
++--------------------------------+---------------------------------------+---------------------------+
+| ``hosts/claude_code_talk``     | the permission prompt read from the   | Import the oracle; offer  |
+|                                | tab and the pending tool call, its    | a choice it cannot name   |
+|                                | keys, Claude Code's permission        | exactly                   |
+|                                | settings                              |                           |
++--------------------------------+---------------------------------------+---------------------------+
+| CLI                            | ``oracle web rules`` and ``rules      | Decide anything ``talk``  |
+|                                | remove``; ``revoke``'s rule listing;  | decides                   |
+|                                | ``doctor``'s ``oracle talk`` row      |                           |
++--------------------------------+---------------------------------------+---------------------------+
+
+.. mermaid::
+
+   graph TD
+       CLI["cli: oracle web, oracle web rules, doctor"]
+       subgraph oracle["oracle/"]
+           WEB[web]
+           PANEL[panel]
+           WEBPAGE[webpage]
+           WEBACT[webactions]
+           TALK["talk (ADR-029; inc 1 to 5 built: conversation, last_message, turns, Talker, interrupt, question answers)"]
+           SCAN[scan]
+           ATTN[attention]
+           HOME[home]
+       end
+       subgraph hosts["hosts/"]
+           HTALK["claude_code_talk (inc 1 to 5 built: conversation, tool lines, quiet, deliver, digest, interrupt, receipt, pending question, answer)"]
+           LAUNCH["claude_code_launch: TerminalTyper (keys), TerminalReader"]
+           TELEM["claude_code_telemetry: tail reader"]
+       end
+       CLI --> WEB
+       CLI -. "injects SessionTalk (_oracle_talk) from" .-> HTALK
+       WEB -- "/api/session, /api/talk, /api/rules" --> TALK
+       WEB -- "excerpts and waiting questions from the live read" --> PANEL
+       TALK -- "fingerprint: a fresh scan" --> SCAN
+       TALK -- "waiting, turn, received" --> ATTN
+       TALK -- "locks/type-TTY.lock, web/phone-rules.json" --> HOME
+       TALK -- "talk audit lines" --> WEBACT
+       HTALK --> LAUNCH
+       HTALK --> TELEM
+
+The arrows from ``talk`` to ``hosts/`` do not exist: the CLI hands ``talk``
+the ``SessionTalk`` it builds (:need:`DEC_ADR_029_D4`), as it hands the scan
+its ``HostProbe`` (ADR-007 D11). The chain's nudge (ADR-027 D28) keeps its
+own path through ``ChainHands`` and takes the same per-tab lock.
+
+**A permission answer** (:need:`DEC_ADR_029_D2`, :need:`DEC_ADR_029_D9`)
+joins the same path as the inputs built (above): refused unless its prompt
+waits now, through the confirm sheet, with no hold.
+
+**What is read, and what is kept** (ADR-009 D17, :need:`DEC_ADR_029_D11`).
+Built in increments 1, 2 and 5 (above): the conversation and a waiting
+question are read from the host's transcript when the person opens a session
+or reloads, and every 2 seconds while it is open and visible. Neither enters
+the ``assess`` document, so the watcher's snapshot, ``oracle list`` and the
+TUI never carry it, and no oracle file, log, notification or push payload
+holds it. A shape the host layer does not know turns send and answer off for
+that session, and interrupt stays (built). Increment 6 reads a permission
+prompt the same way.
+
+**What is written.** Built: the talk audit lines in ``web/actions.log``
+(device, row, host, kind, length, hash, a question's choice indexes; ADR-008
+D13's log, :need:`DEC_ADR_029_D5`) and ``received`` on the host's attention
+sidecar, written by the hook (ADR-007 D5), both in :doc:`state_model.md
+</architecture/state_model>`. Planned: ``web/phone-rules.json``, a record of
+every "allow always" given from the phone, with the exact rule the receipt
+found in Claude Code's settings (:need:`DEC_ADR_029_D9`), which
+``state_model.md`` gains with increment 6.
+
+**Routes.** Every one behind the token, every ``POST`` with an action's
+``Origin`` rules; a refusal is a 409 with one plain reason. ``GET
+/api/session``, ``POST /api/talk`` and ``POST /api/talk/cancel`` are built
+(increments 2 to 5: the conversation, the pending question, what is offered
+and why not, this device's sends, the talk nonce, a message, a stop, an
+answer and their Undo); the routes below are planned.
+
++------------------------------------------+------------------------------------------------------------+
+| Request                                  | Paired                                                     |
++==========================================+============================================================+
+| ``GET /api/talk/confirm?row=…&choice=…`` | a permission answer's sheet and its 120-second nonce       |
++------------------------------------------+------------------------------------------------------------+
+| ``GET /api/rules``,                      | the phone-rule list; a removal, through a confirm sheet    |
+| ``POST /api/rules/remove``               |                                                            |
++------------------------------------------+------------------------------------------------------------+
+
+**Where it may type.** A live Claude window the fresh scan verifies, with a
+pid, a start token and a tty, in a Terminal.app tab where Claude runs. A
+shell-only tab, a gone or conflicting host, and a window over Remote Control
+or in another terminal are not typed into; the last two can still be read. A
+host BUG_040 attributes to the wrong project is still the same window, so
+the fingerprint, which names the window and not the project, holds for it.
+
+The increments, their order and what each waits for are ADR-029's
+"Increments"; the screens and words are :doc:`oracle-panel.md
+</architecture/oracle-panel>`'s "Planned: talking to sessions".
 
 Known gap: a host rooted in another repository (BUG_040)
 --------------------------------------------------------

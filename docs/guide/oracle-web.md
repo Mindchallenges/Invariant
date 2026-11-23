@@ -40,6 +40,11 @@ Shipped so far, the plain-language panel ("Using the page" below):
   window" below).
 - A new Claude session can be started on the Mac, with Remote Control on, in
   any registered project ("Start a new session" below).
+- Each project's chain of sessions (ADR-027) is on the phone: what needs
+  you about it is a card under Needs you, and each project's row opens its
+  Chain screen, where the queue can be reordered and trimmed, a proposal
+  started, the chain paused or resumed, and a stalled session answered
+  ("The chain" below).
 
 Still to come:
 
@@ -281,8 +286,48 @@ it for its details, and answer the prompt in Claude on your Mac or phone. The
 page never answers a prompt. Working and idle sessions are one-line cards;
 tap one for its details.
 
-**A session's details** say what is going on in a sentence or two, the
-suggested next step with its button and a Copy button, "Recent" (the
+**What Claude last said.** While a session's Claude window is open, its card
+shows the start of Claude's last message: up to three lines under "Claude"
+on a full card, one line on a one-line card and on a window's row under
+Leftovers. The session's details show it whole under **Last message**, with
+the message of yours it answers above it under "You"; a long one shows its
+start and "Show all". The text is shown exactly as written, as plain text,
+only to a paired device, and the oracle keeps no copy of it anywhere. A
+window with nothing from Claude yet, or whose transcript the oracle cannot
+read with certainty, shows nothing there rather than something wrong.
+
+**The conversation.** "Open conversation", at the end of a session's
+details, shows its Claude window's recent conversation: your messages under
+"You", Claude's replies under "Claude", and each thing Claude did as one
+short line ("Ran git status", "Edited src/…/web.py"), newest at the bottom,
+at most the last 40. It updates itself every couple of seconds while you
+look at it; if you have scrolled up, "New messages" takes you down. A very
+long message ends "Cut here: the rest is on the Mac". A conversation the
+oracle cannot read with certainty says "Can't read this session here — use
+the Mac." rather than showing anything wrong. After a minute with the
+page in the background, every message is cleared from the page, and it
+reads them again ("Reading again…") when you come back.
+
+**Sending a message.** Under a conversation whose Claude window runs in a
+Terminal tab on the Mac, type in the box at the bottom and tap Send. For
+five seconds it reads "Sending… · Undo": Undo takes it back and nothing
+reaches the Mac. Then the Mac types it into that tab, once the tab has been
+still for a few seconds with nothing half-typed in it, and it reads
+"Delivered" when Claude has received it. While Claude is still working the
+box says "sent when this turn ends", and the message waits as "Queued"
+(Cancel takes it back) until Claude is done. Nothing is ever sent twice:
+when the Mac cannot confirm that Claude received it, it says "Not confirmed
+— check the session on the Mac" and alerts you, and when the session moved
+on, someone is typing on the Mac, or the window is not a Terminal tab with
+Claude in it, it is not sent and says why. Slash commands and messages
+starting with "!", "#" or "&" are sent from the Mac for now; stopping Claude
+and answering its questions come later. A card waiting for you with no
+question or permission recorded has a "Reply…" button that opens the
+conversation with the box ready. The Mac's audit log records each message's
+device, time, length and fingerprint, never its words.
+
+**A session's details** say what is going on in a sentence or two, what
+Claude last said, the suggested next step with its button and a Copy button, "Recent" (the
 session's dated events and your own actions on it, newest first), and
 "Technical details", closed until you open it: the session id, its state and
 lane, its folder, and each Claude window's id and process id. Back, or the
@@ -400,6 +445,39 @@ card says "Did not start" and why. Every start is logged on the Mac in
 The same start is `n` in `invariant oracle tui` on the Mac, and `invariant
 oracle start-session <project>` on its command line; all three ask the same
 questions and refuse the same things.
+
+**The chain.** When the oracle starts each project's next session itself
+(ADR-027), the phone shows that chain and lets you steer it. Under
+**Projects** each project's row has a line such as "Chain: running Q4 · 3
+queued" (or paused, held, waiting, idle). Tap the row for its **Chain**
+screen:
+
+- **What is going on**, in a sentence, with "Pause chain…" (nothing more
+  starts on its own until you resume it) or "Resume chain…".
+- **Now**: the session the chain started and is following. When it has
+  stalled, "Continue…" types one more "continue" into its window, "Retry…"
+  closes its window and starts the same work afresh, and "Close…" closes its
+  window and marks the work failed. The stalled session itself stays, for
+  you to land or abandon.
+- **Proposed**: work the chain offers rather than starting on its own, each
+  with "Start…".
+- **Queue**: the work waiting, in order, each entry with an up and a down
+  arrow and "Remove…".
+
+What needs you about the chain is also a card under **Needs you**: a
+proposal ("Start…"), a stalled session one nudge did not move or that could
+not be nudged ("Continue…", "Retry…", "Close…"), a paused chain ("Resume
+chain…"), and, for every project at once, the weekly usage when it cannot be
+read ("Go ahead…", which lets the chain start queued work until a fresh
+reading arrives) or is over the cap (no button: wait for it to fall, or
+start work by hand).
+
+Every one of these asks first, on the same sheet as any step, with the
+command it runs; Retry and Close use the red sheet, since they close a
+window. If the queue changed on the Mac between the sheet and your press,
+nothing moves and the sheet says why: open it again. The same actions are
+`invariant queue move`, `queue remove` and `invariant oracle chain
+start|pause|resume|greenlight|continue|retry|close` on the Mac.
 
 **Copy** puts the exact command on the clipboard, with any variable it needs
 in front, so you can run it in a terminal of your own. Copying runs nothing.

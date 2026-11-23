@@ -4570,7 +4570,7 @@ is a decision need, linked by id.
    high.
 
    **Repro proof:** ``tests/test_bug_040_repro.py::test_BUG_040_a_dispatch_from_a_host_rooted_elsewhere_reaches_the_named_pipeline``,
-   committed 22ccde9 (2026-10-27) on the session branch, strict xfail; recorded
+   committed (2026-10-27) on the session branch, strict xfail; recorded
    red via ``pipeline test --phase reproducing``. Two temporary invariant projects,
    A and B, each with its own git common directory as state root. B has one live
    isolated session with a pipeline running. A ``Task`` dispatch for
@@ -4593,7 +4593,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 22ccde9 on session cd7c3be2
+        reason: red test on session cd7c3be2
         forced: false
       - from: reproduced
         to: fixed
@@ -7028,7 +7028,7 @@ is a decision need, linked by id.
    two defects under one id is how one of them gets half-fixed and forgotten.
 
    **Repro proof:** tests/test_bug_059_repro.py::test_BUG_059_doctor_does_not_spend_the_callers_host_binding,
-   committed 462da8f on session branch session/f5ec91e4 (2026-10-21) — asserts
+   committed on session branch session/f5ec91e4 (2026-10-21) — asserts
    that the caller's session document reads ``host_ended`` false both before and
    after ``invariant doctor``; today it reads False -> True. Driven end-to-end
    (init, commit, ``session start`` with a synthetic ``INVARIANT_HOST_SESSION_ID``,
@@ -7039,7 +7039,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repro red in 462da8f (session branch)
+        reason: strict-xfail repro red; the repro commit was lost in the 2026-11-21 squash, the test lives at tests/test_bug_059_repro.py (first in history at 2826ca1)
         forced: false
       - from: reproduced
         to: fixed
@@ -7271,12 +7271,12 @@ is a decision need, linked by id.
    review itself. Not fixed there: the fix needs a design decision the session did
    not own.
 
-   **Repro proof:** tests/test_bug_062_repro.py::test_BUG_062_first_edit_in_isolated_worktree_leaves_session_working, committed e98857b (2026-10-21, session branch) — an isolated session whose worktree receives an Edit through the host's pre-tool-use/post-tool-use hook pair is still ``isolated`` afterwards, not ``working``. Wrapped in strict xfail; recorded red via ``pipeline test --phase reproducing``.
+   **Repro proof:** tests/test_bug_062_repro.py::test_BUG_062_first_edit_in_isolated_worktree_leaves_session_working, committed 2026-10-21 (repro commit lost in the 2026-11-21 squash; the test is first in history at 2826ca1) — an isolated session whose worktree receives an Edit through the host's pre-tool-use/post-tool-use hook pair is still ``isolated`` afterwards, not ``working``. Wrapped in strict xfail; recorded red via ``pipeline test --phase reproducing``.
 
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repro red at e98857b (session branch)
+        reason: strict-xfail repro red; the repro commit was lost in the 2026-11-21 squash, the test lives at tests/test_bug_062_repro.py (first in history at 2826ca1)
         forced: false
       - from: reproduced
         to: fixed
@@ -7523,12 +7523,12 @@ is a decision need, linked by id.
    ``coverage.meets_floor`` (and ``methodology.gates.non_source``), and how
    extensionless repository metadata gets classified.
 
-   **Repro proof (half a):** tests/test_bug_064_repro.py::test_BUG_064_a_chore_landing_is_not_gated_on_a_design_agent, committed c529e3d (2026-10-21, session branch) — a ``chore`` pipeline in ``reviewing``, with a design role configured, ``agents.design_agent_ran`` at ``block`` and the review agent on record, is refused ``reviewing -> committed`` by ``agents.design_agent_ran``: "no design agent ran in this pipeline". Asserts the landing edge's verdicts (what ``pipeline advance committed`` evaluates), not ``AGENT_ROLE_GATES`` itself. Wrapped in strict xfail; recorded red via ``pipeline test --phase reproducing``. Control observed by hand: ``tdd``'s ``committed`` also carries the gate (the fix must keep it there), and recording a design agent turns the chore verdict non-blocking, so the assertion can go green. Half (b) is not covered by this proof; it was fixed in 0411e2a, 99f48ee.
+   **Repro proof (half a):** tests/test_bug_064_repro.py::test_BUG_064_a_chore_landing_is_not_gated_on_a_design_agent, committed 2026-10-21 (repro commit lost in the 2026-11-21 squash; the test is first in history at 2826ca1) — a ``chore`` pipeline in ``reviewing``, with a design role configured, ``agents.design_agent_ran`` at ``block`` and the review agent on record, is refused ``reviewing -> committed`` by ``agents.design_agent_ran``: "no design agent ran in this pipeline". Asserts the landing edge's verdicts (what ``pipeline advance committed`` evaluates), not ``AGENT_ROLE_GATES`` itself. Wrapped in strict xfail; recorded red via ``pipeline test --phase reproducing``. Control observed by hand: ``tdd``'s ``committed`` also carries the gate (the fix must keep it there), and recording a design agent turns the chore verdict non-blocking, so the assertion can go green. Half (b) is not covered by this proof; it was fixed in 0411e2a, 99f48ee.
 
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: 'half (a) only: strict-xfail repro red at c529e3d (session branch); half (b) already fixed in 0411e2a, 99f48ee'
+        reason: 'half (a) only: strict-xfail repro red; the repro commit was lost in the 2026-11-21 squash, the test lives at tests/test_bug_064_repro.py (first in history at 2826ca1); half (b) already fixed in 0411e2a, 99f48ee'
         forced: false
       - from: reproduced
         to: fixed
@@ -7603,12 +7603,12 @@ is a decision need, linked by id.
    **Provenance.** Reported 2026-10-17 by a consuming project from two live
    transitions. Not reproduced in this repository yet.
 
-   **Repro proof:** tests/test_bug_065_repro.py::test_BUG_065_show_reads_the_whole_wrapped_area_and_no_doc_field and ::test_BUG_065_transition_changes_only_the_status_line, committed 50fd322 (2026-10-21) on the session branch — on a sphinx-needs fixture whose entry wraps ``:area:`` over three lines, the last opening on a ``:doc:`` role, with a neighbouring entry before it and a section heading one blank line after it. The read test asserts ``show`` returns one ``area`` holding all three lines and no ``doc`` field; today it returns ``area='core/items, the store backends, see'`` and :literal:`doc='\`architecture/overview\` for the owner'`. The write test asserts a real ``WorkItemDomain.transition(filed -> reproduced)`` removes no original line but the status line; today the diff also removes the three ``:area:`` lines (replaced by a one-line ``:area:`` and a ``:doc: ...`` option line) and the blank line before the next heading. All three reported symptoms (a), (b), (c) fire. Both wrapped in strict xfail; recorded red via ``pipeline test --phase reproducing``. The fix deletes the markers and keeps the assertions.
+   **Repro proof:** tests/test_bug_065_repro.py::test_BUG_065_show_reads_the_whole_wrapped_area_and_no_doc_field and ::test_BUG_065_transition_changes_only_the_status_line, committed (2026-10-21) on the session branch — on a sphinx-needs fixture whose entry wraps ``:area:`` over three lines, the last opening on a ``:doc:`` role, with a neighbouring entry before it and a section heading one blank line after it. The read test asserts ``show`` returns one ``area`` holding all three lines and no ``doc`` field; today it returns ``area='core/items, the store backends, see'`` and :literal:`doc='\`architecture/overview\` for the owner'`. The write test asserts a real ``WorkItemDomain.transition(filed -> reproduced)`` removes no original line but the status line; today the diff also removes the three ``:area:`` lines (replaced by a one-line ``:area:`` and a ``:doc: ...`` option line) and the blank line before the next heading. All three reported symptoms (a), (b), (c) fire. Both wrapped in strict xfail; recorded red via ``pipeline test --phase reproducing``. The fix deletes the markers and keeps the assertions.
 
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repro 50fd322 fails as reported
+        reason: strict-xfail repro fails as reported
         forced: false
       - from: reproduced
         to: fixed
@@ -7701,7 +7701,7 @@ is a decision need, linked by id.
    **Provenance.** Reported 2026-10-17 by a consuming project after repeated
    repro-only sessions. Not reproduced in this repository yet.
 
-   **Repro proof:** ``tests/test_bug_066_repro.py``, committed d988e84 (2026-10-20)
+   **Repro proof:** ``tests/test_bug_066_repro.py``, committed (2026-10-20)
    on session branch ``session/a8e177ea`` — NOT yet on the base branch, because the
    merge is exactly what this bug blocks (see below). Two tests, each wrapped in
    ``pytest.mark.xfail(strict=True)``; the fixer deletes both markers first.
@@ -7731,7 +7731,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: two strict-xfail repros red in d988e84 on session/a8e177ea
+        reason: two strict-xfail repros red in on session/a8e177ea
         forced: false
       - from: reproduced
         to: fixed
@@ -7806,7 +7806,7 @@ is a decision need, linked by id.
    the refusal-wording surface, different mechanism: BUG_060. No schema involved.
 
    **Repro proof:** ``tests/test_cli.py::TestBUG_067_DashFWrittenByTheSameCommand::test_BUG_067_refusal_names_the_same_command_write_and_a_separate_call``,
-   committed a10585b (2026-10-20) on the session branch — feeds ``invariant hook pre-tool-use`` a Bash payload ``printf 'msg' > <abs>/m.txt && git commit -F <abs>/m.txt`` (file absent, default ``privacy.scope``) and asserts the
+   committed (2026-10-20) on the session branch — feeds ``invariant hook pre-tool-use`` a Bash payload ``printf 'msg' > <abs>/m.txt && git commit -F <abs>/m.txt`` (file absent, default ``privacy.scope``) and asserts the
    ``privacy.clean`` block says "same command" and that a ``try:`` line says
    "separate". Today the block reads "-F names ``'<abs>/m.txt'``, which could not be
    read at scan time" with the single ``try: write the message inline with -m '<message>'``, so the first assertion fails. Wrapped in a strict xfail; the
@@ -7820,7 +7820,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test a10585b on the session branch
+        reason: red test on the session branch
         forced: false
       - from: reproduced
         to: fixed
@@ -7905,7 +7905,7 @@ is a decision need, linked by id.
    scattered literals.
 
    **Repro proof:** ``tests/test_handoff.py::TestBUG068SuccessorEnvironment::test_BUG_068_successor_claude_starts_without_the_launchers_host_markers``,
-   committed 1d3ea31 (2026-10-20) on the session branch — exports ``CLAUDECODE=1``,
+   committed (2026-10-20) on the session branch — exports ``CLAUDECODE=1``,
    ``CLAUDE_CODE_CHILD_SESSION=1``, ``CLAUDE_CODE_SESSION_ID=x``,
    ``COLORTERM=truecolor`` and ``FOO=bar``, runs ``TerminalLauncher`` with ``osascript``
    recorded (no window), then runs ``plan.shell_line`` with a real ``/bin/sh`` in the
@@ -7924,7 +7924,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 1d3ea31 on the session branch
+        reason: red test on the session branch
         forced: false
       - from: reproduced
         to: fixed
@@ -7986,7 +7986,7 @@ is a decision need, linked by id.
    editor.
 
    **Repro proof:** ``tests/test_handoff.py::TestBUG069SuccessorEnvironment::test_BUG_069_successor_starts_without_claude_effort_and_git_editor``,
-   committed c137962 (2026-10-20) on the session branch — with ``CLAUDE_EFFORT=medium``,
+   committed (2026-10-20) on the session branch — with ``CLAUDE_EFFORT=medium``,
    ``GIT_EDITOR=true`` and ``FOO=bar``, asserts that ``without_host_markers`` drops both
    names, that ``plan_launch``'s typed line unsets both with ``env -u``, and that the
    successor ``claude`` (the BUG_068 harness: ``TerminalLauncher`` with ``osascript``
@@ -8001,7 +8001,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test c137962 on the session branch
+        reason: red test on the session branch
         forced: false
       - from: reproduced
         to: fixed
@@ -8126,12 +8126,12 @@ is a decision need, linked by id.
    ``unsatisfiable-gates``, but that batch shares the symptom family with this
    entry, not the root cause.
 
-   **Repro proof:** tests/test_bug_071_repro.py::test_BUG_071_dot_slash_items_path_store_write_is_not_denied, committed 82c006f (2026-10-21) — asserts that a Write to a store file in the main checkout, driven through the real ``pre-tool-use`` hook in a sessionless temporary git project whose manifest says ``items.path: ./docs/backlog``, is not refused. Today it is denied by ``session.isolated_before_edit`` and ``session.no_edit_in_main_checkout``. Wrapped in a strict xfail; recorded red via ``pipeline test --phase reproducing``. The same harness with ``docs/backlog`` passes (scratch control, not committed). The fix deletes the marker and keeps the assertion.
+   **Repro proof:** tests/test_bug_071_repro.py::test_BUG_071_dot_slash_items_path_store_write_is_not_denied, committed (2026-10-21) — asserts that a Write to a store file in the main checkout, driven through the real ``pre-tool-use`` hook in a sessionless temporary git project whose manifest says ``items.path: ./docs/backlog``, is not refused. Today it is denied by ``session.isolated_before_edit`` and ``session.no_edit_in_main_checkout``. Wrapped in a strict xfail; recorded red via ``pipeline test --phase reproducing``. The same harness with ``docs/backlog`` passes (scratch control, not committed). The fix deletes the marker and keeps the assertion.
 
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repro 82c006f fails as reported
+        reason: strict-xfail repro fails as reported
         forced: false
       - from: reproduced
         to: fixed
@@ -8764,7 +8764,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: 'red: tests/test_oracle_web_actions.py::test_BUG_079_the_pages_own_post_is_accepted_with_the_origin_a_browser_derives[pair], strict xfail, committed 802a3d9'
+        reason: 'red: tests/test_oracle_web_actions.py::test_BUG_079_the_pages_own_post_is_accepted_with_the_origin_a_browser_derives[pair], strict xfail, committed '
         forced: false
       - from: reproduced
         to: fixed
@@ -8867,7 +8867,7 @@ is a decision need, linked by id.
 
 .. bug:: Intermittent flake: the TUI refresh-timer test raises textual WorkerCancelled under full-suite load
    :id: BUG_081
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: oracle tests (TUI)
@@ -8904,6 +8904,20 @@ is a decision need, linked by id.
    controllable timer rather than a real 0.05 s interval.
 
    **Related:** IDEA_023 (the auto-refresh change that added this test).
+
+   **Repro proof:** ``tests/test_oracle_tui_flake_repros.py::test_BUG_081_a_refresh_superseded_while_the_test_settles_does_not_error``, committed a7e8618 (2026-11-18), a strict xfail pinned to ``WorkerCancelled``. With the dashboard's own 0.05 s timer, each read ends only once the next has begun, until one read has been superseded while ``drive``'s ``settle`` waits; the test asserts ``drive`` completes with the timer having read twice. It fails every run with ``WorkerCancelled: Worker was cancelled, and did not complete.``, raised in ``settle``'s ``workers.wait_for_complete``. The suspected cause holds. Under ``pytest -n logical`` the original test fails the same way, from its own inline ``wait_for_complete`` loop as well as ``settle``.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_oracle_tui_flake_repros.py, a refresh superseded while drive''s settle waits raises WorkerCancelled'
+        forced: false
+        evidence: a7e86186554664516353faa7e759950b507e7d99
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: ae6aca1ca414dd0b81d500062b6be563537f3d49
 
 .. bug:: A subagent's architecture-doc reads are credited to its parent host's bound session, not to the session whose worktree it reads in
    :id: BUG_082
@@ -9041,12 +9055,12 @@ is a decision need, linked by id.
    certificate and restarting the page agent, so the page currently serves
    plain HTTP with the red warning.
 
-   **Repro proof:** tests/test_bug_083_repro.py::test_BUG_083_a_kept_certificate_serves_https_and_redirects_http, committed 186b04c (2026-10-22) on session/841185a1 — runs ``oracle web`` with the suite's certificate recorder handing it fixture certificate a, and lets the command build its listener through the real ``WebServer`` constructor with the command's own arguments (only the bind moved to loopback port 0). It asserts that a TLS client asking for ``/`` at the certificate's name gets 401 and a plain-HTTP request gets ``307`` to ``https://<name>:<port>/``. Today both get ``ConnectionResetError: [Errno 54] Connection reset by peer``, and the server logs, per connection, ``TypeError: 'invariant.oracle.tls.Served' object cannot be interpreted as an integer or float``. That is raised from ``socketserver.StreamRequestHandler.setup``'s ``settimeout``, reached through ``_Handler.setup``; because ``served`` is misbound, ``_Server.served`` is ``None`` and the TLS branch of ``_Server.finish_request`` never runs. Wrapped in a strict xfail. Control (scratch, not committed): the same test with the factory passing the holder as ``served=`` passes, so the harness reaches the surface. The fix deletes the marker and keeps the assertion.
+   **Repro proof:** tests/test_bug_083_repro.py::test_BUG_083_a_kept_certificate_serves_https_and_redirects_http, committed (2026-10-22) on session/841185a1 — runs ``oracle web`` with the suite's certificate recorder handing it fixture certificate a, and lets the command build its listener through the real ``WebServer`` constructor with the command's own arguments (only the bind moved to loopback port 0). It asserts that a TLS client asking for ``/`` at the certificate's name gets 401 and a plain-HTTP request gets ``307`` to ``https://<name>:<port>/``. Today both get ``ConnectionResetError: [Errno 54] Connection reset by peer``, and the server logs, per connection, ``TypeError: 'invariant.oracle.tls.Served' object cannot be interpreted as an integer or float``. That is raised from ``socketserver.StreamRequestHandler.setup``'s ``settimeout``, reached through ``_Handler.setup``; because ``served`` is misbound, ``_Server.served`` is ``None`` and the TLS branch of ``_Server.finish_request`` never runs. Wrapped in a strict xfail. Control (scratch, not committed): the same test with the factory passing the holder as ``served=`` passes, so the harness reaches the surface. The fix deletes the marker and keeps the assertion.
 
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repro 186b04c
+        reason: strict-xfail repro 
         forced: false
       - from: reproduced
         to: fixed
@@ -9124,7 +9138,7 @@ is a decision need, linked by id.
    environment for the Tailscale binary (covers address discovery too) or in
    the plist; then update ADR-008 D19 and the guide.
 
-   **Repro proof:** tests/test_bug_084_repro.py, committed b61fb5b (2026-10-22) on session/841185a1, two strict-xfail tests. No ``tailscale`` runs: a stand-in for ``subprocess.run`` plays the app bundle's binary as recorded above (no ``TERM``: the GUI failure on stderr, exit 0; with ``TERM``: the CLI's answers, the fixture certificate).
+   **Repro proof:** tests/test_bug_084_repro.py, committed (2026-10-22) on session/841185a1, two strict-xfail tests. No ``tailscale`` runs: a stand-in for ``subprocess.run`` plays the app bundle's binary as recorded above (no ``TERM``: the GUI failure on stderr, exit 0; with ``TERM``: the CLI's answers, the fixture certificate).
 
    - ``test_BUG_084_the_web_agent_fetches_a_certificate_with_no_TERM_from_launchd`` puts the web plist's ``EnvironmentVariables`` in the environment, without ``TERM``. It drives the real certificate seam (``_real_oracle_web_certificates``, through the real ``run_program``) and asserts that it returns the certificate. Today it raises ``CertError: tailscale status --json did not print JSON: Expecting value: line 1 column 1 (char 0)``, the live ``web.json`` error verbatim. The test passes whether ``TERM`` is added in ``run_program``'s environment or in the plist. Control (scratch, not committed): the same test with ``TERM=dumb`` set passes.
    - ``test_BUG_084_an_answer_that_is_not_json_is_reported_by_its_first_line`` asserts that ``issue``'s error carries "The Tailscale GUI failed to start". Today the error is the JSON parse message.
@@ -9133,7 +9147,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repros b61fb5b
+        reason: strict-xfail repros 
         forced: false
       - from: reproduced
         to: fixed
@@ -9217,7 +9231,7 @@ is a decision need, linked by id.
    **Repro proof:** ``tests/test_adapters.py::TestCarriesExecutableCode::test_BUG_085_a_cocoapods_manifest_carries_no_executable_code``
    (parametrized over ``Podfile``, ``Podfile.lock``, ``ios/Podfile``, ``ios/Podfile.lock``)
    and ``tests/test_rules.py::TestFilesThatCannotHaveACoverageRow::test_BUG_085_a_touched_podfile_and_lockfile_are_set_aside_and_named``,
-   committed e472359 (2026-10-24) on the session branch. The adapter test asserts
+   committed (2026-10-24) on the session branch. The adapter test asserts
    ``carries_executable_code(path, relative)`` is ``False`` for each; today every case
    fails with "assert None is False". The rule test touches ``Podfile`` and
    ``Podfile.lock`` beside a measured Swift file and asserts the gate passes and
@@ -9232,7 +9246,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repro committed e472359 on session/7107852a
+        reason: strict-xfail repro committed on session/7107852a
         forced: false
       - from: reproduced
         to: fixed
@@ -9302,7 +9316,7 @@ is a decision need, linked by id.
 
    **Repro proof:** ``tests/test_bug_086_repro.py::test_BUG_086_a_live_host_reads_alive_when_procStart_is_UTC_and_ps_is_local``
    and ``tests/test_bug_086_repro.py::test_BUG_086_close_host_start_recheck_accepts_the_same_process``,
-   committed d2430ea (2026-10-25) on the session branch, both strict xfail. With
+   committed (2026-10-25) on the session branch, both strict xfail. With
    the local zone fixed at UTC+2 (``Etc/GMT-2``), a synthetic record whose
    ``procStart`` is one instant in UTC, and canned ``ps`` output printing the same
    instant in local time, both read through the real ``ClaudeCodeProbe``: the scan
@@ -9318,7 +9332,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: strict-xfail repro committed d2430ea on session/903da837
+        reason: strict-xfail repro committed on session/903da837
         forced: false
       - from: reproduced
         to: fixed
@@ -9394,7 +9408,7 @@ is a decision need, linked by id.
    time), BUG_086 (three of these hosts, 8601, 94916 and 40767, read ``host_gone`` before b876e41).
 
    **Repro proof:** ``tests/test_bug_087_repro.py::test_BUG_087_a_long_idle_host_with_a_stale_running_turn_is_offered_close``,
-   committed 0d62b20 (2026-10-25) on the session branch, strict xfail. An alive
+   committed (2026-10-25) on the session branch, strict xfail. An alive
    orphan host (a synthetic record read through the real ``ClaudeCodeProbe``,
    ``pid_source: both``, ``rooted_here`` true, no conflict, not claimed elsewhere),
    bound to a torn-down session, last turn and attention record 15 hours old,
@@ -9410,7 +9424,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 0d62b20 on session 8b269575
+        reason: red test on session 8b269575
         forced: false
       - from: reproduced
         to: fixed
@@ -9482,7 +9496,7 @@ is a decision need, linked by id.
    is why this hint now fires on the common path.
 
    **Repro proof:** ``tests/test_domains.py::TestBUG_088_ScopedZeroExecutedRefusal::test_BUG_088_scopedZeroExecutedRefusalNamesTheSelector``,
-   committed d1e0200 (2026-10-27) on the session branch, strict xfail; recorded
+   committed (2026-10-27) on the session branch, strict xfail; recorded
    red via ``pipeline test`` in ``reproducing``. A swift-ecosystem project whose
    ``commands.coverage_one`` is a script printing a clean xcodebuild run that
    executed 0 tests and exits 0; ``run_coverage`` with the selector
@@ -9496,7 +9510,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test d1e0200 on session 71c7ee75
+        reason: red test on session 71c7ee75
         forced: false
       - from: reproduced
         to: fixed
@@ -9587,7 +9601,7 @@ is a decision need, linked by id.
    restart.
 
    **Repro proof:** ``tests/test_oracle_scan.py::TestVersionSkew::test_BUG_089_a_stale_rule_registry_is_not_every_project_unreadable``,
-   committed bcde5cb on session/4a8cfa13 (2026-10-27). Two healthy projects scan
+   committed on session/4a8cfa13 (2026-10-27). Two healthy projects scan
    clean; with ``sweep.no_full_run`` removed from the rule registry while the
    shipped default profile names it, ``scan_all`` returns one project-level error
    row per project (the "Cannot read this project" card), each carrying the
@@ -9598,7 +9612,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: 'red at the scan seam: tests/test_oracle_scan.py::TestVersionSkew::test_BUG_089_a_stale_rule_registry_is_not_every_project_unreadable (bcde5cb, session/4a8cfa13)'
+        reason: 'red at the scan seam: tests/test_oracle_scan.py::TestVersionSkew::test_BUG_089_a_stale_rule_registry_is_not_every_project_unreadable (session/4a8cfa13)'
         forced: false
       - from: reproduced
         to: fixed
@@ -9614,7 +9628,7 @@ is a decision need, linked by id.
    :affects: COMP_DOMAINS_SWEEP, COMP_CORE_PRIVACY
 
    **Repro proof:** ``tests/test_sweep_domain.py::test_BUG_090_a_sweep_commits_on_a_project_with_device_ids_enabled``,
-   committed 1c9c5ef on session/1626be86 (2026-10-27). In a fixture project whose
+   committed on session/1626be86 (2026-10-27). In a fixture project whose
    ``privacy.patterns`` is the default set plus ``device_ids``, the baseline sweep
    must commit its record, then a later sweep must commit the record and the
    ``test:`` bug it files. Today the baseline is refused: ``committed`` is False,
@@ -9708,7 +9722,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: 'red at the sweep seam: tests/test_sweep_domain.py::test_BUG_090_a_sweep_commits_on_a_project_with_device_ids_enabled (1c9c5ef, session/1626be86)'
+        reason: 'red at the sweep seam: tests/test_sweep_domain.py::test_BUG_090_a_sweep_commits_on_a_project_with_device_ids_enabled (session/1626be86)'
         forced: false
       - from: reproduced
         to: fixed
@@ -9850,7 +9864,7 @@ is a decision need, linked by id.
    introduced the Projects line.
 
    **Repro proof:** ``tests/test_bug_092_repro.py::test_BUG_092_projects_line_separates_paused_from_open_sessions``,
-   committed e74c7ed (2026-10-28) on the session branch, strict xfail. A
+   committed (2026-10-28) on the session branch, strict xfail. A
    project document holds two session rows, one working (``turn_state`` ``busy``,
    a live host) and one whose host ended (``host_ended``, its host not alive);
    the real ``panel.view`` with acting and starting on groups the first under
@@ -9862,7 +9876,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test e74c7ed on session 980e0254
+        reason: red test on session 980e0254
         forced: false
       - from: reproduced
         to: fixed
@@ -9971,7 +9985,7 @@ is a decision need, linked by id.
    unrelated mechanism (wording of a count).
 
    **Repro proof:** ``tests/test_oracle_rerun_session_values.py::test_BUG_093_phone_rerun_reaches_the_sessions_own_destination``,
-   committed 163ac50 (2026-10-28) on the session branch, strict xfail. A real
+   committed (2026-10-28) on the session branch, strict xfail. A real
    project in a git repository discovers ``destination_id`` from
    ``INVARIANT_DESTINATION_ID`` and exits 1 when it is unset; its fake suite
    records the destination it was handed and fails. The session's own
@@ -9989,7 +10003,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 163ac50 on session 980e0254
+        reason: red test on session 980e0254
         forced: false
       - from: reproduced
         to: fixed
@@ -10089,7 +10103,7 @@ is a decision need, linked by id.
    oracle-panel.md sections above.
 
    **Repro proof:** ``tests/test_bug_094_repro.py::test_BUG_094_a_host_waiting_on_its_background_agent_is_working_not_your_turn``,
-   committed 7bd124e (2026-10-28) on the session branch, strict xfail. Through
+   committed (2026-10-28) on the session branch, strict xfail. Through
    the real ``invariant hook`` command a bound host gets a prompt, a PostToolUse
    of ``Agent`` with ``run_in_background`` (the agent launched, not finished), the
    main turn's Stop and an ``idle_prompt`` Notification, with no task-notification
@@ -10104,7 +10118,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 7bd124e on session 980e0254
+        reason: red test on session 980e0254
         forced: false
       - from: reproduced
         to: fixed
@@ -10161,7 +10175,7 @@ is a decision need, linked by id.
    it" / "The two guarantees" with the ordering guarantee.
 
    **Repro proof:** ``tests/test_bug_095_repro.py::test_BUG_095_a_stop_cancelled_at_its_timeout_still_records_the_turn_ended``,
-   committed 6b00f35 (2026-10-28) on the session branch, strict xfail. A
+   committed (2026-10-28) on the session branch, strict xfail. A
    ``user-prompt-submit`` hook leaves the attention record at ``turn: running``;
    then a ``stop`` hook runs with its closeout step (``evaluate_event``) replaced
    by one that is cancelled at the timeout, modelled as a ``BaseException`` the
@@ -10176,7 +10190,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 6b00f35 on session 980e0254
+        reason: red test on session 980e0254
         forced: false
       - from: reproduced
         to: fixed
@@ -10229,7 +10243,7 @@ is a decision need, linked by id.
    transcript and a newer subagent transcript, asserting the later turn wins.
 
    **Repro proof:** ``tests/test_bug_096_repro.py::test_BUG_096_subagent_turn_moves_the_hosts_last_activity``,
-   committed fbe1387 (2026-10-28) on the session branch, strict xfail. A fixture
+   committed (2026-10-28) on the session branch, strict xfail. A fixture
    Claude Code home holds a host's main transcript (last turn two hours ago) and
    ``<host id>/subagents/agent-<id>.jsonl`` (last turn one minute ago); through the
    real ``ClaudeCodeProbe`` and ``scan_project``, the host row's ``last_activity`` is
@@ -10243,7 +10257,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test fbe1387 on session 980e0254
+        reason: red test on session 980e0254
         forced: false
       - from: reproduced
         to: fixed
@@ -10351,7 +10365,7 @@ is a decision need, linked by id.
 
    **Repro proof:** ``tests/test_bug_097_repro.py::test_BUG_097_a_stacked_second_ecosystem_keeps_the_primarys_suite_command``
    and ``::test_BUG_097_a_second_ecosystem_test_is_run_and_read_by_its_own_adapter``,
-   committed 26a1e6f (2026-10-28) on the session branch, strict xfail. A
+   committed (2026-10-28) on the session branch, strict xfail. A
    ``[python, node]`` manifest with no commands resolves ``commands.test`` to
    ``npm test`` where python's ``pytest`` is expected. A scoped ``run_tests`` of a node
    test file under ``web/`` is read by the python adapter where the node adapter is
@@ -10361,7 +10375,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 26a1e6f on session 071dc179
+        reason: red test on session 071dc179
         forced: false
       - from: reproduced
         to: fixed
@@ -10438,7 +10452,7 @@ is a decision need, linked by id.
    audit log's done entry.
 
    **Repro proof:** ``tests/test_bug_098_repro.py::test_BUG_098_close_closes_the_tab_once_claudes_lingering_child_has_gone``,
-   committed 3d64830 (2026-10-28) on the session branch, strict xfail. Fake
+   committed (2026-10-28) on the session branch, strict xfail. Fake
    seams: Claude exits two polls after its one SIGTERM, and the fake tab
    answers ``busy login,-zsh,caffeinate`` until half a second after Claude has
    gone, then closes (it answers by the clock, not by how often it is asked).
@@ -10455,7 +10469,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 3d64830 on session 675189e4
+        reason: red test on session 675189e4
         forced: false
       - from: reproduced
         to: fixed
@@ -10523,7 +10537,7 @@ is a decision need, linked by id.
    reason line on the panel.
 
    **Repro proof:** ``tests/test_bug_099_repro.py::test_BUG_099_a_live_host_with_no_per_process_record_is_offered_close``,
-   committed f36450a (2026-10-28) on the session branch, strict xfail. A
+   committed (2026-10-28) on the session branch, strict xfail. A
    leftover orphan host in a registered project: its attention record names
    the pid, a stand-in ``ps`` describes that pid as a live ``claude`` with a start
    and a tty, and the synthetic Claude Code sessions directory holds only the
@@ -10539,7 +10553,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test f36450a on session 675189e4
+        reason: red test on session 675189e4
         forced: false
       - from: reproduced
         to: fixed
@@ -10605,7 +10619,7 @@ is a decision need, linked by id.
    spares a reused pid as today. Update cli.md's handoff paragraph.
 
    **Repro proof:** ``tests/test_handoff.py::test_BUG_100_handoff_close_closes_the_old_terminal_tab_after_claude_exits``,
-   committed 691f980 (2026-10-28) on the session branch, strict xfail. It
+   committed (2026-10-28) on the session branch, strict xfail. It
    captures what ``DetachedCloser().close(pid, 0)`` starts detached and runs it
    with the OS faked at its edges: a stand-in ``ps`` first on PATH describes the
    pid as ``claude`` on a Terminal tab's tty (under ``-zsh``, ``login`` and
@@ -10625,7 +10639,7 @@ is a decision need, linked by id.
    .. invariant-history:
       - from: filed
         to: reproduced
-        reason: red test 691f980 on session 675189e4
+        reason: red test on session 675189e4
         forced: false
       - from: reproduced
         to: fixed
@@ -10670,7 +10684,7 @@ is a decision need, linked by id.
    ``docs.updated`` reads the test files as "source changed" and demands an
    architecture-doc edit that nobody could honestly write, since no component,
    seam or dependency changed. Observed 2026-10-28 in a Heap ``bugfix`` session,
-   state ``verifying``, commit ffc5a2d, fixing BUG_UPLOAD_RETRY_REPRO_BLIND. The
+   state ``verifying``, commit fixing BUG_UPLOAD_RETRY_REPRO_BLIND. The
    fix's changed set:
 
    ::
@@ -10757,7 +10771,7 @@ is a decision need, linked by id.
    bullet in ``state_model.md``.
 
    **Repro proof:** ``tests/test_bug_102_repro.py::test_BUG_102_a_test_only_change_lands_without_an_architecture_doc``,
-   committed 16b2be1 on session bc406920 (2026-10-28), strict xfail, parametrized
+   committed on session bc406920 (2026-10-28), strict xfail, parametrized
    over ``python`` and ``swift_xcode`` — asserts that ``docs.updated``, evaluated on the
    session branch's committed change of only adapter-claimed test files
    (``tests/**`` / ``HeapTests/**``) plus ``docs/backlog.rst``, does not block. Today it
@@ -11125,7 +11139,7 @@ is a decision need, linked by id.
 
 .. bug:: A change that adds a judgement guideline can never record a verdict on it: DN-6 refuses any verdict once the tree's ruleset differs from the pin
    :id: BUG_115
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: core/rules, core/verdicts, guidelines domain
@@ -11147,6 +11161,19 @@ is a decision need, linked by id.
    **Related:** IDEA_031 (guidelines ownership umbrella; A4 is its verdict increment). BUG_102 (same mechanism, fixed). Batched with ``unsatisfiable-gates``: a gate with an owed answer that no honest change can give except by bypass.
 
    **Fix sketch / next step:** Run ``bug-reproducer`` first: a strict-xfail test in tests/test_rules.py (or the verdicts tests) that pins a ruleset, edits it to add a judgement rule matching a changed file, and asserts a pass on the new rule is accepted and ``guidelines.verdicts_complete`` passes without an override; plus a control that a rule the change did NOT add still refuses a verdict after an unrelated ruleset edit (DN-6's guard must survive). The fix is a DN-6 amendment for ``feature-architect``: choose between a recorded re-pin and judging change-added rules against the tree, then update ADR-012, cli.md P1 and state_model.md.
+
+   **Repro proof:** ``tests/test_guidelines_verdicts_complete.py::TestBUG115::test_BUG_115_a_rule_the_change_adds_can_be_answered_by_a_recorded_verdict``, committed 050fbc2 (2026-11-22), wrapped in ``xfail(strict=True)``. It asserts the symptom: with the ruleset pinned at start, a change that adds a judgement guideline (phases ``[always]``) and creates the file its ``applies_to`` names gets a cited pass on that rule accepted by ``plan_verdicts``, and ``guidelines.verdicts_complete`` then passes with no override. Today the submission is refused under P1: "the ruleset in the tree is 7dc03c756464, and the pipeline pinned 27ab5b050978; a verdict is judged against the pin (DN-6)". A control run with the pin set to the tree's digest went green, and the gate under the start pin read the same verdict as stale, so the harness reaches both surfaces. The test is neutral on the design. If the fix is an explicit re-pin, the fixing session adds that step to the test's setup and keeps the assertions. The DN-6 guard test the fix sketch asks for depends on which design is chosen, so it is left to the fix. The existing tests for an edit to a rule the pin holds (``test_a_ruleset_edited_mid_pipeline_makes_verdicts_stale`` and the DN-6 cases in ``tests/test_guidelines_verdicts.py``) still guard the case where the change did not add the rule.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'strict-xfail repro red: P1/DN-6 refuses a verdict on a change-added rule'
+        forced: false
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: the commit after 72a03af
 
 .. bug:: init creates and gitignores .claude/invariant/state while the engine's state root is the git common directory
    :id: BUG_116
@@ -11667,7 +11694,7 @@ is a decision need, linked by id.
 
 .. bug:: A commit made in a store still refuses the host's session-link trailer
    :id: BUG_133
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: core/storescan, core/rules (privacy.clean store route), cli store hook
@@ -11681,9 +11708,25 @@ is a decision need, linked by id.
 
    **Affected:** :need:`COMP_CORE_STORESCAN`, :need:`COMP_CORE_PRIVACY`. See ``docs/architecture/manifest.rst``, "A store's privacy screen".
 
+   **Repro proof:** ``tests/test_bug_133_repro.py``, committed 2026-11-21 squash (2026-11-17), one verdict per route, each red. Route 1, ``test_BUG_133_store_route_passes_the_host_session_trailer``: ``privacy.clean`` on ``git -C <store> commit -F <file>``, with the host's declared trailers on the rule context, is asserted to pass a message ending in ``Co-Authored-By:`` and ``Claude-Session:`` with a link of the host's declared shape; it fails with "1 personal-data match(es) in content being written down", a ``links`` match at line 6, column 17, the link on the ``Claude-Session:`` line. Route 2, ``test_BUG_133_store_commit_msg_hook_passes_the_host_session_trailer``: a real ``git commit -F <file>`` in the store, through the installed ``commit-msg`` hook, is asserted to commit; the hook refuses the commit message with the same ``links`` match at the same line and column. A green guard per route shows the same link in the message body is still a ``links`` finding.
+
+   **Next step:** ``feature-architect`` designs the fix.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_133_repro.py, the host''s Claude-Session trailer is a links finding on both store routes (privacy.clean and the commit-msg hook)'
+        forced: false
+        evidence: 2026-11-21 squash
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: 2026-11-21 squash
+
 .. bug:: Intermittent flake: the oracle TUI Start test finds no #fresh widget
    :id: BUG_134
-   :status: filed
+   :status: fixed
    :severity: low
    :priority: medium
    :area: tests/oracle tui
@@ -11696,6 +11739,20 @@ is a decision need, linked by id.
    **Repro:** Run the single test in a loop. At 582d5bc it failed 1 of 25 isolated runs; with the BUG_127 change, 1 of 10, both with the same ``NoMatches``.
 
    **Affected:** :need:`COMP_ORACLE_TUI` (its test). Related: :need:`BUG_081 <BUG_081>`, another intermittent TUI test failure, on a different test and error.
+
+   **Repro proof:** ``tests/test_oracle_tui_flake_repros.py``, committed a7e8618 (2026-11-18), two strict xfails. ``run_test`` tears the app down without ``App.exit()``, so it removes the default screen's widgets while the app's timers and load workers are still live. Each test makes that removal slower than the refresh that lands in it, and asserts ``drive`` completes. ``test_BUG_134_the_freshness_tick_during_teardown_does_not_error`` waits out one ``updated N s ago`` tick and fails every run with ``NoMatches: No nodes match '#fresh' on Screen(id='_default')``, raised from ``show_freshness`` by the timer. ``test_BUG_134_a_load_that_finishes_during_teardown_does_not_error`` lets a refresh started by ``r`` deliver its rows then, and fails every run with ``WorkerFailed: Worker raised exception: NoMatches("No nodes match '#banner' on Screen(id='_default')")``, the error seen on 2026-11-18 in ``tests/test_oracle_tui_start.py::TestTheModal::test_the_dashboard_keeps_refreshing_under_the_modal``. Under ``pytest -n logical`` the same ``#fresh`` error also fired in ``tests/test_oracle_tui.py::TestTheApp::test_cancel_runs_nothing[escape]`` and ``tests/test_oracle_tui_start.py::TestTheModal::test_cancel_starts_nothing[button]``.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_oracle_tui_flake_repros.py, a refresh callback landing after run_test prunes the default screen raises NoMatches (#fresh from the freshness tick; #banner, as WorkerFailed, from a load)'
+        forced: false
+        evidence: a7e86186554664516353faa7e759950b507e7d99
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: ae6aca1ca414dd0b81d500062b6be563537f3d49
 
 .. bug:: The links pattern misses a URI whose host name carries non-ASCII letters, so a lookalike domain is no finding
    :id: BUG_135
@@ -11815,7 +11872,7 @@ is a decision need, linked by id.
 
 .. bug:: In a store project a user-defaults guidelines.baseline is invisible to the base readers
    :id: BUG_141
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: domains/guidelines (baseline), core/manifest (levels)
@@ -11837,11 +11894,25 @@ is a decision need, linked by id.
 
    **Related:** :need:`IDEA_040 <IDEA_040>` (the store umbrella).
 
-   **Next step:** run ``bug-reproducer`` first.
+   **Repro proof:** ``tests/test_bug_141_repro.py::test_BUG_141_a_user_default_baseline_is_the_one_the_base_reader_applies``, committed 2026-11-21 squash (2026-11-17) — in a store project keeping its ruleset in the store and setting ``guidelines.baseline`` only in the user defaults (the working configuration resolves it to the store's baseline), a change raising a baselined finding's count from 1 to 2 is asserted refused by ``guidelines.baseline_only_shrinks``; it is admitted: "the base branch has no baseline configured, so every entry is admitted (DN-6)".
+
+   **Next step:** ``feature-architect`` designs the fix.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_141_repro.py, a user-defaults baseline grown against the base is admitted as no baseline configured'
+        forced: false
+        evidence: 2026-11-21 squash
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: 2026-11-21 squash
 
 .. bug:: In a store project the guideline docs.items-carry-no-design is never selected
    :id: BUG_142
-   :status: filed
+   :status: reproduced
    :severity: medium
    :priority: medium
    :area: domains/guidelines (selection)
@@ -11863,11 +11934,20 @@ is a decision need, linked by id.
 
    **Related:** :need:`IDEA_040 <IDEA_040>`, :need:`IDEA_031 <IDEA_031>` (guidelines ownership).
 
-   **Next step:** run ``bug-reproducer`` first.
+   **Repro proof:** ``tests/test_bug_142_repro.py::test_BUG_142_a_work_item_change_selects_items_carry_no_design``, committed 2026-11-21 squash (2026-11-17) — in a project set up by ``init`` with the store home, a session edits a code file in the repository and files a work item in the store's backlog; ``guidelines show --phase review --touched`` is asserted to select ``docs.items-carry-no-design``; it selects only ``docs.decisions-are-declared``, over the repository file alone (the backlog edit is not in the selection's file scope).
+
+   **Next step:** ``feature-architect`` designs the fix.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_142_repro.py, a store work-item change does not select docs.items-carry-no-design'
+        forced: false
+        evidence: 2026-11-21 squash
 
 .. bug:: In a store project the store's invariant.yaml is not under the docs lock
    :id: BUG_143
-   :status: filed
+   :status: fixed
    :severity: medium
    :priority: medium
    :area: core/doclock (lock areas)
@@ -11889,7 +11969,21 @@ is a decision need, linked by id.
 
    **Related:** :need:`IDEA_040 <IDEA_040>`.
 
-   **Next step:** run ``bug-reproducer`` first.
+   **Repro proof:** ``tests/test_bug_143_repro.py::test_BUG_143_a_second_session_editing_the_store_manifest_is_held_back``, committed 2026-11-21 squash (2026-11-17) — two repositories linked to one store, each session bound to its host: session A's Edit of the store's ``invariant.yaml`` goes through the pre-tool-use hook, then session B's Edit of the same file is asserted denied; it is admitted. The same two calls on the store's guidelines baseline deny B (control run, not committed).
+
+   **Next step:** ``feature-architect`` designs the fix.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_143_repro.py, a second session''s Edit of the store''s invariant.yaml is admitted while the first edits it'
+        forced: false
+        evidence: 2026-11-21 squash
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: 2026-11-21 squash
 
 .. bug:: An owed after-merge step is skipped when the session branch is deleted by hand before teardown
    :id: BUG_144
@@ -12153,6 +12247,291 @@ is a decision need, linked by id.
    **Workaround:** keep the content at a known home, or list its paths in ``methodology.gates.non_source``.
 
    **Related:** :need:`DEC_ADR_015_I2`, :need:`BUG_118 <BUG_118>` (detection at the homes).
+
+.. bug:: The store's commit-msg hook leaves comment lines unread that git keeps in the history
+   :id: BUG_154
+   :status: filed
+   :severity: low
+   :priority: low
+   :area: core/storescan (scan_message)
+   :affects: COMP_CORE_STORESCAN
+
+   **Symptom:** The store's ``commit-msg`` hook leaves every line beginning with ``#`` unread, as though git strips it. Git strips comment lines only when it opens an editor; when the message is given on the command line or in a file, its default cleanup keeps them, so such a line lands in the store's history unscreened at commit time. A message line ``# <a link>`` passes the hook and the commit is made; only the push screen refuses it later.
+
+   **Expected:** The commit-time screen reads every line git will write into the history; a ``#`` line that lands is screened as any other line.
+
+   **Repro:** In a project with a store, commit in the store with the message given as a file holding a line that starts with ``#`` and carries a link (any ``links`` match). The commit is made, and the last commit's message shows the line kept. Found while fixing BUG_133 (2026-11-17).
+
+   **Affected:** :need:`COMP_CORE_STORESCAN`. See ``docs/architecture/cli.rst``, ``store hook``.
+
+.. bug:: The oracle's LaunchAgents cannot find claude, so Start session and the chain fail with no claude on PATH
+   :id: BUG_155
+   :status: fixed
+   :severity: high
+   :priority: high
+   :area: oracle/launchd, hosts/claude_code_launch
+   :affects: COMP_ORACLE_LAUNCHD, COMP_HOSTS_CLAUDE_CODE_LAUNCH, COMP_ORACLE_CHAINSTEP, COMP_ORACLE_STARTSESSION, COMP_CMD_ORACLE
+   :residue: live check owed: reinstall the watcher (invariant oracle install) and confirm a chain step actually starts claude
+
+   **Symptom:** On the oracle web page, "Start session" stops after about 1 s with "no claude on PATH to start; claude was not found". The watcher's chain (ADR-027) fails to start the next queued session the same way; ``oracle status`` shows the last action as "Oracle orchestrator did not run any variant session (failed)". Start session and the chain are both dead. Reported 2026-11-20 from the phone page; diagnosis verified the same day.
+
+   **Expected:** Both LaunchAgents can start ``claude`` regardless of the PATH of the shell or process that installed them. The installer never silently drops a program an agent needs: it warns or refuses. ``oracle status`` reports when an agent's PATH cannot find a program it needs.
+
+   **Repro:** With ``claude`` installed only in ``/usr/local/bin`` (Homebrew cask symlink), install the agents and read their plists. The watcher plist's ``PATH`` is ``/usr/bin:/bin:/usr/sbin:/sbin``. A web plist installed from a process whose own PATH lacks ``/usr/local/bin`` (observed: an install dated 2026-10-22 with ``~/bin``, ``/usr/bin``, the uv tool bin directory and the system directories, no ``/usr/local/bin``) has no directory holding ``claude`` either. Press "Start session" on the web page, or let the watcher run a chain step: both refuse with "no claude on PATH to start".
+
+   **Suspected cause:** ``search_path()`` in ``oracle/launchd`` bakes PATH into each plist at install time from ``shutil.which`` on the installing process's PATH, and drops a program that does not resolve without a word. Two defects meet there:
+
+   * The watcher's ``NEEDED_PROGRAMS`` is ``("git", "osascript")`` with no ``claude``, although the chain step runs in the watcher (``cli/main.py`` chain hands -> ``_start_launch`` -> ``_open_claude_window`` -> ``claude_code_launch.resolve_claude()``, which is ``shutil.which``). Reinstalling the watcher cannot fix it.
+   * The web agent's ``WEB_PROGRAMS`` does include ``claude``, but an install from a process where ``claude`` did not resolve drops it silently. Possibly a remedy action run from inside a daemon whose own PATH already lacked it, which makes the loss self-perpetuating.
+
+   **Affected:** :need:`COMP_ORACLE_LAUNCHD` (``search_path``, ``NEEDED_PROGRAMS``, ``WEB_PROGRAMS``; the ``EnvironmentVariables`` row in ``docs/architecture/oracle.rst``, "Shipped: the launchd agent", documents only ``git`` and ``osascript``), :need:`COMP_HOSTS_CLAUDE_CODE_LAUNCH` (``resolve_claude``), :need:`COMP_ORACLE_CHAINSTEP` and :need:`COMP_ORACLE_STARTSESSION` (the callers that fail), :need:`COMP_CMD_ORACLE` (``oracle install`` / ``oracle status``).
+
+   **Workaround (applied 2026-11-20):** reinstall the web agent from an interactive shell (``invariant oracle install --web``); its PATH then includes ``/usr/local/bin`` and Start session works. The watcher still lacks ``claude`` until the code fix, because its program list omits it.
+
+   **Fix sketch / next step:** bug-reproducer first: a red test that the watcher plist's PATH holds the directory ``claude`` resolves to, and one that an install whose ``claude`` does not resolve is not silent. Then add ``claude`` to the watcher's needed programs, make an unresolved needed program a warning or refusal at install, and give ``oracle status`` (and doctor) a row for each agent's needed programs against its baked PATH. Related: the closed :need:`BUG_084 <BUG_084>`, another launchd-environment gap (TERM) in the same agents.
+
+   **Repro proof:** ``tests/test_bug_155_repro.py``, two tests wrapped in ``xfail(strict=True)``, committed 79787e1 (2026-11-20) on the session branch. ``test_BUG_155_watcher_plist_path_finds_claude`` asserts the watcher plist ``oracle install`` writes, from a PATH where ``claude`` lives only in a non-system directory, has a PATH that finds ``claude``; today its PATH is ``/usr/bin:/bin:/usr/sbin:/sbin``. ``test_BUG_155_web_install_without_claude_is_not_silent`` asserts ``oracle install --web`` from a PATH without ``claude`` refuses or names ``claude``; today it exits 0 and says nothing about it.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'red: tests/test_bug_155_repro.py, 2 strict xfails, committed 79787e1'
+        forced: false
+        evidence: 79787e1f172dcac232f05ef35afad668687c2379
+      - from: reproduced
+        to: fixed
+        reason: 'landed 2026-11-21 squash: watcher needs claude, search_path well-known fallback, install warns, status/doctor report missing programs (ADR-028)'
+        forced: false
+        evidence: 2026-11-21 squash
+
+.. bug:: The close-host SIGTERM test fails once under parallel sweep load
+   :id: BUG_156
+   :status: filed
+   :severity: low
+   :priority: medium
+   :area: oracle close host tests
+   :affects: COMP_CMD_ORACLE
+
+   **Symptom:** ``tests/test_oracle_closehost.py::TestTheRealSignal::test_sigterm_reaches_a_child_this_test_spawned`` failed once in one whole-suite sweep (docs/sweeps/2026-11-21-a1fb5f8b4886.json: sweep 1, run on main on 2026-11-21 at head a1fb5f8b4886, 11998 tests executed, 1 failing, coverage run). It passes 3 of 3 when run alone.
+
+   **Expected:** The test passes reliably in the whole-suite sweep and under parallel load (pytest -n logical).
+
+   **Repro:** Not reproduced. Run the test inside the full suite under parallel load, repeatedly. A single run of the test alone passes.
+
+   **Suspected cause:** unknown — needs investigation. Timing under parallel load is the working hypothesis: the test delivers a real SIGTERM to a child process it spawns, so the spawn-to-signal delay or the wait on the child's exit is the first candidate.
+
+   **Affected:** :need:`COMP_CMD_ORACLE` (oracle close host; tests/test_oracle_closehost.py).
+
+   **Fix sketch / next step:** `bug-reproducer` first: loop the test under the parallel suite load and commit a failing test if it recurs. If it never recurs, record the single red as unreproduced. No fix before a red is proven.
+
+.. bug:: Pipeline audit shows haiku for agents whose commits say Opus 5.5
+   :id: BUG_157
+   :status: wont_fix
+   :severity: medium
+   :priority: medium
+   :area: agents and pipeline audit
+   :affects: COMP_DOMAINS_PIPELINE,COMP_CORE_AGENTS
+
+   **Won't fix 2026-11-21 — not a defect** (ruling: user, 2026-11-21, "Close as not a defect").
+
+   **Cause:** The user-level Claude Code settings named haiku as the default model. Every Claude Code window started on that default, the oracle's chained starts included: oracle start-session passes no model, which is correct under the model-agnostic design. Subagents dispatched without a model inherit the model of the window that dispatched them. So the observed model claude-haiku-5-5 in the pipeline audit was a true record: the agents really did run on Haiku. The commits named Opus 5.5 only because the Co-Authored-By trailer is fixed text by the user's ruling, not a statement of which model ran. Neither candidate under Suspected cause holds: the audit reads the subagent's own transcript correctly, and no agent definition pinned haiku (at the time the rendered agents carried no model field; the re-render in the commit after 72a03af now writes model: opus from the user-level tier map). Fixed outside the engine: the user-level setting names opus since 2026-11-21. Evidence from the same day: a session in another managed project shows its main loop on claude-haiku-5-5 until the switch, then claude-opus-5-5, and the audit recorded both.
+
+   **Symptom:** The pipeline audit records claude-haiku-5-5 as the observed model for feature-architect and compliance-reviewer, while the commits those agents produced carry a Co-Authored-By line naming Claude Opus 5.5.
+
+   **Expected:** The observed model in the audit matches the model of the agent that actually ran. The user states Opus 5.5 is the intended model.
+
+   **Repro:** Run a pipeline that dispatches feature-architect and compliance-reviewer. Read the audit line in pipeline status and compare it with the Co-Authored-By trailer on the commits those agents produced.
+
+   **Suspected cause:** (at filing; settled by the Cause block above) unknown. Two candidates: the observed model is read from the parent host session rather than from the subagent's own transcript; or the agents' model setting names haiku where Opus 5.5 is intended.
+
+   **Affected:** :need:`COMP_DOMAINS_PIPELINE` (the audit line of pipeline status), :need:`COMP_CORE_AGENTS` (the agents' model setting).
+
+   **Fix sketch / next step:** none; closed as not a defect (see the Cause block). At filing: `bug-reproducer` first, then diagnose which side of the audit and the agents' model setting was wrong.
+
+   .. invariant-history:
+      - from: filed
+        to: wont_fix
+        reason: 'Not a defect: the audit truly recorded Haiku, inherited from the user-level Claude Code default model; the trailer is fixed text. Ruling: user, 2026-11-21.'
+        forced: false
+
+.. bug:: Chained backlog starts never bind: default prompt omits session start
+   :id: BUG_158
+   :status: fixed
+   :severity: high
+   :priority: high
+   :area: oracle/chain
+   :affects: COMP_CORE_MANIFEST, COMP_ORACLE_CHAINSTEP, COMP_ORACLE_CHAIN, COMP_ORACLE_STARTSESSION
+
+   **Symptom:** A chained start of a backlog item (the oracle's chain step, run on a queue entry with no user-written brief) never binds an invariant session. The window opens, no session row appears, and the start fails after 10 minutes with "no invariant session was bound 10 minutes after the window appeared". Observed on Q17 (chained start of IDEA_012, 2026-11-21, ledger record C16, outcome failed, session null). The triage window it opened (Q117, triage of Q17) is in the same state, and the host session it runs in is reported by the oracle as orphan_host: "a host session with no live invariant session". ``invariant session list`` shows no session for IDEA_012. The retry for IDEA_012 (Q116) is expected to fail the same way.
+
+   **Expected:** A chained start of a backlog item binds an invariant session to the window it opened, the same way a start with a user-written brief does, so the chain proceeds to the pipeline instead of failing at the bind timeout.
+
+   **Repro:** With the chain on auto (ruling 19), let the chain reach a queue entry whose brief is the backlog default, not a user-written one. The window opens with the default chain prompt, the window runs no ``invariant session start``, no session row is created, and the chain step fails at the 10-minute bind timeout. The same flow with a user-written brief (for example one that says "First run invariant session start, session isolate --execute and session plan add") binds normally. Checked on the chain status output: the start shows session null and the detail above.
+
+   **Suspected cause:** The default chain prompt never tells the window to start a session. The bind step can only succeed once a session row with the window's host exists, and the window creates no session row, so the bind step waits and then fails.
+
+   * At filing, ``DEFAULT_CHAIN_PROMPT`` in ``core/manifest.py`` (line 605 before the fix) read: "Take up {ref} from this project's queue ({entry}: {title}). Run it through the project's pipeline; once it has landed, queue what comes next with invariant queue add." It has no ``invariant session start`` step. Queue entries that carry a user-written brief get a prompt that does include the start, so only backlog-sourced entries (which have no brief and fall back to this default) are affected.
+   * ``oracle/chainstep.py``: ``_bound()`` (line 960 at filing) binds only when a session row has a host matching the launched window, through ``_is_started`` (line 1617 at filing: the host's launched name equals the chain's name, or the pid matches). With no session start there is no row, so nothing binds. ``_follow()`` (line 886 at filing, the check at line 932) then fails the start once ``UNBOUND_SECONDS`` (line 93, 600 seconds) has passed.
+
+   The result is deterministic: every backlog-chained start on the default prompt fails at 10 minutes. Backlog work runs on auto under ruling 19, so every backlog entry on the queue wastes a start and a triage window, and each triage window also fails to bind (the triage default carried no session start either).
+
+   **Affected:** :need:`COMP_CORE_MANIFEST` (``DEFAULT_CHAIN_PROMPT``), :need:`COMP_ORACLE_CHAINSTEP` (``_follow``, ``_bound``, ``_is_started``, ``UNBOUND_SECONDS``), :need:`COMP_ORACLE_CHAIN` (the chain that records the failed starts and spawns the triage windows), :need:`COMP_ORACLE_STARTSESSION` (the start path whose session start the default prompt omits).
+
+   **Fix sketch / next step:** bug-reproducer first: a red test that the default chain prompt carries an ``invariant session start`` step (as the user-written briefs do), and a red test that a chained start of a backlog entry binds a session row to its window. Failed starts queued before the fix (IDEA_012 via Q116, and the triage windows) fail the same way if retried on the old defaults.
+
+   **Related:** :need:`BUG_155 <BUG_155>` (fixed) is a different defect on the same chain path (the watcher lacks claude on PATH). It does not explain this one, because the failure here is a missing session row, not a missing program.
+
+   **Repro proof:** ``tests/test_adr_027_chain.py::test_BUG_158_default_first_prompt_carries_a_session_start`` and ``::test_BUG_158_a_default_prompt_start_binds_a_session``, each over the chain, triage and reproduce defaults, committed in the commit after 72a03af (2026-11-21), strict xfail. The first asserts the rendered default first prompt carries an ``invariant session start`` step (none of the three does). The second follows a default-prompt start with a fake window that runs the session start only when its prompt says so; all three fail with "no invariant session was bound 10 minutes after the window appeared". A control on the same harness, a user-written brief carrying the step, binds.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'Repro proof: tests/test_adr_027_chain.py::test_BUG_158_default_first_prompt_carries_a_session_start and ::test_BUG_158_a_default_prompt_start_binds_a_session (chain, triage, reproduce), committed in the commit after 72a03af (2026-11-21), strict xfail; the default first prompts carry no invariant session start, and a window that runs only what its prompt says fails at the bind timeout with no invariant session was bound 10 minutes after the window appeared'
+        forced: false
+        evidence: the commit after 72a03af
+      - from: reproduced
+        to: fixed
+        reason: 'Fixed in the commit after 72a03af: DEFAULT_CHAIN_PROMPT, DEFAULT_TRIAGE_PROMPT and DEFAULT_REPRODUCE_PROMPT open with invariant session start, session isolate --execute and session plan add (DEC_ADR_027_D62); the six BUG_158 repro tests in tests/test_adr_027_chain.py pass with the strict-xfail marker removed'
+        forced: false
+        evidence: the commit after 72a03af
+
+.. bug:: Nothing stops development on Haiku: oracle windows and agents inherit the host's default model
+   :id: BUG_159
+   :status: fixed
+   :severity: high
+   :priority: high
+   :area: host, oracle start and chain, agents rendering, pipeline audit
+   :affects: COMP_HOSTS_CLAUDE_CODE, COMP_HOSTS_CLAUDE_CODE_TELEMETRY, COMP_HOSTS_CLAUDE_CODE_LAUNCH, COMP_ORACLE_STARTSESSION, COMP_ORACLE_CHAINSTEP, COMP_CORE_AGENTS, COMP_CORE_MANIFEST, COMP_DOMAINS_PIPELINE
+
+   **Symptom:** On 2026-11-21 development sessions and their agents ran on Haiku. The pipeline audit recorded claude-haiku-5-5 as the observed model for bug-reproducer, feature-architect and compliance-reviewer across two managed projects. invariant itself could not prevent it, for three reasons. Every window the oracle opens (start-session, chained starts, triage and reproduce starts) passes no model and follows the host's global default. ``host.tier_map`` is empty in every managed project, so every agent inherits its window's model. Nothing checks the observed model. The user-level Claude Code settings named haiku as the default model; they now name opus, and that one setting is the only thing standing between the pipeline and Haiku.
+
+   **Expected:** The user's rulings (ruling: user, 2026-11-21):
+
+   1. Development never runs on Haiku. The default for development is Sonnet or Opus.
+   2. Agent tiers map through ``host.tier_map``: deep to opus, standard to sonnet, light to sonnet. This is set at the user level of the invariant config so every managed project gets it; a project may override it. The rendered agents in every managed project are re-rendered.
+   3. Oracle windows: when the user starts a new session (CLI start-session, the TUI, the phone page), the user can choose the model. Otherwise, and for every chained, triage and reproduce start, a setting's default applies, and that default is opus. The setting is host-side (the Claude Code adapter passes it as ``--model``); the oracle never imports ``hosts/``, only the CLI joins them.
+   4. A guard that blocks: a configurable list of forbidden models, default ``[haiku]``, at the user level. A design, review or repro agent whose observed model is forbidden blocks the gate it would satisfy; a launch whose model is forbidden is refused.
+   5. The engine stays model-agnostic in the sense of the standing design goal: model names live only in configuration and the host adapter, never in engine logic. The engine compares configured strings; it does not know model families.
+
+   **Repro:** With an empty ``host.tier_map`` and the host's global default set to a small model, start a chained session. The window and every agent it dispatches run on that model, the audit records it, and every gate passes.
+
+   **Suspected cause:** Known, by construction rather than by a fault in one site. The launch path passes no model, so a window takes the host's global default. ``ClaudeCodeHost.tier_hint`` resolves an agent's tier through ``host.tier_map``, and with the map empty ``render_agent`` writes no model line, so each agent inherits its window's model. The audit's observed model is recorded but no gate reads it. The detailed cause trail is in :need:`BUG_157 <BUG_157>` (closed as not a defect: the audit truly recorded Haiku).
+
+   **Affected:** :need:`COMP_HOSTS_CLAUDE_CODE` (``render_agent``, ``tier_hint``), :need:`COMP_HOSTS_CLAUDE_CODE_TELEMETRY` (the audit's observed subagent model), :need:`COMP_HOSTS_CLAUDE_CODE_LAUNCH` (the window launch, which passes no model), :need:`COMP_ORACLE_STARTSESSION` (oracle start-session, :need:`DEC_ADR_009_D16`), :need:`COMP_ORACLE_CHAINSTEP` (the chain step's launch, :need:`DEC_ADR_027_D9`), :need:`COMP_CORE_AGENTS` and :need:`COMP_CORE_MANIFEST` (agent tiers and ``host.tier_map``, :need:`DEC_ADR_012_D9`, IDEA_031 A7), :need:`COMP_DOMAINS_PIPELINE` (the audit line and the gates a forbidden model must block).
+
+   **Fix sketch / next step:** One fix session, run on Opus: the settings and their user-level defaults, the ``--model`` pass-through and the start-session model choice (CLI flag, TUI and phone picker), the forbidden-model gate on the audit's observed model, and a re-render of the agents in this repo. Follow-up chores re-render the agents in each other managed project. It may need an ADR amending :need:`DEC_ADR_012_D9` and :need:`DEC_ADR_009_D16`; that is the architect's call.
+
+   **Related:** :need:`BUG_157 <BUG_157>` (won't fix; its cause section explains how Haiku got in), :need:`BUG_158 <BUG_158>` (another defect on the same chained-start path).
+
+   **Repro proof:** ``tests/test_bug_159_repro.py``, committed fe8460a (2026-11-21), four cases under a strict expected failure. With the defaults only: an agent the audit observed on claude-haiku-5-5 still satisfies ``agents.design_agent_ran`` and ``agents.review_agent_ran`` (``pipeline gates``); ``oracle start-session`` and the chain step's launch build an argv with no ``--model``, where the ruling's default is opus. Not red, and not a code defect: ``host.tier_map`` set in the user-level defaults already renders deep to opus and standard to sonnet; what is missing is that configuration on this machine and a re-render.
+
+   .. invariant-history:
+      - from: filed
+        to: reproduced
+        reason: 'Repro proof: tests/test_bug_159_repro.py (4 cases, xfail strict), committed fe8460a on session/0cd5f81a (2026-11-21) — an agent observed on claude-haiku-5-5 still passes agents.design_agent_ran and agents.review_agent_ran; oracle start-session and the chain step''s launch carry no --model (expected opus).'
+        forced: false
+      - from: reproduced
+        to: fixed
+        reason: null
+        forced: false
+        evidence: the commit after 72a03af
+
+.. bug:: Oracle Needs-you proposal cards show with no action, and the chain keeps following a start whose host ended
+   :id: BUG_160
+   :status: filed
+   :severity: medium
+   :priority: high
+   :area: oracle/chain
+   :affects: COMP_ORACLE_CHAINVIEW,COMP_ORACLE_PANEL,COMP_ORACLE_CHAINSTEP
+
+   **Symptom:** The oracle's Needs-you list shows proposal cards that offer no action. On 2026-11-23 about ten invariant proposal cards sat under Needs you with no button to press. The cause that day: the invariant chain was still following Q135, whose host window had died (its session was registered but no host was alive), so the chain kept "following" a start that was no longer running until the session was abandoned by hand.
+
+   **Expected:** (a) Every card under Needs you offers at least one action the user can take, or it is not listed there. (b) A chain whose followed start has lost its host notices that the host ended and stops following it, so the queue is not stalled silently.
+
+   **Repro:** Start a chained session so the chain follows it; kill the session's host window without ending the session. Add propose-mode queue entries to the same project. Open the oracle panel: the proposal cards appear under Needs you with no Start button, and the chain does not move on.
+
+   **Suspected cause:** Two defects. (a) ``_offers()`` in ``src/invariant/oracle/chainview.py`` offers START for a propose entry only when the project's chain has no current start (``if not current:``), and ``panel.py`` still emits the proposal card when no offer was made, so the card has no button. (b) The chain's follow step treats a registered session with no live host as still current. Whether IDEA_064 and ADR-031 would remove (b) is unknown: they cover a finished session ending its own window, not a host that died.
+
+   **Affected:** the oracle chain view and panel (``oracle/chainview.py``, ``oracle/panel.py``) and the chain follow step (``oracle/chainstep.py``); owner components per the oracle architecture doc and ADR-027.
+
+   **Fix sketch / next step:** bug-reproducer first: a red test that a propose entry under a current start whose host is dead is either offered an action or not listed under Needs you, and a red test that the chain stops following a start whose host has ended. Related to IDEA_066 (the proposal accept, defer and backlog-bottom flow), which gives a proposal its own actions regardless of the chain state.
+
+   **Related:** IDEA_064 (seamless chain, proposed), ADR-027, ADR-031, IDEA_066 (queue proposal flow, filed the same day).
+
+   .. invariant-history:
+      - field: affects
+        was: null
+        now: COMP_ORACLE_CHAINVIEW,COMP_ORACLE_PANEL,COMP_ORACLE_CHAINSTEP
+        reason: link the components the bug names (chainview, panel, chainstep) so docs.needs_traceable holds
+        date: '2026-11-23'
+
+.. bug:: Abandoning a registered chained session counts as a failure: triage and retry are queued, and no yield path exists
+   :id: BUG_162
+   :status: reproduced
+   :severity: medium
+   :priority: high
+   :area: oracle/chain
+   :affects: COMP_ORACLE_CHAINSTEP
+
+   **Symptom:** A chained session that has only been registered (no worktree, no plan, no changes) and that the user wants to set aside has no exit except abandoning it. The oracle chain counts that abandonment as a failure of the queue entry: it marks the entry failed, queues a triage session at the head of the queue and a retry behind it, and spends the entry's one retry. Seen 2026-11-23: Q135 (ADR-018 increment 8, session bound in the watcher log as running) was abandoned from registered after about 4200 s with worktree, branch, plan and files all empty; the chain logged it as failed ("the session was abandoned"), queued triage Q148 at the head and retry Q147 behind it. The user had wanted to reorder (start another entry first); the chain refused a second start while Q135 was the one running chained session, and no command puts a started entry back on the queue. Secondary: the triage brief hard-codes the retry's queue id (Q147). When the queue was later edited (the retry removed and re-added as Q158, which carries no retry_of link), the brief's "invariant queue remove Q147" names an entry that no longer exists and the retry's link to the failed entry is lost.
+
+   **Expected:** A started chained entry that is still only registered can be yielded, meaning put back on the queue (at its place or a position the user names), without being counted as a failure: no failed mark, no triage, no retry spent. The failure path stays for sessions that did work and died. A triage brief names its retry in a way that survives queue edits (a retry_of link resolved at read time, not a baked-in id), and a re-added retry keeps its link to the failed entry.
+
+   **Repro:** Start a chained queue entry so the chain binds a session to it and the session stays registered with no worktree. Try to start a different entry of the same project: the chain refuses, because one chained session is already running. Abandon the registered session to free the chain: the entry is marked failed, a triage entry is queued at the head and a retry behind it. Then remove and re-add the retry: the new entry has no retry_of, and the triage brief still names the old id.
+
+   **Suspected cause:** Chain step failure handling treats every abandoned bound session as a failed run, with no distinction between abandoned-with-no-work and failed-after-work, and the chain has no yield transition for a started entry. The triage brief text is rendered once with the retry's id and stored. Exact sites unknown; start from the chain step's failure handling and the queue's retry creation.
+
+   **Affected:** the chain step (oracle/chainstep.py), the queue (oracle/queue), the session lifecycle (registered to abandoned edge); owner components per the oracle architecture doc and ADR-027 (chain, triage and retry rulings).
+
+   **Fix sketch / next step:** bug-reproducer first: a red test that abandoning a registered, work-free chained session does not mark the entry failed or queue triage and retry (or that a yield command returns the entry to the queue), and a red test that a triage brief's retry reference follows a queue edit. The fix is design-bearing (a yield path amends ADR-027), so it goes through feature-architect. Related: IDEA_066 already covers the retry inheriting the propose mode (Q135's retry came back proposed); this bug does not repeat that part. Related also BUG_160 (the chain keeps following a start whose host died, the same Q135 incident) and IDEA_064 / ADR-031 (seamless chain).
+
+   **Consequence seen:** a user-directed reorder cost a spurious failure in the chain history, a triage session run hours later, and Q135's one retry: if the retry now fails, the work is not tried again.
+
+   **Related:** IDEA_066, BUG_160, IDEA_064, ADR-027, ADR-031. Filed from triage session 6664efab (queue entry Q148, triage of Q135).
+
+   **Repro proof:** ``tests/test_bug_162_repro.py::test_BUG_162_work_free_abandon_of_a_chained_session_is_not_a_failure``,
+   committed in the commit after 72a03af (2026-11-23) — drives the real chain step over the real
+   ``chain.session_end`` and ``QueueDomain`` hands: an entry is started, its
+   window's session registers (no worktree, plan or files), binds, and is moved
+   registered -> abandoned. Asserts the entry is not marked failed and no triage
+   or retry naming it is queued. Today the entry is ``failed`` ("the session was
+   abandoned"), triage Q3 is queued at the head and retry Q2 (``retry_of`` Q1)
+   behind it, matching the live log. Strict xfail; red recorded with the wrapper
+   off. The secondary symptom (the triage brief bakes in the retry's id) is
+   confirmed by reading ``QueueDomain.fail``: the shipped triage template's
+   ``{retry}`` is filled with ``retried.id`` once, at fail time; no test of it
+   yet.
+
+   .. invariant-history:
+      - field: affects
+        was: null
+        now: COMP_ORACLE_CHAINSTEP
+        reason: link the chain step component the bug names so docs.needs_traceable holds
+        date: '2026-11-23'
+      - from: filed
+        to: reproduced
+        reason: red repro committed in the commit after 72a03af
+        forced: false
+
+.. bug:: guidelines.instruction_files cannot express no instruction files, so a project exempting CLAUDE.md from isolation can neither render nor be checked
+   :id: BUG_161
+   :status: filed
+   :severity: high
+   :priority: high
+   :area: core/manifest, domains/guidelines (render, generated_current gate)
+   :affects: COMP_CORE_MANIFEST,COMP_DOMAINS_GUIDELINES,COMP_CORE_GUIDELINES
+
+   **Symptom:** ``guidelines.instruction_files`` cannot express "no instruction files". Null means the host default (CLAUDE.md for claude_code). A project that exempts CLAUDE.md from session isolation (Heap does) then has ``invariant guidelines render`` refuse outright ("exempt from isolation", ADR-012 ruling 13), and the ``guidelines.generated_current`` gate warns that nothing can be checked. An empty list is rejected by manifest validation ("must be null or a list of paths"), so the project has no way to say it carries no instruction block.
+
+   **Expected:** An empty list means none: ``guidelines render`` writes the ruleset outputs and no instruction block, ``guidelines.generated_current`` checks only those outputs, and the refusal text for an exempt default names ``instruction_files: []`` as the fix.
+
+   **Repro:** in a project whose manifest exempts CLAUDE.md from session isolation, run ``invariant guidelines render``: it refuses. Set ``guidelines.instruction_files: []``: manifest validation rejects the value. Leave it null: the gate warns that nothing can be checked.
+
+   **Suspected cause:** The manifest validator for ``instruction_files`` accepts only null or a non-empty list, and null is resolved to the host default, so the render and the gate have no representation of an empty set.
+
+   **Affected:** :need:`COMP_CORE_MANIFEST` (the ``instruction_files`` validation), the guidelines render and ``guidelines.generated_current`` gate, :need:`COMP_DOMAINS_GUIDELINES`, :need:`COMP_CORE_GUIDELINES`; ADR-012 ruling 13. The affected managed project is Heap, whose ADR-032 rollout is paused on this by user ruling 2026-11-23.
+
+   **Fix sketch / next step:** Run ``bug-reproducer`` first: a red test that sets ``instruction_files: []`` and expects validation to accept it, render to write only the ruleset outputs, and the gate to check only those. Then ``feature-architect`` designs the fix; the manifest doc (``instruction_files`` is null or a non-empty path list) and ADR-012 ruling 13 text change with it. Priority high: it blocks a managed project's rollout.
 
 .. idea:: The links pattern's TLD-like suffix rule drops a punycode IDN top-level domain
    :id: IDEA_001
@@ -12977,7 +13356,7 @@ is a decision need, linked by id.
 
 .. idea:: Session Oracle alerts reach your phone as a push notification
    :id: IDEA_013
-   :status: proposed
+   :status: done
    :priority: medium
    :effort: S
    :tier: 5
@@ -13012,6 +13391,23 @@ is a decision need, linked by id.
 
    Follow-on to IDEA_012. Medium value: it matters most for remote driving. S
    effort behind an existing seam. T5.
+
+   .. invariant-history:
+      - from: proposed
+        to: accepted
+        reason: folded into ADR-027 by ruling 8; built as increment 4 (ruling 17)
+        forced: false
+        evidence: 2026-11-21 squash
+      - from: accepted
+        to: in_progress
+        reason: built in ADR-027 increment 4
+        forced: false
+        evidence: 2026-11-21 squash
+      - from: in_progress
+        to: done
+        reason: 'ADR-027 increment 4 landed (2026-11-21 squash): web push alongside the Mac banner, opt-in per device, notify-test exercises it'
+        forced: false
+        evidence: 2026-11-21 squash
 
 .. idea:: Status line and prompt line show which other sessions need you
    :id: IDEA_014
@@ -14335,6 +14731,13 @@ is a decision need, linked by id.
    missing half of deciding what to do with an open or orphaned session. High
    value; M effort (one probe read, one ADR decision, view and three action
    kinds on an existing launch seam), so tier 2 at high priority.
+
+   **Scope narrowed 2026-11-19:** on the user's ruling, the Read half (part 1,
+   the last-message excerpt and the D17 transcript decision) moves into
+   :need:`IDEA_060 <IDEA_060>` as its first increment. This entry keeps only
+   the Hand-off half (part 2). IDEA_060 also reverses "nothing is ever typed
+   into the existing session" for its own sends; the hand-offs here still
+   open a new window.
 
 .. idea:: Oracle starts a new Remote Control session in any registered project
    :id: IDEA_030
@@ -15993,3 +16396,441 @@ is a decision need, linked by id.
    **Why now / why this tier:** Low, tier 6: a proof gap, not a defect anyone has hit. Effort S: one test.
 
    **Related:** :need:`DEC_ADR_020_I3`, :need:`IDEA_040 <IDEA_040>`.
+
+.. idea:: The oracle picks and starts the next session when one reports done
+   :id: IDEA_057
+   :status: done
+   :priority: high
+   :effort: L
+   :tier: 1
+   :area: oracle/actions, oracle/startsession, oracle/recommend, hosts/claude_code_launch, cli/main
+   :affects: COMP_ORACLE_STARTSESSION, COMP_ORACLE_ACTIONS, COMP_ORACLE_RECOMMEND, COMP_HOSTS_CLAUDE_CODE_LAUNCH, COMP_CMD_ORACLE
+
+   **Problem:** Today a session decides what runs after it. When its work is done, an agent session starts the next one itself, through ``invariant oracle start-session`` (:need:`IDEA_030 <IDEA_030>`, :need:`ADR-009 D16 <DEC_ADR_009_D16>`) or a session handoff (:need:`ADR-005 <DEC_ADR_005>`), usually because its brief carries a "then:" step or a handoff note names what is next. So the order of work lives in each session's brief and note, not in one place, and the machine-wide oracle (:need:`ADR-007 <DEC_ADR_007>`, :doc:`oracle </architecture/oracle>`), which already sees every session, takes no part in it. On 2026-11-18 the user asked to "give the control of firing the next session to the Oracle. So basically Oracle will act as a true Oracle which controls everything. So when a session finishes, it will inform Oracle that work is finished, and Oracle will decide what to run next according to the project's plan and priorities, and starts the next session."
+
+   **Want:** the decision of what runs next moves from the finishing session to the oracle. A session reports to the oracle that its work is finished; the oracle picks the next work from the project's plan and priorities and starts the next session. How this is done is a design decision for an ADR, settled with the user in an interview; this item carries none.
+
+   **Acceptance:**
+
+   - A session whose work is finished can tell the oracle so, and the oracle shows that report for the session.
+   - After such a report, the next session in that project is started by the oracle, not by the finishing session, and the work it is given is the work the project's plan and priorities name as next.
+   - The oracle's choice of next work can be seen and explained: the panel or the dashboard shows what it picked and why.
+   - When there is no next work, or the oracle may not start it on its own, nothing is started and the oracle says so where the user looks.
+   - A session's brief no longer needs a "then:" step for the next session to start.
+
+   **Risks / open questions:**
+
+   - How a session reports "finished", and what counts as finished (merged, handed back, ended by the user).
+   - What "the project's plan and priorities" means concretely: the plan file of :need:`IDEA_021 <IDEA_021>`, the backlog's priority and tier, an approved wave order, or a mix; and per project or across projects.
+   - What the oracle may start without asking the user, and what stays confirm-first under :need:`ADR-009 D16 <DEC_ADR_009_D16>` and the read-only stance of :need:`ADR-007 <DEC_ADR_007>`.
+   - Limits: how many sessions run at once, per project and per machine, and when the oracle stops.
+   - Failure handling: a launch that fails or lands in the wrong place (:need:`BUG_129 <BUG_129>`), a session that never reports, a report from a session that is not really finished.
+   - How this relates to the session handoff of :need:`ADR-005 <DEC_ADR_005>`: replaced, kept as a fallback, or the oracle's way to start the next session.
+
+   **Why now / why this tier:** High, tier 1: the user wants it built starting now. It turns the oracle from a monitor into the one place that runs the work. Effort L: it spans the oracle, the host launch, the session lifecycle and a plan reader; it rises toward XL if the plan reading of :need:`IDEA_021 <IDEA_021>` is built inside it.
+
+   **Related:** :need:`IDEA_030 <IDEA_030>` (oracle start-session, built), :need:`IDEA_021 <IDEA_021>` (the plan as the source of session state, plan next), :need:`IDEA_029 <IDEA_029>` (the panel shows a session's last message and hands it off), :need:`IDEA_012 <IDEA_012>` (Session Oracle v1), :need:`BUG_129 <BUG_129>` (handoff successor placement, fixed), :need:`DEC_ADR_005`, :need:`DEC_ADR_007`, :need:`DEC_ADR_009`, :need:`DEC_ADR_009_D16`.
+
+   .. invariant-history:
+      - from: proposed
+        to: accepted
+        reason: ADR-027 accepted 2026-11-18
+        forced: false
+      - from: accepted
+        to: in_progress
+        reason: ADR-027 increments 1 and 2 landed; 2b, 3, 4 open
+        forced: false
+      - from: in_progress
+        to: done
+        reason: 'ADR-027 increment 4 landed (2026-11-21 squash): the last increment; every acceptance point is built'
+        forced: false
+        evidence: 2026-11-21 squash
+
+.. idea:: After an update, invariant tells the user what is new: features and configuration keys
+   :id: IDEA_058
+   :status: proposed
+   :priority: high
+   :effort: M
+   :tier: 2
+   :area: cli/main, core/manifest
+   :affects: COMP_CMD_SETUP, COMP_CORE_MANIFEST, COMP_CLI_MAIN
+
+   **Problem:** invariant changes quickly: most landings add a command, a gate, a doctor row or a manifest key (the onboarding questionnaire of :need:`ADR-017 <DEC_ADR_017>`, the store of :need:`ADR-014 <DEC_ADR_014>` and :need:`ADR-020 <DEC_ADR_020>`, the sweep cadence, the rulings). After an update nothing tells the user what arrived. A new feature goes unused and a new configuration key keeps its default until the user happens to read the docs, so a project falls behind the tool it runs. On 2026-11-18 the user asked: "I also want the invariant to inform user after an invariant update to tell about the new features are available and new configurations that can be configured, so user will never fall behind."
+
+   **Want:** after invariant is updated, the user is told once what is new since the version they last ran: the new features, and the new configuration keys they can now set, each with what it does and its default. How the notice is produced, where it appears and how it is acknowledged is a design decision for an ADR, settled with the user in an interview; this item carries none.
+
+   **Acceptance:**
+
+   - After an update, the first invariant use in a project shows what is new since the version that project last saw: the new features and the new configuration keys, each with a one-line description and its default.
+   - The notice is shown once per update; after the user has seen or acknowledged it, it does not repeat until the next update.
+   - A configuration key that is new in the update and not yet set in the project is named as such, with how to set it (for example through ``invariant configure``).
+   - A user who skipped several versions sees everything new across all of them, not only the last release.
+   - With no update since the last use, nothing is shown, and a non-interactive or machine-readable run (``--json``, a hook, a CI run) is never interrupted by the notice.
+
+   **Risks / open questions:**
+
+   - Where the "what is new" content comes from: a hand-written release note per version, a changelog, the decision records, or derived from the manifest's own key catalogue; and who keeps it current.
+   - What version the user "last saw" means, per machine or per project, and where it is recorded; an editable install (this repository's own) has no release boundary, so the trigger for it is open.
+   - Where the notice reaches the user: the CLI, ``doctor``, the host's session start, the oracle panel; and how it stays host-neutral.
+   - It assumes invariant has versions that move: ``pyproject.toml`` still says 0.1.0 and no release is tagged. Shared precondition with :need:`IDEA_059 <IDEA_059>`.
+
+   **Why now / why this tier:** High, tier 2: every user meets it at every update, and it is how new configuration actually gets adopted. Effort M: a source of release content, a last-seen version record and one notice surface; it rises if the content is derived from the manifest rather than written by hand.
+
+   **Related:** :need:`IDEA_059 <IDEA_059>` (tells the user a newer version exists and offers the update; this item tells them what it brought), :need:`IDEA_044 <IDEA_044>` (the onboarding questionnaire shows every default; a new key could be offered through the same questions), :need:`DEC_ADR_017`, :need:`BUG_089 <BUG_089>` (the oracle detects that the installed tree changed under it, fixed), :need:`BUG_106 <BUG_106>` (an upgrade overwrote an operator's agent edit, fixed).
+
+   .. invariant-history:
+      - field: area
+        was: cli/main, core/manifest, cli/setup
+        now: cli/main, core/manifest
+        reason: drop an area name no other entry uses; the setup commands live in cli/main
+        date: '2026-11-18'
+
+.. idea:: invariant tells the user a newer release exists and offers to update
+   :id: IDEA_059
+   :status: proposed
+   :priority: high
+   :effort: M
+   :tier: 2
+   :area: cli/main, oracle/build
+   :affects: COMP_CMD_SETUP, COMP_CLI_MAIN, COMP_ORACLE_BUILD
+
+   **Problem:** nothing tells a user that a newer invariant exists. An installed copy stays at whatever it was installed at until the user thinks to reinstall, so fixes and gates that have landed never reach them, and they cannot tell whether a defect they hit is already fixed. On 2026-11-18 the user asked: "I want invariant to check its own Git repo and according to its semantic versioning to inform user that there is a newer version of invariant and if they want to update to."
+
+   **Want:** invariant checks its own Git repository for a newer release, compares versions by semantic versioning, tells the user when a newer one exists, and asks whether they want to update to it. How and when it checks, how it updates per install method, and how the question is asked are design decisions for an ADR, settled with the user in an interview; this item carries none.
+
+   **Acceptance:**
+
+   - When a newer release than the installed one exists in invariant's repository, the user is told so, with the installed and the newer version.
+   - Versions are compared by semantic versioning: a pre-release or an older tag is never offered as newer, and a major-version step is marked as one.
+   - The user is asked whether to update; on yes the installed invariant becomes the newer version, on no they are not asked again about that version.
+   - The check never blocks or slows a command noticeably, never fails one when the repository cannot be reached, and stays silent in non-interactive and machine-readable runs.
+   - The user can turn the check off, and it says when it last checked.
+
+   **Risks / open questions:**
+
+   - Releases do not exist yet: ``pyproject.toml`` says 0.1.0 and no tag carries a version. A release convention (tags, who cuts them, what bumps major/minor/patch) is a precondition, shared with :need:`IDEA_058 <IDEA_058>`.
+   - Install methods differ: a tool install from the repository, a pipx install, and this repository's own editable install (which follows its checkout and has no update to offer). What "update" runs for each.
+   - How often it checks and from where (CLI, ``doctor``, the oracle watcher), and whether it may reach the network at all on a given machine.
+   - Updating a running system: the oracle watcher and web page already re-exec on a changed installed tree (:need:`BUG_089 <BUG_089>`); installed agents and hooks need ``assets install`` or ``agents install`` after an update.
+   - The consumer install shape is already an open ruling in :need:`BUG_001 <BUG_001>` (consumers get a version-pinned install); this item depends on it.
+
+   **Why now / why this tier:** High, tier 2: without it every other improvement reaches users only by chance. Effort M: a version check against the repository, a semver compare and an update offer per install method; it rises with the release convention it needs.
+
+   **Related:** :need:`IDEA_058 <IDEA_058>` (what is new after the update), :need:`BUG_001 <BUG_001>`, :need:`BUG_089 <BUG_089>`, :need:`IDEA_013 <IDEA_013>` (oracle push notifications, a possible channel), :need:`IDEA_004 <IDEA_004>` (uninstall, the other end of the install lifecycle).
+
+   .. invariant-history:
+      - field: area
+        was: cli/main, cli/setup, oracle/build
+        now: cli/main, oracle/build
+        reason: drop an area name no other entry uses; the setup commands live in cli/main
+        date: '2026-11-18'
+
+.. idea:: The oracle page talks to running sessions: read, send, interrupt and answer prompts
+   :id: IDEA_060
+   :status: in_progress
+   :priority: high
+   :effort: L
+   :tier: 1
+   :area: oracle/panel, oracle/webpage, oracle/webactions, oracle/scan, hosts/claude_code_launch, hosts/claude_code_telemetry
+   :affects: COMP_ORACLE_PANEL, COMP_ORACLE_WEBPAGE, COMP_ORACLE_WEBACTIONS, COMP_ORACLE_SCAN, COMP_HOSTS_CLAUDE_CODE_LAUNCH, COMP_HOSTS_CLAUDE_CODE_TELEMETRY
+
+   **Problem:** the user drives Claude sessions remotely through Claude Code Remote Control, which depends on a claude.ai login on the device. Without that login (signed out, another account, a device without the Claude app) there is no way to read or answer a running session from the phone. The oracle panel (:doc:`oracle-panel.md </architecture/oracle-panel>`) shows a session's state, never its conversation, and it deliberately has no route into a session: it never answers prompts (:need:`DEC_ADR_009_D8`, :need:`DEC_ADR_007_D18`). The only text the oracle ever types into a running session is the chain's one "continue" nudge (:need:`DEC_ADR_027_D28`). On 2026-11-19 the user asked: "I want another feature in Oracle so I can use Oracle to communicate with the running sessions, basically similar to what I can do with Claude Code remote control, but just over the web. When I don't have the login in my account, I want to be able to send messages, respond to my sessions using the Oracle, and would be nice to be able to respond to the interactive questions as well."
+
+   **Want:** the oracle's phone page becomes the user's main way to drive running sessions remotely, with no dependence on claude.ai. It shows a session's conversation live, sends it messages, interrupts it, and answers what it waits on: interactive questions and permission prompts. How delivery, queueing and answering work is a design decision for an ADR; this item carries none.
+
+   **Settled with the user (2026-11-19):**
+
+   - **Why.** No dependence on claude.ai at all. The oracle page is the main remote route, so it must cover what Remote Control is used for (the scope below), not just stand in when Remote Control is unavailable.
+   - **Reading.** Opening a session shows a live conversation view: the recent turns (the user's messages and Claude's text replies), tool calls as one-line summaries, newest at the bottom, refreshing on its own. Cards show only a last-message excerpt. This takes in :need:`IDEA_029 <IDEA_029>`'s Read half (the last-message excerpt and its transcript-exposure decision) as this item's first increment. IDEA_029 keeps only its Hand-off half.
+   - **Sending.** To any live Claude window the oracle sees: invariant sessions and orphan windows alike. When Claude waits for input, the message is delivered at once. Mid-turn, the oracle queues it and delivers it when the turn ends. A tab where only a shell runs is always refused.
+   - **Also in v1:** interrupting Claude mid-turn (the Esc key), and slash commands sent as messages (for example ``/compact``). Out of v1: expanding a tool call's input and output, launching new sessions without Remote Control, and attachments.
+   - **Answering.** Both interactive questions (multiple choice, including the free-text "Other") and permission prompts, with every choice the prompt offers, "allow always" included. This reverses "This panel never answers prompts".
+   - **Confirmation.** Free messages and question answers send on one tap, with a few seconds of Undo before delivery. A permission answer always goes through a confirm sheet that names the exact choice and the session.
+   - **Privacy and record.** The conversation is shown as it is, to paired devices only, as plain text. The oracle stores none of it beyond the live read. The audit log records each send's device, session, time, length and hash, never the text.
+   - **Priority.** Tier 1, high: built right after :need:`IDEA_057 <IDEA_057>`'s running increment 4.
+
+   **Before any build:** its own ADR, amending :need:`DEC_ADR_007_D18` and :need:`DEC_ADR_009_D8` (the oracle never answers prompts) and :need:`DEC_ADR_009_D2` (every action is confirmed first), and settling IDEA_029's pending transcript decision (ADR-009 D17). The ADR keeps the design host-neutral, with every Claude Code specific in the host layer.
+
+   **Acceptance:**
+
+   - Opening a live session on the phone shows its recent turns, newest at the bottom, with tool calls as one-line summaries. A new turn appears without a reload. Text containing markup or script displays literally and runs nothing.
+   - A message sent while the session waits for input arrives in it as the user's next prompt. A message sent mid-turn shows as queued, can be cancelled, and arrives when the turn ends. Each lands exactly once.
+   - A message to a tab where only a shell runs, or to a window that is gone, is refused with one plain reason, and nothing is typed anywhere.
+   - A session waiting on an interactive question shows the question and its choices. Choosing one, or typing an "Other" answer, answers it in the session. An answer to a question the session is no longer waiting on is refused.
+   - A session waiting on a permission prompt shows what it asks and every choice it offers. Any choice goes through a confirm sheet before it reaches the session.
+   - Interrupt stops a running turn. A slash command sent as a message runs in the session as if typed there.
+   - One-tap sends can be undone for a few seconds, and nothing reaches the session in that time. Every send, answer and interrupt is in the audit log with device, session, time, length and hash, never its text. An unpaired device gets no conversation text and can send nothing.
+
+   **Risks / open questions:**
+
+   - Typing into a terminal is fragile: the wrong tab, a prompt that changed between read and answer, or input that collides with the user typing on the Mac. The ADR must make a misdelivered keystroke impossible or detectable, not just unlikely.
+   - Reading questions, prompts and the conversation leans on Claude Code's transcript and UI internals, which can change without notice. A read the oracle cannot interpret must show nothing rather than something wrong.
+   - Answering permission prompts, "allow always" included, from a phone widens what a lost paired device can do. Device revocation (:doc:`The oracle on your phone </guide/oracle-web>`) becomes the main control, and the ADR should say whether anything more is needed.
+   - The conversation can hold secrets the user typed. The user chose no masking; the exposure stays limited to paired devices and the live read.
+
+   **Why now / why this tier:** Tier 1, high, on the user's ruling: this is their daily remote route, and without it a session that is waiting cannot be moved from the phone. Effort L: a new ADR amending three decisions, the conversation view, a host-neutral send, queue and answer path, and prompt and question rendering.
+
+   **Related:** :need:`IDEA_029 <IDEA_029>` (its Read half folded in here as increment 1), :need:`IDEA_027 <IDEA_027>` (the mobile control panel umbrella), :need:`IDEA_030 <IDEA_030>` (start-session, done), :need:`IDEA_057 <IDEA_057>` (the chain's nudge, the only typing today), :need:`IDEA_013 <IDEA_013>` and :need:`IDEA_018 <IDEA_018>` (alerts that could lead into this view), :need:`DEC_ADR_008`, :need:`DEC_ADR_009`, :need:`DEC_ADR_027_D28`.
+
+   .. invariant-history:
+      - from: proposed
+        to: accepted
+        reason: null
+        forced: false
+      - from: accepted
+        to: in_progress
+        reason: null
+        forced: false
+      - from: in_progress
+        to: done
+        reason: null
+        forced: false
+        ruling: 'user, 2026-11-21: IDEA_060 is complete once ADR-029 increment 7 lands'
+        evidence: 2026-11-21 squash
+      - from: done
+        to: in_progress
+        reason: 'Haiku cleanup, user ruling 2026-11-21: ADR-029 increments 5-7 were built on Haiku and are reverted to the fee9a90 tree; they are rebuilt as Opus sessions, so IDEA_060 is not done'
+        forced: true
+
+.. idea:: Every managed project documents its requirements and links them to what satisfies them
+   :id: IDEA_061
+   :status: proposed
+   :priority: high
+   :effort: XL
+   :tier: 2
+   :area: docs/needs
+   :affects: COMP_CORE_NEEDS,COMP_DOMAINS_DOCS
+
+   **Problem:** a managed project's requirements are mostly not in its documentation, so nothing shows which part of the architecture satisfies which requirement, and nothing catches a requirement that nothing satisfies. :need:`DEC_ADR_018` makes sphinx-needs the architecture's form for every managed project, and its schema already has a requirement role (:need:`DEC_ADR_018_D2`, ``req``, ``REQ_``), but :need:`DEC_ADR_018_D6` deliberately treats a role with no needs as no failure. As of 2026-11-20 invariant and Heap document no requirement needs at all, dang documents about twenty, only some of them linked to what satisfies them, and Darvag's architecture docs are still Markdown with no needs. On 2026-11-20 the user asked: "This idea is about keeping tracks of all the requirements of the project in the documentation. It should make sure that we have all the requirements of every project documented properly and link them to the architectural elements, designs, diagrams, or ADRs that are implementing or satisfying those requirements. Also, link the dependent requirements together on the Sphinx documents. This is a T2. But when we deliver it, it has to fill the gap of requirements on every project that invariant is running."
+
+   **Want:** every managed project keeps its requirements as needs in its Sphinx docs. Each requirement links to the architecture elements, designs, diagrams or decisions that implement or satisfy it, and requirements that depend on each other are linked to each other. invariant makes sure this stays true, so a missing or unlinked requirement shows up rather than going unnoticed. Delivering it includes backfilling the requirements of every project invariant manages today. How the check, the links and the backfill work is for an ADR; this item carries none of that.
+
+   **Settled with the user (2026-11-20):**
+
+   - **Tier.** Tier 2.
+   - **Backfill is in scope.** Delivery is not done until every project invariant manages (invariant itself, Heap, dang, Darvag and any other registered project) has its requirements documented and linked.
+
+   **Acceptance:**
+
+   - In each registered managed project, the Sphinx docs build strictly and hold the project's requirements as requirement needs, each with a statement of what is required.
+   - Every requirement need links to at least one architecture element, design, diagram or decision that implements or satisfies it, and the built docs show those links in both directions.
+   - A requirement that depends on another links to it, and the built docs show the dependency from both sides.
+   - A requirement with nothing satisfying it, or a link to a need that does not exist, is reported by invariant, naming the requirement.
+   - After delivery, invariant, Heap, dang and Darvag each pass that check with their backfilled requirements.
+
+   **Risks / open questions:**
+
+   - Where the backfilled requirements come from: drafted from each project's existing architecture docs, decisions and items, and how much the user reviews before they land. A requirement invented to fill a gap is worse than a missing one.
+   - Whether the check reports or blocks, and whether it also asks the other way round (an architecture element that satisfies no requirement).
+   - A project that keeps its docs in a separate docs repository or a store (:need:`DEC_ADR_014`, :need:`DEC_ADR_020`) must get the same coverage, not just projects whose docs sit in the repository.
+   - Darvag's docs are not yet a sphinx-needs project, so its backfill waits on, or includes, that migration.
+   - dang's existing requirements already carry links of their own; the backfill must keep them and their ids.
+
+   **Why now / why this tier:** Tier 2 on the user's ruling: it completes the requirement leg of the sphinx-needs mandate across every managed project. Effort XL: a cross-project backfill of four projects' requirements on top of the engine change.
+
+   **Related:** :need:`IDEA_045 <IDEA_045>` (the sphinx-needs mandate, done), :need:`IDEA_041 <IDEA_041>` (docs repositories get gates), :need:`IDEA_040 <IDEA_040>` (records in a home store), :need:`DEC_ADR_018_D2`, :need:`DEC_ADR_018_D6`.
+
+.. idea:: The oracle closes a finished chained session's window once the session consents
+   :id: IDEA_062
+   :status: done
+   :priority: high
+   :effort: M
+   :tier: 1
+   :area: oracle/chain, oracle/chainstep, oracle/closehost, oracle/push, cli/main
+   :affects: COMP_ORACLE_CHAIN, COMP_ORACLE_CHAINSTEP, COMP_ORACLE_CLOSEHOST, COMP_ORACLE_PUSH, COMP_CMD_ORACLE
+
+   **Problem:** a chained session that has finished its work keeps its Claude window open, and an open window holds its project under the chain's one-at-a-time limit (:need:`DEC_ADR_027_D5`, kept by :need:`DEC_ADR_027_D30`). ADR-027 Ruling 13 releases a chained start only when it failed, was closed by the user after a stall, or was retried, so a session that ended well still blocks the queue. The oracle cannot start the next queued session until someone closes the finished window by hand, which defeats the chain when the user is away. On 2026-11-20 the user chose that the oracle closes the window itself, but only once the session confirms it has nothing more to do: "Oracle can send a message and ask the session if the session is finished and confirms that Oracle can close it, like exactly what I'm doing with the sessions."
+
+   **Want:** when a chained session has finished and its window has gone quiet, the oracle asks the session whether it is done and may be closed. On the session's recorded yes, the oracle closes the window and the chain moves on to the next queued work. The precise mechanism is for an ADR amending ADR-027 Ruling 13, D5 and D30; this item carries none of it.
+
+   **Settled with the user (2026-11-20):**
+
+   - **Asking.** The oracle types one question into the session's own tab, the same route as the chain's one "continue" (:need:`DEC_ADR_027_D28`).
+   - **Answering.** The session answers by recording consent, or "not yet" with a note, in the chain ledger as an engine record. The oracle never reads consent from transcript text.
+   - **On consent** the oracle closes the window through the existing close-host path (:need:`IDEA_027 <IDEA_027>`) and the chain starts the next work. **On "not yet"** it asks again later. **On no answer** it notifies the user on the phone with Close and Leave open, and never closes silently.
+   - **The user's window.** A window where the user has typed a turn since the teardown is the user's: it is never asked and never closed, and the user gets one notice that it holds the project.
+   - **Priority.** High, queued right after ADR-027 increment 5.
+
+   **Acceptance:**
+
+   - A finished chained session's window is closed only after that session has recorded its consent; without it, the window stays open.
+   - A window where the user typed a turn after the teardown is never asked and never closed, and the user gets exactly one notice that it holds the project.
+   - A session that answers "not yet" is asked again later and its note is kept; a session that never answers leads to a phone notice offering Close and Leave open, never a silent close.
+   - Once the finished window is closed, the next queued session starts without anyone touching the Mac.
+   - Every ask, answer and close is in the chain ledger.
+
+   **Risks / open questions:**
+
+   - Typing into a terminal tab can land in the wrong place or collide with the user typing; the ADR must make a misdirected question impossible or detectable, as for the "continue".
+   - "Gone quiet" and "the user typed a turn" both lean on host signals that can be late or wrong; a wrong read must err toward asking the user, never toward closing.
+   - How long to wait before asking again or notifying, and how many asks before giving up, is for the ADR.
+
+   **Why now / why this tier:** Tier 1, high: every finished chained session stalls the queue until a human closes its window, so the chain cannot run unattended without this. Effort M: a narrow ADR amendment, one engine record, and reuse of the existing nudge, close-host and push paths.
+
+   **Related:** :need:`IDEA_057 <IDEA_057>` (done; the chain, ADR-027), :need:`IDEA_060 <IDEA_060>` (the oracle page talks to running sessions; this is a narrow, fixed case of it), :need:`IDEA_027 <IDEA_027>` (close-host), :need:`DEC_ADR_027`, :need:`DEC_ADR_027_D5`, :need:`DEC_ADR_027_D28`, :need:`DEC_ADR_027_D30`.
+
+   .. invariant-history:
+      - from: proposed
+        to: accepted
+        reason: null
+        forced: false
+        evidence: 2026-11-21 squash
+      - from: accepted
+        to: in_progress
+        reason: null
+        forced: false
+        evidence: 2026-11-21 squash
+      - from: in_progress
+        to: done
+        reason: null
+        forced: false
+        evidence: 2026-11-21 squash
+
+.. idea:: Lift cli/main.py and claude_code_talk.py to the coverage floor
+   :id: IDEA_063
+   :status: dropped
+   :priority: medium
+   :effort: M
+   :tier: T5
+   :area: cli, hosts/claude_code_talk
+   :affects: COMP_CLI_MAIN,COMP_HOSTS_CLAUDE_CODE_TALK
+
+   **Dropped 2026-11-22:** the whole-suite sweep (docs/sweeps/2026-11-21-a1fb5f8b4886.json) has cli/main.py at 96% and hosts/claude_code_talk.py at 98% against the floor of 85, so no gap exists (user ruling 2026-11-22).
+
+   **The want.** A scoped coverage run was reported to show src/invariant/cli/main.py at 53% and src/invariant/hosts/claude_code_talk.py at 58%, both below the 85 floor. Establish whether either file is really below the floor and, where it is, bring it to the floor or record an exception for it.
+
+   **Why.** The figures were noted while landing ADR-029 increment 7 and were said to predate it. They are not reproduced by the one whole-suite sweep on record (docs/sweeps/2026-11-21-a1fb5f8b4886.json, floor 85), which has cli/main.py at 96% and hosts/claude_code_talk.py at 98%. A scoped run exercises only the tests it selects, so per-file figures from it read low for files the selected tests barely touch. Whether any real gap exists is unestablished; the first step is a whole-suite coverage figure for the two files. If it shows both at or above the floor, the entry should be dropped (the user's call).
+
+   **Acceptance:**
+
+   * A whole-suite coverage run reports cli/main.py at or above 85%, or an exception is recorded for it with a reason.
+   * A whole-suite coverage run reports hosts/claude_code_talk.py at or above 85%, or an exception is recorded for it with a reason.
+   * No other touched file drops below the floor.
+
+   **Risks / open questions:**
+
+   * Whether the gap exists at all (the sweep says it does not); and, if it does, whether an exception is the right call for either file, which is the user's decision. The floor is not changed here.
+
+   **Why now / why this tier:** Coverage hygiene on two files, with the gap itself unconfirmed by the whole-suite sweep; medium value, effort M, so T5.
+
+   .. invariant-history:
+      - from: proposed
+        to: dropped
+        reason: 'Dropped 2026-11-22: the whole-suite sweep (docs/sweeps/2026-11-21-a1fb5f8b4886.json) shows cli/main.py at 96% and hosts/claude_code_talk.py at 98% against the floor of 85; no gap exists. User ruling 2026-11-22.'
+        forced: false
+
+.. idea:: Finished sessions end their own window and the chain starts the next
+   :id: IDEA_064
+   :status: proposed
+   :priority: high
+   :effort: M
+   :tier: 1
+   :area: oracle/chain
+
+   **Problem:** a managed project rolls from one session to the next on its own: each finished session ends and closes its own Claude Code window, and the next one opens. Invariant's own chain stalls instead. After a session lands, the oracle starts the next queue entry only once the landed window is gone, and the window is closed only through ADR-027 ruling 21 (IDEA_062): a quiet period (oracle.chain.close_ask_after, 5 min), a typed consent ask, and a window the user typed into after the teardown is never asked or closed and holds the one-at-a-time limit. Observed 2026-11-22: a landed window shows "landed: users" in oracle chain status and the chain waits, so three queued entries cannot start. The other project moves on because each finished session runs session handoff with a note, which opens the next window and ends its own; that is the path ADR-027 ruling 7 retired for agents (briefs queue a successor and end; the oracle starts it). Sessions started by handoff also bypass the oracle chain's caps, queue order and start count: chain status shows 0 starts in that project although several sessions ran the same day. The user's ask: the invariant pipelines should execute sessions and Claude Code windows seamlessly, built in.
+
+   **Want:** one built-in mechanism, for every managed project, in which a finished session ends its own window and the oracle starts the next queue entry. The mechanism is for an ADR amending ADR-027 rulings 7 and 21 (decisions D28, D29 and D30 as found relevant); this item carries none of it.
+
+   **Settled with the user (2026-11-22):**
+
+   * **Final landing ends the window.** After a final landing the session exits on its own: its consent to close is recorded at the landing and its Claude window ends, the way handoff ends a window. The oracle sees the window gone and starts the next queue entry within seconds. The oracle still decides what runs next; ruling 7 stays.
+   * **A user-typed window stays open but stops holding the chain.** A landed window the user has typed into after the landing stays open for the user, but no longer counts against the one-at-a-time limit, so the chain goes on and the next session starts alongside it. This amends ruling 21 and the "an open window holds the chain" behaviour.
+   * **One mechanism for every managed project.** Once this lands, a project still chaining through session handoff moves onto queue-and-end, and its instructions that tell sessions to hand off are retired. That migration happens in the project's own session, not in invariant's repo.
+
+   **Acceptance:**
+
+   * After a final landing, the session's window ends without anyone touching the Mac, and the next queue entry starts within seconds, under the chain's caps, queue order and start count.
+   * A landed window the user typed into after the landing is left open, is not closed, and does not block the next queued session from starting.
+   * The consent to close is an engine record made at the landing, never read from transcript text.
+   * Chain status counts every started session in a project, so a project that moved off handoff shows its true starts.
+   * After migration, no managed project's instructions tell a session to hand off, and each rolls on through queue-and-end.
+
+   **Risks / open questions:**
+
+   * A session ending its own window must not end a window the user is working in; the ADR must say how a typed-into window is told apart at the landing.
+   * Starting the next session alongside an open user window relaxes the one-at-a-time limit; the ADR must state the bounds (per project, a cap on windows left open).
+   * What happens to the ruling 21 quiet period, typed ask and phone notice: kept as a fallback for windows that did not end themselves, or retired.
+   * Interaction with ADR-005 (handoff), which stays for user-driven handoffs.
+
+   **Why now / why this tier:** Tier 1, high: the user wants it soon, and until it lands every finished chained session can stall the queue (three entries waiting now) while other projects bypass the chain's controls. Effort M: an ADR amending two rulings, one engine record at landing, a window-end step reusing the handoff and close-host paths, and a change to the one-at-a-time count.
+
+   **Related:** IDEA_062 (done), IDEA_057 (done; the chain, ADR-027), ADR-027 rulings 7 and 21, ADR-005 (handoff).
+
+.. idea:: Every managed project's default guidelines require 4-layer clean architecture, SOLID, a pattern catalogue and docs-first
+   :id: IDEA_065
+   :status: done
+   :priority: high
+   :effort: L
+   :tier: 1
+   :area: guidelines/defaults
+
+   **Problem:** the default guidelines every managed project receives do not name the architecture the user wants all projects to follow. invariant's starter ruleset (src/invariant/data/scaffold/guidelines/ruleset.yaml) carries two docs judgement rules and nothing else. invariant's own ruleset carries five rules: two import bans, one conduct rule and two docs rules. Nothing in either names layers, SOLID or a catalogue of design patterns. The docs gates check only that the architecture docs were read (docs.read_architecture) and changed in the same change (docs.updated); they do not check that the design documents lead the code. The queue and plan are JSON, not Sphinx documentation. Only the Python adapter has an imports engine, so layer rules cannot be checked in other ecosystems. Heap and Darvag have no ruleset, only hand-written checklists, and Darvag's docs are Markdown rather than Sphinx. The user's ask (2026-11-22): every project invariant controls follows 4-layer clean architecture, SOLID and a 32-pattern design catalogue; keeps its architecture, design decisions, backlog and plan as Sphinx documentation inside the repo; and works docs-first (read the documentation, update the design documents, then implement, so the design documents stay level with or ahead of the source). At least the architect and the compliance reviewer must follow these rules. invariant adjusts itself first, then the other managed projects (Heap, Darvag and the rest).
+
+   **Interview:** the user was interviewed in two rounds on 2026-11-22. The ADR will record the rulings as decision needs; this item carries none of them and no design.
+
+   **Acceptance:**
+
+   * A project created or initialised with the defaults carries guidelines that name the 4-layer clean architecture, SOLID, the pattern catalogue and docs-first.
+   * The architect and the compliance reviewer are held to those guidelines in every managed project.
+   * A change that implements before its design documents are updated is caught by a docs-first check, not only by a same-change check.
+   * invariant's own ruleset conforms first; then Heap, Darvag and the other managed projects each carry the defaults and Sphinx documentation for architecture, decisions, backlog and plan inside their repo.
+
+   **Risks / open questions:**
+
+   * Layer rules are only machine-checkable where an adapter has an imports engine; other ecosystems depend on IDEA_038 and IDEA_047 or fall back to judgement rules.
+   * Migrating Darvag's Markdown docs and moving the plan out of JSON are sizeable on their own.
+   * Overlaps IDEA_061 (requirements traceability), ADR-012 (guidelines ruleset), ADR-018 (sphinx-needs mandate) and ADR-020 D10 (ruleset location).
+
+   **Why now / why this tier:**
+
+   The user named a real gap in the defaults every project inherits; it shapes all later work in all projects, so it is T1.
+
+   .. invariant-history:
+      - from: proposed
+        to: accepted
+        reason: ADR-032 accepted, user 2026-11-22
+        forced: false
+      - from: accepted
+        to: in_progress
+        reason: 'ADR-032 complete: increments 0-6 landed in invariant (last the commit after 72a03af); increment 7 rollouts landed in Heap, Darvag and Dang 2026-11-23. Heap''s red strict docs build is unrelated to ADR-032 and has its own follow-up.'
+        forced: false
+        ruling: user, 2026-11-23
+        evidence: the commit after 72a03af
+        intermediate: true
+      - from: in_progress
+        to: done
+        reason: 'ADR-032 complete: increments 0-6 landed in invariant (last the commit after 72a03af); increment 7 rollouts landed in Heap, Darvag and Dang 2026-11-23. Heap''s red strict docs build is unrelated to ADR-032 and has its own follow-up.'
+        forced: false
+        ruling: user, 2026-11-23
+        evidence: the commit after 72a03af
+
+.. idea:: The oracle queue has a proposal flow: accept, defer or send to backlog bottom
+   :id: IDEA_066
+   :status: proposed
+   :priority: high
+   :effort: M
+   :tier: 1
+   :area: oracle/queue
+
+   **Problem:** The user's rule for the oracle queue (stated 2026-11-23): when the user asks for an item to be added to the queue, it is added to the queue, with no further step. When an agent decides on its own that an item belongs in the queue, it adds it as a proposed item, and the user decides: accept it (it enters the queue at the position the proposal named), defer it (the agent proposes a new position), or send it to the bottom of the backlog. Today (ADR-027) a propose-mode queue entry offers only Start (run now) and Remove. There is no way to accept a proposal into the queue at its proposed position, no way to defer it and receive a new proposed position, and no way to send it to the backlog bottom. A proposal also carries no proposed position at all. A second defect in the same flow: when an abandoned chained session is retried, the oracle copies the old entry's propose mode onto the retry (seen: Q135 abandoned, its retry Q147 came back proposed), so work the user already ruled on returns as a proposal and waits for a decision again.
+
+   **Want:** a proposal flow on the queue: a user request enters the queue directly; an agent-initiated entry is a proposal that carries a proposed position; the user can accept it, defer it, or send it to the backlog bottom; a retry of user-ruled work is not a proposal. The shape is for an ADR amending ADR-027; this item carries none of the design.
+
+   **Acceptance:**
+
+   * An entry the user asks to have queued appears in the queue at once, not as a proposal.
+   * An entry an agent adds on its own is a proposal showing the position it would take, and it does not run until the user accepts it.
+   * Accepting a proposal puts it in the queue at its proposed position.
+   * Deferring a proposal returns it with a new proposed position and leaves it a proposal.
+   * Sending a proposal to the backlog bottom removes it from the queue and files it at the bottom of the backlog.
+   * The retry of an abandoned or failed chained session whose entry the user had ruled on is a queue entry, not a proposal.
+
+   **Risks / open questions:**
+
+   * Who proposes the new position on a defer (the agent, or the oracle by rule), and how the proposal is shown on the panel and the web page, phone included.
+   * What "bottom of the backlog" means for a queue entry that is not a backlog item.
+   * How a proposal made while the chain has no current start is shown (see BUG_160, action-less proposal cards).
+
+   **Why now / why this tier:** Tier 1, high: the user stated the rule 2026-11-23, and today proposals cannot be resolved except by running or removing them. Effort M: an ADR amending ADR-027, a position field on a proposal, three actions on the panel, the web page and the queue command, and a fix to how a retry inherits its mode.
+
+   **Related:** ADR-027 (queue and chain), ADR-031 and IDEA_064 (seamless chain, proposed), IDEA_027 (oracle control panel), BUG_160 (proposal cards with no action).

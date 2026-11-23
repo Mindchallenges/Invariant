@@ -733,12 +733,13 @@ rules:
 
 class TestABoundaryNeedsImports:
     """DN-A14: a boundary rule is accepted only when a configured adapter's
-    ``guideline_engines`` offers ``imports``, and the refusal names why. Only
-    the python adapter offers it: Swift boundaries need symbols (ruling 3),
-    and node and generic gain nothing (DN-9)."""
+    ``guideline_engines`` offers ``imports``, and the refusal names why. The
+    python, dart, flutter and node adapters offer it (ADR-032 increment 5):
+    Swift boundaries need symbols (ruling 3) or a fitness test, and generic
+    gains nothing (DN-9)."""
 
     @pytest.mark.parametrize(
-        "ecosystems", [None, ["generic"], ["node"], ["swift_xcode"], ["node", "swift_xcode"]]
+        "ecosystems", [None, ["generic"], ["swift_xcode"], ["generic", "swift_xcode"]]
     )
     def test_no_adapter_offering_imports_refuses_it(self, make_manifest, tmp_path, ecosystems):
         write(tmp_path, "docs/guidelines/ruleset.yaml", BOUNDARY_RULESET)
@@ -751,7 +752,10 @@ class TestABoundaryNeedsImports:
             "adapter offers one" in detail
         )
 
-    @pytest.mark.parametrize("ecosystems", [["python"], ["swift_xcode", "python"]])
+    @pytest.mark.parametrize(
+        "ecosystems",
+        [["python"], ["swift_xcode", "python"], ["node"], ["dart"], ["flutter"]],
+    )
     def test_a_configured_adapter_offering_imports_passes(
         self, make_manifest, tmp_path, ecosystems
     ):

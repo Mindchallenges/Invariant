@@ -368,8 +368,10 @@ class TestWhereItRuns:
         seen = {}
 
         class Domain:
-            def __init__(self, manifest, store=None, host_instruction_files=(), host_agent_plan=None):
+            def __init__(self, manifest, store=None, host_instruction_files=(), host_agent_plan=None,
+                         forbidden_models=()):
                 seen["plan"] = host_agent_plan
+                seen["forbidden"] = forbidden_models
 
             def evaluate_gates_by_destination(self, session_id, session=None, cwd=None):
                 return {}
@@ -389,6 +391,9 @@ class TestWhereItRuns:
         marker = object()
         gates.evaluate_row(row, agent_plan_for=lambda manifest: marker)
         assert seen["plan"] is marker
+        assert seen["forbidden"] == (), "no list is handed in unless the CLI supplies one"
+        gates.evaluate_row(row, forbidden_for=lambda manifest: ("entry",))
+        assert seen["forbidden"] == ("entry",)
 
 
 class _Record:

@@ -2523,3 +2523,79 @@ defines, an uncommitted pointer, and ``--records`` in either direction. ``conf_e
 ``unlink_repo`` and the marker's note are tested on their own.
 ``tests/test_adr_014_migrate.py`` now expects ``--to repo`` in an in-repo
 project to refuse as one.
+
+As built: the BUG_143 and BUG_141 fixes (2026-11-17)
+----------------------------------------------------
+
+Two readers in a store project looked only where an in-repo project keeps a
+file or a setting (batch store-project-config-reads), as the architecture
+docs now describe it (``manifest.rst``, "Declared stores are writable
+stores" and increment 4c-2's paragraph; ``state_model.rst``, where a store
+path stands; ``overview.rst``, ``core/doclock``; ``cli.rst``, ``docs
+lock``). Where the fixes settle what the text left open:
+
+.. dec:: The store's invariant.yaml is under the docs lock, its own unit
+   :id: DEC_ADR_014_B143
+   :status: accepted
+   :part_of: DEC_ADR_014
+   :amends: DEC_ADR_014_I4B
+   :affects: COMP_CORE_DOCLOCK, COMP_CORE_RULES, COMP_DOMAINS_SESSION
+
+   - **Why the ruling moves.** :need:`DEC_ADR_014_I4B` left the store's
+     ``invariant.yaml`` ungoverned, as nothing an agent designs against.
+     Since increment 4c-2 a repository's block there holds the guidelines'
+     ``baseline`` and ``ruleset``, so it is policy, and two sessions could
+     edit it at once with nothing holding either back.
+   - **Its unit.** ``core/doclock.classify`` places the store's own
+     ``invariant.yaml`` as a policy path, with the unit ``unit_of`` gives
+     it: ``file:invariant.yaml``, or the declared area whose pattern matches
+     it. No new kind of unit and no new key: D5's "a policy file outside
+     every declared area is its own unit". The store's git directory and its
+     root stay ungoverned. The on-access grant, ``store.docs_lock_held``,
+     ``docs lock invariant.yaml`` and ``store.docs_lock_released`` treat it
+     as any store policy file.
+   - **What it does not stop.** ``rules loosen`` and ``rules carry-over``
+     (ADR-021) write the file at the user's terminal, outside every hook,
+     and take no unit; ``store migrate`` in either direction writes and
+     commits it outside its session's grants, which cover only the records
+     it moves. None of them is refused by a session holding the unit.
+   - **The cost, accepted by the user.** A session holding
+     ``file:invariant.yaml`` cannot ``docs unlock`` while a ruling written at
+     the terminal is left uncommitted in the store: the release refuses a
+     unit with uncommitted changes, as for a doc edited by hand there. It
+     releases once the ruling is committed.
+
+.. dec:: The guidelines' base reader resolves the user level beneath the base's own
+   :id: DEC_ADR_014_B141
+   :status: accepted
+   :part_of: DEC_ADR_014
+   :amends: DEC_ADR_014_I4C2
+   :affects: COMP_CORE_RULES, COMP_DOMAINS_GUIDELINES, COMP_CORE_MANIFEST
+
+   - **The user level as it stands now.** No base tree holds the user level,
+     so ``guidelines.baseline_only_shrinks`` reads the base's own level
+     (``Manifest.location``) and, beneath it, the user's ``guidelines``
+     defaults as the working configuration loads them. ``guidelines.baseline``
+     and ``guidelines.ruleset`` then resolve at the base in D3's order, so a
+     baseline or ruleset set only at the user level is the one the base copy
+     is read from. A level above it, set at the base, still wins.
+   - **Every location.** The reader is shared, so an in-repo project, which
+     ruling 19 also lets a user default reach, reads the same way. A
+     repository with no manifest at the base is still a base with no
+     baseline configured, and a project defined by its pointer alone is
+     still refused a ``guidelines.baseline`` at load.
+   - **Only this reader.** ``docs.mandate_kept`` compares the base and the
+     tree in hand at the same level, where the user level is the same on
+     both sides, so it is unchanged.
+
+The proofs are the reproducers' tests, unchanged with their markers removed
+(``tests/test_bug_143_repro.py``, ``tests/test_bug_141_repro.py``), and
+``tests/test_bug_143_store_manifest_lock.py``: ``rules loosen`` at a
+terminal writes the file while another session holds its unit, whose release
+is refused until the ruling is committed; ``store migrate --to store`` and
+``--to repo`` write it while another session holds it; a declared area takes
+it into its unit. ``tests/test_bug_141_user_baseline.py``: a store-level
+baseline still wins at the base; a ruleset set only by the user is the base's
+ruleset; an in-repo project reads a user baseline at the base.
+``tests/test_adr_014_docs_lock_host.py`` now expects the store's
+``invariant.yaml`` governed and its git directory not.

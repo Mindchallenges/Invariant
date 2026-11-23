@@ -14,4 +14,6 @@ builds it strictly, and a change that touches it lands only on a green build.
    ui
    rules
    checklist
+   patterns
    backlog
+   plan

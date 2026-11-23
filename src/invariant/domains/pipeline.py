@@ -38,10 +38,16 @@ from ..core.errors import (
     UsageError,
 )
 from ..core.fsm import Machine
-from ..core.machines import ABANDON_ROLE, LANDING_ROLE, load_pipeline_machine
+from ..core.machines import (
+    ABANDON_ROLE,
+    DESIGN_ROLE,
+    LANDING_ROLE,
+    load_pipeline_machine,
+)
 from ..core.manifest import Level
 from ..core.rules import (
     AUDIT_KEY,
+    DESIGN_SNAPSHOTS,
     MECHANICAL_GATE,
     VERDICTS_GATE,
     AgentCopy,
@@ -49,6 +55,7 @@ from ..core.rules import (
     RuleContext,
     _without_audit,
     apply_acknowledgements,
+    design_snapshot,
     evaluate,
     grant_outcomes,
     rule_spec,
@@ -396,7 +403,8 @@ RECEIPT_FLOOR_RULE = "coverage.meets_floor"
 def _signed_tree(
     root: Path, before: tuple[str, str] | None, after: tuple[str, str] | None
 ) -> dict | None:
-    """The tree a coverage run measured, as its record keeps it (ADR-026 D1).
+    """The tree a coverage or test run ran over, as its record keeps it
+    (ADR-026 D1; every test run since ADR-032 increment 5).
 
     ``None`` when git could not name the tree before the run, which the
     receipt reads as a record that vouches for nothing.
@@ -523,8 +531,13 @@ class PipelineDomain:
         host_instruction_files: tuple[str, ...] = (),
         host_agent_plan: Callable[[], Sequence[AgentCopy]] | None = None,
         lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+        forbidden_models: Sequence[str] = (),
     ) -> None:
         self.manifest = manifest
+        #: The forbidden-model list in force, handed to every gate on the rule
+        #: context (DEC_ADR_030_D4). Injected by the CLI, because its default is
+        #: the host adapter's and no domain imports a host.
+        self.forbidden_models = tuple(forbidden_models)
         #: How long a writer waits for the record's lock. A person's command
         #: takes the store's default. A hook passes less, because it makes
         #: several writes inside the budget the host cancels it at.
@@ -787,15 +800,22 @@ class PipelineDomain:
                 gate_ids += [g for g in edge_gates if g not in gate_ids]
         else:
             gate_ids = self.gates_for(pipeline.state, target, machine)
-        ctx = RuleContext(
+        ctx = self._rule_context(pipeline, session, cwd)
+        return apply_acknowledgements(pipeline.to_dict(), evaluate(gate_ids, ctx))
+
+    def _rule_context(
+        self, pipeline: Pipeline, session: dict | None, cwd: Path | None
+    ) -> RuleContext:
+        """What a gate, and the design snapshot, read of this pipeline."""
+        return RuleContext(
             manifest=self.manifest,
             cwd=Path(cwd or Path.cwd()),
             session=session,
             pipeline=pipeline.to_dict(),
             host_instruction_files=self.host_instruction_files,
             host_agent_plan=self.host_agent_plan,
+            forbidden_models=self.forbidden_models,
         )
-        return apply_acknowledgements(pipeline.to_dict(), evaluate(gate_ids, ctx))
 
     def evaluate_gates_by_destination(
         self,
@@ -929,6 +949,12 @@ class PipelineDomain:
 
             host_session_id = (session or {}).get("host_session_id")
             usage, usage_host = self._reading(host_session_id)
+            # Read from the tree outside the lock, as a gate is (ADR-032 D6).
+            snapshot = (
+                design_snapshot(self._rule_context(seen, session, cwd))
+                if _leaves_design(machine, seen.state, target)
+                else None
+            )
 
             with self._record_lock(session_id):
                 pipeline = self.require(session_id)
@@ -964,6 +990,15 @@ class PipelineDomain:
                         "usage_host": usage_host,
                     }
                 )
+                if snapshot is not None:
+                    _evidence_list(pipeline, DESIGN_SNAPSHOTS).append(
+                        {
+                            "from": pipeline.state,
+                            "to": target,
+                            "step": len(pipeline.history) - 1,
+                            **snapshot,
+                        }
+                    )
                 if LANDING_ROLE in machine.state(target).roles:
                     landing = guidelines_landing(
                         pipeline.state, target, forced=bool(force), verdicts=verdicts
@@ -1308,6 +1343,7 @@ class PipelineDomain:
                 "coverage_one" if selectors else "coverage",
                 ecosystem, result_bundle=str(bundle), **extra,
             ),
+            tree=_signed_tree(root, before, after),
         )
 
         # The suite's state at the moment of measurement, kept with it. A file
@@ -1472,6 +1508,7 @@ class PipelineDomain:
             pipeline=pipeline.to_dict(),
             host_instruction_files=self.host_instruction_files,
             host_agent_plan=self.host_agent_plan,
+            forbidden_models=self.forbidden_models,
         )
         (floor,) = apply_acknowledgements(
             pipeline.to_dict(), evaluate([RECEIPT_FLOOR_RULE], ctx)
@@ -1528,7 +1565,13 @@ class PipelineDomain:
             command_key, ecosystem, result_bundle=str(bundle), **extra
         )
 
-        proc = run_command(command, Path(cwd or self.manifest.root))
+        # The tree the run ran over, signed on both sides of it, as a coverage
+        # run's is: a fitness rule reads only a run over the tree in hand
+        # (ADR-032 D3, DEC_ADR_032_I5).
+        root = Path(cwd or self.manifest.root)
+        before = git.tree_signature(root)
+        proc = run_command(command, root)
+        after = git.tree_signature(root)
         result = adapter.annotate(
             adapter.read_run(proc.stdout, proc.stderr, proc.returncode, bundle=bundle),
             Path(cwd or self.manifest.root),
@@ -1544,6 +1587,7 @@ class PipelineDomain:
             discovered=self.manifest.discovered_in(
                 command_key, ecosystem, result_bundle=str(bundle), **extra
             ),
+            tree=_signed_tree(root, before, after),
         )
 
     def _read_red_phase_run(
@@ -1618,6 +1662,7 @@ class PipelineDomain:
         selectors: Sequence[str] = (),
         ecosystem: str | None = None,
         discovered: Mapping[str, str] | None = None,
+        tree: Mapping[str, Any] | None = None,
     ):
         """Append one run to the evidence every test rule reads.
 
@@ -1665,6 +1710,9 @@ class PipelineDomain:
             "read_as_red": read_as_red,
             "hazards": [h.id for h in result.hazards],
             "note": result.note,
+            # The tree the run ran over, before and after it (ADR-026 D1's
+            # shape), which a fitness rule matches to the tree in hand.
+            "tree": dict(tree) if tree else None,
         }
         with self._record_lock(session_id):
             pipeline = self.require(session_id)
@@ -1744,6 +1792,29 @@ def _evidence_field(pipeline: Pipeline, key: str, shape: type) -> Any:
     return value
 
 
+def _leaves_design(machine: Machine, source: str, target: str) -> bool:
+    """Whether the edge leaves a design state for a build: from a state with
+    the ``design`` role into one with neither it nor the ``abandon`` role, so
+    the build begins on it (ADR-032 D6)."""
+    if source not in machine.states or target not in machine.states:
+        return False
+    if DESIGN_ROLE not in machine.state(source).roles:
+        return False
+    return not {DESIGN_ROLE, ABANDON_ROLE} & set(machine.state(target).roles)
+
+
+def design_snapshot_taken(pipeline: Pipeline) -> dict | None:
+    """The design snapshot the pipeline's last advance took, or ``None``:
+    what ``pipeline advance`` prints (ADR-032 D6, increment 3)."""
+    snapshots = pipeline.evidence.get(DESIGN_SNAPSHOTS)
+    if not isinstance(snapshots, list) or not snapshots or not pipeline.history:
+        return None
+    last = snapshots[-1]
+    if isinstance(last, dict) and last.get("step") == len(pipeline.history) - 1:
+        return last
+    return None
+
+
 def audit_line(evidence: Mapping[str, Any]) -> str | None:
     """The audit record as the one line ``pipeline status`` prints, or ``None``.
 
@@ -1767,6 +1838,30 @@ def audit_line(evidence: Mapping[str, Any]) -> str | None:
     if not described:
         return None
     return f"{audit.get('host') or 'unknown'}: " + "; ".join(described)
+
+
+def unchecked_agents(evidence: Mapping[str, Any]) -> list[str]:
+    """The agents that ran here with no model known, in the order they first ran.
+
+    Neither observed nor asked, so the forbidden-model list could not judge
+    them and their gates passed on the role alone (DEC_ADR_030_D3). ``pipeline
+    status`` names them, so the gap is seen rather than read as a pass.
+    """
+    audit = evidence.get(AUDIT_KEY)
+    agents = audit.get("agents") if isinstance(audit, dict) else None
+    agents = agents if isinstance(agents, dict) else {}
+    ran = evidence.get("agents_run")
+    unknown: list[str] = []
+    for name in ran if isinstance(ran, list) else ():
+        if not isinstance(name, str) or name in unknown:
+            continue
+        entry = agents.get(name)
+        entry = entry if isinstance(entry, dict) else {}
+        models = entry.get("models")
+        observed = models if isinstance(models, list) else []
+        if not any(map(_text_or_none, observed)) and not _text_or_none(entry.get("asked")):
+            unknown.append(name)
+    return unknown
 
 
 #: The evidence key each landing's guidelines record is appended to

@@ -152,7 +152,8 @@ class TestRefusals:
         ("edit", "needle"),
         [
             (lambda r: r.update(extra=1), "unknown key(s) in the ruleset: extra"),
-            (lambda r: r.update(version=2), "version 2"),
+            # ADR-032 D2: this build reads 1 and 2; a later one is refused by it.
+            (lambda r: r.update(version=3), "version 3"),
             (lambda r: r.pop("rules"), "missing rules"),
             (lambda r: r.update(sections={}), "sections must be a list"),
             (lambda r: r.update(rules={}), "rules must be a list"),
@@ -412,7 +413,6 @@ class TestManifestKey:
             ({"verdicts": {"note_max_chars": "280"}}, "guidelines.verdicts.note_max_chars must be a positive integer"),
             ({"verdicts": {"note_max_chars": True}}, "guidelines.verdicts.note_max_chars must be a positive integer"),
             ({"instruction_files": "CLAUDE.md"}, "guidelines.instruction_files must be null or a list of paths"),
-            ({"instruction_files": []}, "guidelines.instruction_files must be null or a list of paths"),
             ({"instruction_files": ["CLAUDE.md", ""]}, "guidelines.instruction_files must be null or a list of paths"),
             ({"injection": 40}, "guidelines.injection must be a mapping"),
             ({"injection": {"per_turn": 3}}, "guidelines.injection.per_turn is not a key this build reads"),

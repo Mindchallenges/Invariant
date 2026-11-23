@@ -39,10 +39,11 @@ class TestTheSeam:
         assert LEXICAL_REGIONS == ("code", "comments", "strings")
 
     @pytest.mark.parametrize("ecosystem", ["generic", "node"])
-    def test_an_adapter_without_a_lexer_offers_nothing_and_answers_none(self, ecosystem):
-        """DN-9: node and generic gain nothing in this increment."""
+    def test_an_adapter_without_a_lexer_masks_nothing_and_answers_none(self, ecosystem):
+        """DN-9: node and generic gain no mask; node reads imports only
+        (ADR-032 increment 5)."""
         adapter = get_adapter(ecosystem)
-        assert adapter.guideline_engines == frozenset()
+        assert "mask" not in adapter.guideline_engines
         assert adapter.lexical_mask(Path("a.ts"), "x // y\n", "code") is None
         assert adapter.executable_text(Path("a.ts"), "x // y\n") is None
 
@@ -307,5 +308,8 @@ class TestStacking:
         assert _executable_text(stack, Path("a.ts"), "x = 1\n") is None
 
     def test_the_offered_engines_are_the_union(self):
-        assert _offered_engines(self.adapters("node", "swift_xcode")) == frozenset({"mask"})
-        assert _offered_engines(self.adapters("generic", "node")) == frozenset()
+        assert _offered_engines(self.adapters("generic", "swift_xcode")) == frozenset({"mask"})
+        assert _offered_engines(self.adapters("node", "swift_xcode")) == frozenset(
+            {"mask", "imports"}
+        )
+        assert _offered_engines(self.adapters("generic")) == frozenset()

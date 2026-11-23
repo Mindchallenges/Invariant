@@ -714,6 +714,178 @@ BUG_126 = {
     ),
 }
 
+#: Scoped runs per change (DEC_ADR_010_D8, D10): every recorded run selects the
+#: change's affected tests, the touched files' tests and those of the modules
+#: that import a touched module, with or without a sweep cadence. A full run
+#: is owed only for a touched held path; the whole suite runs on a schedule
+#: outside working hours, and a project with no cadence is told to set one.
+#: The reviewer's "the full suite is CI's job" rule goes: no project is
+#: assumed to have a CI.
+SCOPED_RUNS = {
+    "feature-architect": (
+        (
+            (
+                "| `red` | `invariant pipeline test --phase red` (add `--selector <the new test>` "
+                "to keep it fast) | The failing run `test.new_test_fails` demands |\n"
+                "| `green` | `invariant pipeline test --phase green` | The passing run "
+                "`test.all_pass` demands |\n"
+                "| `refactor` | `invariant pipeline test --phase refactor` | That the cleanup "
+                "kept the suite green |\n"
+                "| `reviewing` | `invariant pipeline test` then `invariant pipeline coverage` | "
+                "The final green run, and the per-file numbers `coverage.meets_floor` reads |\n"
+            ),
+            (
+                "| `red` | `invariant pipeline test --phase red --selector <the new test>` | "
+                "The failing run `test.new_test_fails` demands |\n"
+                "| `green` | `invariant pipeline test --phase green --selector <the affected "
+                "tests>` | The passing run `test.all_pass` demands |\n"
+                "| `refactor` | `invariant pipeline test --phase refactor --selector <the "
+                "affected tests>` | That the cleanup kept the affected tests green |\n"
+                "| `reviewing` | `invariant pipeline test --selector <the affected tests>` then "
+                "`invariant pipeline coverage --selector <the affected tests>`, or the bare "
+                "forms where a held path owes a full run (below) | The final green run, and "
+                "the per-file numbers `coverage.meets_floor` reads |\n"
+            ),
+        ),
+        (
+            (
+                "**Under a sweep cadence, every run in that table is scoped.** When `invariant\n"
+                "config show` reports `methodology.gates.schedule.cadence_days` set, the\n"
+                "project has moved whole-suite and whole-scheme evidence to a scheduled sweep\n"
+                "(`invariant sweep run`), and a full run on a change is exactly what\n"
+                "`sweep.no_full_run` reports (or refuses, at `block`). Record every phase with\n"
+                "`invariant pipeline test --selector <the touched files' tests>` and coverage\n"
+                "with `invariant pipeline coverage --selector <the same>` — never the bare\n"
+                "forms. A scheduled `coverage.meets_floor` reads those scoped figures as\n"
+                "advisory (a lower bound, shown beside the last sweep's figure for the file),\n"
+                "and a scheduled `test.all_pass` still fails on a red scoped run. The one\n"
+                "exception is a touched path under `methodology.gates.schedule.held_paths`: it\n"
+                "owes a FULL run before merge, so record the bare `invariant pipeline test` /\n"
+                "`invariant pipeline coverage` for it, which `sweep.no_full_run` then answers\n"
+                "clean. A `sweep.fresh` warning beside a gate says the last sweep is late; it\n"
+                "never blocks, and running the sweep is the project's job, not this change's.\n"
+            ),
+            (
+                "**Every run in that table is scoped to the change, with or without a sweep\n"
+                "cadence.** The affected tests are the test file paired with every touched\n"
+                "file, every touched test file, and the tests of every module that imports a\n"
+                "touched module (its reverse dependencies, read from the dependency diagrams\n"
+                "in the architecture docs, not from a search of the code). Pass each as a\n"
+                "`--selector`. Never run the whole suite on a change: it runs on a schedule\n"
+                "outside working hours, through `invariant sweep run` on the project's cadence\n"
+                "(`methodology.gates.schedule.cadence_days`).\n"
+                "\n"
+                "The one exception is a touched path under\n"
+                "`methodology.gates.schedule.held_paths`. The project holds those paths back\n"
+                "from its cadence because a change to one can alter what every test sees, so\n"
+                "it owes a full run, the bare `invariant pipeline test` and `invariant\n"
+                "pipeline coverage`, once, on the final tree: a scheduled `test.all_pass`\n"
+                "fails on a scoped green and `coverage.meets_floor` on a scoped coverage run\n"
+                "for it, and `sweep.no_full_run` answers that full run clean.\n"
+                "\n"
+                "If `invariant config show` reports `cadence_days` null, nothing runs the\n"
+                "whole suite. Still run scoped only, and say so in the report: recommend\n"
+                "setting `methodology.gates.schedule.cadence_days` so a sweep scheduled for\n"
+                "the evening holds the gates. Do not run the whole suite in its place.\n"
+                "\n"
+                "Under a cadence, any other full run on a change is exactly what\n"
+                "`sweep.no_full_run` reports (or refuses, at `block`). A scheduled\n"
+                "`coverage.meets_floor` reads the scoped figures as advisory (a lower bound,\n"
+                "shown beside the last sweep's figure for the file), and a scheduled\n"
+                "`test.all_pass` still fails on a red scoped run. A `sweep.fresh` warning\n"
+                "beside a gate says the last sweep is late; it never blocks, and running the\n"
+                "sweep is the project's job, not this change's.\n"
+            ),
+        ),
+        (
+            (
+                "Under a sweep cadence (Phase 5), the run is the scoped one, `invariant pipeline\n"
+                "coverage --selector <the touched files' tests>`; the receipt reads whichever\n"
+                "run is on record."
+            ),
+            (
+                "The coverage run takes `--selector <the affected tests>` as every run in\n"
+                "Phase 5 does, and is bare as above only where a held path owes a full run\n"
+                "(Phase 5); the receipt reads whichever run is on record."
+            ),
+        ),
+    ),
+    "compliance-reviewer": (
+        (
+            (
+                "or the equivalent multi-selection form) — never the bare full-suite invocation."
+            ),
+            (
+                "or the equivalent multi-selection form), recorded with `invariant pipeline\n"
+                "test --selector <affected tests>` and `invariant pipeline coverage --selector\n"
+                "<affected tests>` — the bare full-suite forms only where a held path owes a\n"
+                "full run (below)."
+            ),
+        ),
+        (
+            (
+                "**Scope — affected set, never the full suite locally.** The full suite is the "
+                "job of CI, which runs the entire scheme + the coverage-regression budget on "
+                "every push to the main branch and on PRs. Re-running it here just duplicates "
+                "that long run, so DO NOT. Instead run, via test selection:\n"
+                "\n"
+                "1. The test class for **every touched source file** (the paired test file per "
+                "project convention).\n"
+                "2. The test classes that **exercise the changed component** — its reverse "
+                "dependencies per the dependency graph in the architecture docs (the components "
+                "whose diagrams have an arrow into a touched file). Read the graph; do not "
+                "file-search for callers.\n"
+                "\n"
+                "If a touched file genuinely has cross-cutting reverse deps spanning most of the "
+                "suite (rare — e.g., the dependency container or the central persistence store), "
+                "run that file's direct test class + the handful of integration classes named "
+                "in its doc section, and note in the report that the full regression net is "
+                "delegated to CI on push. Never expand to the bare full-suite run as the local "
+                "gate.\n"
+            ),
+            (
+                "**Scope — the affected set, never the full suite on a change.** The whole "
+                "suite runs on a schedule outside working hours, through `invariant sweep run` "
+                "on the project's cadence (`methodology.gates.schedule.cadence_days`), with or "
+                "without a cadence set. Select, and pass each as a `--selector`:\n"
+                "\n"
+                "1. The tests of **every touched file** (the paired test file per project "
+                "convention), and every touched test file.\n"
+                "2. The tests of **every module that imports a touched module** — its reverse "
+                "dependencies per the dependency graph in the architecture docs (the components "
+                "whose diagrams have an arrow into a touched file). Read the graph; do not "
+                "file-search for callers.\n"
+                "\n"
+                "If a touched file genuinely has cross-cutting reverse deps spanning most of the "
+                "suite (rare — e.g., the dependency container or the central persistence store), "
+                "run that file's direct tests + the handful of integration tests named in its "
+                "doc section, and note in the report that the rest of the regression net is the "
+                "scheduled sweep's.\n"
+                "\n"
+                "A full run, the bare `invariant pipeline test` and `invariant pipeline "
+                "coverage` once on the final tree, is owed only for a touched path under "
+                "`methodology.gates.schedule.held_paths` (below); a Phase 5a receipt whose run "
+                "was that full run already carries it. If `cadence_days` is null, nothing runs "
+                "the whole suite: still run scoped only, say so in the report, and recommend "
+                "setting `cadence_days` so a sweep scheduled for the evening holds the gates. "
+                "Do not run the whole suite in its place.\n"
+            ),
+        ),
+        (
+            (
+                "Record this phase's evidence scoped, with `invariant pipeline test --selector "
+                "<affected tests>` and `invariant pipeline coverage --selector <affected tests>` "
+                "— never the bare forms."
+            ),
+            (
+                "Record this phase's evidence scoped, with `invariant pipeline test --selector "
+                "<affected tests>` and `invariant pipeline coverage --selector <affected tests>` "
+                "— never the bare forms, except for a held path."
+            ),
+        ),
+    ),
+}
+
 #: The sections each shipped agent offers an overlay, in order. A rename here
 #: breaks every overlay that names the old id, so it is pinned.
 ANCHORS = {
@@ -795,6 +967,409 @@ def one_digest_copy(text):
 
 
 
+#: ADR-027 increment 2 (DEC_ADR_027_D22): a session queues its successor and the
+#: oracle starts it. The parent names it under THEN: and reports a stop; the
+#: reviewer queues it before the teardown and commits the repository queue in
+#: the memory/config sync (ruling 7, D8; the user's answers of 2026-11-18).
+QUEUE_SUCCESSOR = {
+    "compliance-reviewer": (
+        (
+            (
+                'Do NOT re-invoke this subagent to "finish the merge", and do not merge or '
+                "tear down by hand."
+            ),
+            (
+                'Do NOT re-invoke this subagent to "finish the merge", and do not merge or '
+                "tear down by hand. (5) Name the work that should run after this session under "
+                "a `THEN:` header (`THEN: <ref> | <brief>`, with `in <project>` when it is "
+                "another project's); in FINAL mode the subagent puts it on the queue with "
+                "`invariant queue add` before the teardown, and the oracle starts it. Never "
+                "start the next session yourself. (6) When you stop for the user, run "
+                "`invariant session report --outcome needs-user --note \"<why>\"`; when the "
+                "session ends unable to land, `--outcome blocked`. Either pauses the project's "
+                "chain until the user resumes it. The subagent never reports."
+            ),
+        ),
+        (
+            (
+                "the memory index (`paths.memory_index`), and the host config directory "
+                "(agents, hooks, settings, the manifest)."
+            ),
+            (
+                "the memory index (`paths.memory_index`), the host config directory (agents, "
+                "hooks, settings, the manifest), and the queue file (`paths.queue`) when "
+                "`invariant config show` reports `records.queue = 'repo'`."
+            ),
+        ),
+        (
+            (
+                "Commit with title style `Memory: <slug> — <hook>` or `Config: <area> — "
+                "<change>`, same trailer convention as Phase 8."
+            ),
+            (
+                "Commit with title style `Memory: <slug> — <hook>`, `Config: <area> — "
+                "<change>` or `Queue: <change>`, same trailer convention as Phase 8."
+            ),
+        ),
+        (
+            "A scope-contamination bail aborts only the memory commit, never the merge.\n",
+            (
+                "A scope-contamination bail aborts only the memory commit, never the merge.\n"
+                "\n"
+                "**The successor (FINAL mode only, after the merge and before Phase 8d).** When "
+                "the invocation names one under `THEN:`, queue it: `invariant queue add <ref> "
+                "--brief \"<brief>\"`, adding `--project <project>` when it names another "
+                "project. Queue it before the teardown, so the oracle never sees the project "
+                "idle in between. Never run `invariant oracle start-session` or `invariant "
+                "session handoff` for it: the oracle starts queued work. A refusal (already "
+                "queued, a closed item, a privacy finding) is `[WARN] successor not queued — "
+                "<reason>` and does not stop the teardown. With no `THEN:`, queue nothing. "
+                "Record it as `SUCCESSOR` under `PLAN` in the Phase 9 report: the entry id, "
+                "`none named`, or the refusal.\n"
+            ),
+        ),
+    ),
+}
+
+
+#: ADR-032 increment 6 (DEC_ADR_032_I6): every queue edit renders the plan page
+#: beside the queue, so the reviewer's memory/config sync commits the two
+#: together.
+ADR_032_I6 = {
+    "compliance-reviewer": (
+        (
+            (
+                "and the queue file (`paths.queue`) when `invariant config show` reports "
+                "`records.queue = 'repo'`."
+            ),
+            (
+                "and the queue file (`paths.queue`) with its plan page (`plan.rst` in the "
+                "docs project's source directory, which every queue edit renders again) "
+                "when `invariant config show` reports `records.queue = 'repo'`."
+            ),
+        ),
+    ),
+}
+
+
+#: ADR-032 increment 4 (DEC_ADR_032_D10, I4): the design agent gives each
+#: component its layer and each arrow its direction, writes a SOLID block naming
+#: the five principles, names each new abstraction's pattern, and edits the
+#: design documents before leaving design; its Boy-Scout pass applies the five
+#: principles. The review agent answers each `solid.*` rule by name, the layer
+#: findings, the pattern rule and both docs-first checks. Both propose every
+#: exception on a user-owned rule with the `guidelines except` line.
+ADR_032_I4 = {
+    "compliance-reviewer": (
+        (
+            (
+                '   - **It prints rules** (a header naming the ruleset and its digest, then each\n'
+                '     rule): the project has a guidelines ruleset. Continue with steps 2 to 4.\n'
+                '     The engine answers for the guideline rules, and they are never\n'
+            ),
+            (
+                '   - **It prints rules** (a header naming the ruleset and its digest, then each\n'
+                '     rule): the project has a guidelines ruleset. Continue with steps 2 to 5.\n'
+                '     The engine answers for the guideline rules, and they are never\n'
+            ),
+        ),
+        (
+            (
+                '   - **It prints `no guidelines ruleset configured; nothing to show`:** the\n'
+                '     project has no ruleset. Skip steps 2 to 4 and review against the\n'
+                '     checklist below, marking every rule by hand.\n'
+                '   - **It exits non-zero:** that is a refusal, not the no-ruleset case, so do\n'
+            ),
+            (
+                '   - **It prints `no guidelines ruleset configured; nothing to show`:** the\n'
+                '     project has no ruleset. Skip steps 2 to 5 and review against the\n'
+                '     checklist below, marking every rule by hand, the five SOLID principles\n'
+                '     included (see "With no ruleset" in step 5).\n'
+                '   - **It exits non-zero:** that is a refusal, not the no-ruleset case, so do\n'
+            ),
+        ),
+        (
+            (
+                '   what the Phase 9 report carries, pasted as printed.\n'
+                '\n'
+            ),
+            (
+                '   what the Phase 9 report carries, pasted as printed.\n'
+                '5. **The default guidelines, answered by name.** Before leaving the review,\n'
+                '   confirm each of these is answered, and say so in the report:\n'
+                '   - **SOLID, one cited verdict per principle:** `solid.single-responsibility`\n'
+                '     (single responsibility), `solid.open-closed` (open/closed),\n'
+                '     `solid.liskov-substitution` (Liskov substitution),\n'
+                '     `solid.interface-segregation` (interface segregation) and\n'
+                '     `solid.dependency-inversion` (dependency inversion), each judged against\n'
+                "     the diff and the architect's SOLID block, each cited to the lines it\n"
+                '     rests on. A `solid.*` rule the ruleset does not carry (the user retired\n'
+                '     or paused it, or it was never adopted) is reported as not in the\n'
+                "     ruleset and owes nothing: the user's ruleset decides.\n"
+                '   - **The layers:** every finding of the derived\n'
+                '     `layers.<layer id>-depends-inward` rules out of step 2, by rule, path\n'
+                "     and line. Each is a `[BLOCKER]` at the map's severity; a baselined one\n"
+                '     is not new. A changed file in no layer is named as unmapped, never a\n'
+                '     finding.\n'
+                '   - **Patterns:** the `patterns.named-or-declined` verdict, citing the\n'
+                "     design's naming of each new abstraction's catalogue pattern\n"
+                '     (`patterns.rst#<id>`) or its sentence on why none fits; where the\n'
+                '     ruleset names no catalogue, the design says `no catalogue configured`.\n'
+                '   - **Docs first:** the `docs.design-before-code` verdict (the design\n'
+                '     documents describe the change and were written before it), and the\n'
+                "     engine's own record of when they changed:\n"
+                '\n'
+                '     ```\n'
+                '     invariant check docs.ahead_of_code\n'
+                '     ```\n'
+                '\n'
+                '     Paste what it prints. A `fail` (the design documents had not changed\n'
+                '     when the build began) is a `[BLOCKER]` you never force past and cannot\n'
+                "     repair by editing docs now: report it `[NEEDS-USER]` with the gate's own\n"
+                '     fix lines. Its N/A (no design state in the methodology, no snapshot) is\n'
+                "     the engine's, pasted as printed.\n"
+                '\n'
+                '   **A rule the user owns is never N/A and never waived.** A rule marked\n'
+                '   `owner: user` (`Owner: user` in `guidelines show`) is answered `pass` or\n'
+                "   `fail`, or N/A only where the engine's own mechanical condition answers\n"
+                '   it; never submit `--status na` on one (the engine refuses it). A finding\n'
+                '   you would otherwise waive is never answered N/A, never downgraded and\n'
+                '   never left out of the report. There are three routes past it, and only\n'
+                '   the first is yours:\n'
+                '\n'
+                '   1. **Fix the code** (Phase 3).\n'
+                '   2. **A user-ruled exception.** Put it under `PROPOSED EXCEPTIONS` in the\n'
+                '      report: the rule, the path, the finding, why an exception is right\n'
+                '      here, and the exact line for the user to run, with `--by` left for the\n'
+                '      user:\n'
+                '\n'
+                '      ```\n'
+                '      invariant guidelines except <rule-id> <path> [--fingerprint <fp>] --by <who> --reason <why>\n'
+                '      ```\n'
+                '\n'
+                '   3. **The user changes the rule**, where the rule itself looks wrong for\n'
+                '      this project rather than for this one path. Propose it the same way:\n'
+                '\n'
+                '      ```\n'
+                '      invariant guidelines loosen <rule-id> --to warn|off --by <who> --reason <why>\n'
+                '      invariant guidelines retire <rule-id> --by <who> --reason <why>\n'
+                '      ```\n'
+                '\n'
+                '   Never run any of the three commands yourself: they ask for the user at a\n'
+                '   terminal. Until the user rules, the finding stays a `[BLOCKER]` at its\n'
+                '   severity and the run bails `[NEEDS-USER]` (Phase 3).\n'
+                '\n'
+                '   **With no ruleset**, nothing can be excepted. Review the five principles\n'
+                '   by hand as checklist lines, named one by one, at the severity the\n'
+                '   checklist gives them or `[WARN]` where it names none; a finding you\n'
+                '   cannot fix is `[NEEDS-USER]`, and the report names\n'
+                '   `invariant guidelines adopt` as how the project gets the default rules.\n'
+                '\n'
+            ),
+        ),
+        (
+            (
+                '- Touched file in a scoped-refactor registry entry — report the recommended consolidation from the registry doc and stop; do not unify the family at commit time.\n'
+                "- Any `[BLOCKER]` you don't know how to fix safely\n"
+            ),
+            (
+                '- Touched file in a scoped-refactor registry entry — report the recommended consolidation from the registry doc and stop; do not unify the family at commit time.\n'
+                '- A finding on an `owner: user` rule that you cannot fix: list it under `PROPOSED EXCEPTIONS` with its `invariant guidelines except` line (Phase 2, step 5), never as `[N/A]`\n'
+                "- Any `[BLOCKER]` you don't know how to fix safely\n"
+            ),
+        ),
+        (
+            (
+                "- Then the `GUIDELINES` block: with a ruleset, the output of `invariant check guidelines.mechanical_clean` and of Phase 2's last `invariant guidelines verdicts show`, each pasted as printed and never re-marked by hand; with none, the no-ruleset line.\n"
+                '- Then the full Phase-2 review report: every rule you evaluated by hand with `[BLOCKER]`, `[WARN]`, `[OK]`, `[N/A]`, or `[NEEDS-USER]` and a one-line finding (with file:line) for each non-`[OK]`/`[N/A]`. Do NOT collapse to "all rules passed" — list each rule line so the user can see what was checked.\n'
+            ),
+            (
+                "- Then the `GUIDELINES` block: with a ruleset, the output of `invariant check guidelines.mechanical_clean` and of Phase 2's last `invariant guidelines verdicts show`, each pasted as printed and never re-marked by hand; with none, the no-ruleset line.\n"
+                '- Then the `DEFAULT GUIDELINES` block (Phase 2, step 5: each `solid.*` rule by name, the layer findings, the pattern rule and both docs-first checks) and the `PROPOSED EXCEPTIONS` block, each finding with its `invariant guidelines except` line, or "none".\n'
+                '- Then the full Phase-2 review report: every rule you evaluated by hand with `[BLOCKER]`, `[WARN]`, `[OK]`, `[N/A]`, or `[NEEDS-USER]` and a one-line finding (with file:line) for each non-`[OK]`/`[N/A]`. Do NOT collapse to "all rules passed" — list each rule line so the user can see what was checked.\n'
+            ),
+        ),
+        (
+            (
+                '  (with no ruleset: no guidelines ruleset configured; nothing to show)\n'
+                '\n'
+            ),
+            (
+                '  (with no ruleset: no guidelines ruleset configured; nothing to show)\n'
+                '\n'
+                'DEFAULT GUIDELINES (Phase 2, step 5)\n'
+                '  solid.single-responsibility   pass   src/foo/Bar.<ext>:12-40\n'
+                '  solid.open-closed             pass   src/foo/Bar.<ext>:44-61\n'
+                '  solid.liskov-substitution     pass   src/foo/Bar.<ext>:12-18\n'
+                '  solid.interface-segregation   pass   src/foo/Bar.<ext>:5-9\n'
+                '  solid.dependency-inversion    pass   src/foo/Bar.<ext>:20-24\n'
+                '  layers.<layer id>-depends-inward   no new finding\n'
+                '  patterns.named-or-declined    pass   <the design doc>:<lines>\n'
+                '  docs.design-before-code       pass   <the design doc>:<lines>\n'
+                '  docs.ahead_of_code            <as printed by invariant check docs.ahead_of_code>\n'
+                '\n'
+                "PROPOSED EXCEPTIONS (the user's to run; never applied by this agent)\n"
+                '  (or "none")\n'
+                '\n'
+            ),
+        ),
+    ),
+    "feature-architect": (
+        (
+            (
+                '1b. **Backlog siblings** — the Phase 1b scan result: every open work item touching the same files/component/surface, each marked `[COMBINED]` / `[DEFERRED — reason]` / `[UNRELATED — reason]`, or "none found".\n'
+                '2. **Affected components** — list each component the change touches, derived from the dependency diagrams (not file search). Mark each `[NEW]`, `[MODIFIED]`, or `[READ-ONLY-DEPENDENCY]`.\n'
+                '   - **Responsibility owner (single source of truth):** for every behavior the task needs, name the component that already *owns* that responsibility in the docs. If an owner exists → reuse / extend it, never fork a parallel implementation. If no owner exists → declare the new owner and document it (a behavior with no documented home is itself a finding). Judge by responsibility + invariants, not surface similarity — similar-looking code answering to a *different* caller stays separate.\n'
+            ),
+            (
+                '1b. **Backlog siblings** — the Phase 1b scan result: every open work item touching the same files/component/surface, each marked `[COMBINED]` / `[DEFERRED — reason]` / `[UNRELATED — reason]`, or "none found".\n'
+                '2. **Affected components** — list each component the change touches, derived from the dependency diagrams (not file search). Mark each `[NEW]`, `[MODIFIED]`, or `[READ-ONLY-DEPENDENCY]`, and give each its **layer**.\n'
+                "   - **Layer:** the layer titles are the project's, from its ruleset's layer map (by default, innermost first: Entities, Use Cases, Interface Adapters, Frameworks & Drivers). Phase 1c printed one derived rule per mapped layer, `layers.<layer id>-depends-inward`, naming its layer and its paths; `invariant guidelines show --phase design --files <path>...` places a file you are not sure of. A component no derived rule covers is written `unmapped`, and a project with no layer map, or an empty one, is said to have none: never invent a layer. Placing an unmapped folder is the project's, so name it in the report rather than choosing for it.\n"
+                '   - **Responsibility owner (single source of truth):** for every behavior the task needs, name the component that already *owns* that responsibility in the docs. If an owner exists → reuse / extend it, never fork a parallel implementation. If no owner exists → declare the new owner and document it (a behavior with no documented home is itself a finding). Judge by responsibility + invariants, not surface similarity — similar-looking code answering to a *different* caller stays separate.\n'
+            ),
+        ),
+        (
+            (
+                '   - **Responsibility owner (single source of truth):** for every behavior the task needs, name the component that already *owns* that responsibility in the docs. If an owner exists → reuse / extend it, never fork a parallel implementation. If no owner exists → declare the new owner and document it (a behavior with no documented home is itself a finding). Judge by responsibility + invariants, not surface similarity — similar-looking code answering to a *different* caller stays separate.\n'
+                '3. **Dependency arrows added / removed / changed** — what the updated diagram will look like.\n'
+                '4. **Data flow** — if the change alters an end-to-end flow, sketch the new flow (textual sequence is fine; the diagram edit lands in Phase 7, or at the end of design under a store docs lock — see Phase 7).\n'
+                "5. **Schema / model deltas** — any persistent-schema change. If yes, you must use the project's documented safe-migration pattern (see Phase 4 and BAIL gate B4) — never a destructive in-place alteration.\n"
+            ),
+            (
+                '   - **Responsibility owner (single source of truth):** for every behavior the task needs, name the component that already *owns* that responsibility in the docs. If an owner exists → reuse / extend it, never fork a parallel implementation. If no owner exists → declare the new owner and document it (a behavior with no documented home is itself a finding). Judge by responsibility + invariants, not surface similarity — similar-looking code answering to a *different* caller stays separate.\n'
+                '3. **Dependency arrows added / removed / changed** — what the updated diagram will look like. Show each new or changed arrow **pointing inward**: from its source\'s layer to the same layer or an inner one, never outward (the direction `layers.<layer id>-depends-inward` enforces). An arrow that would point outward is redesigned (define the shape the inner side needs as an interface there, implement it outward, inject it), or carried as a proposed exception (Phase 4, "Propose, never waive"); it is never written down as a note. Where the project has no layer map, say so and judge direction against the overview\'s layer diagram, if it draws one.\n'
+                '3b. **SOLID** — a block naming the five principles one by one, each with how this design meets it, citing the component or seam it relies on:\n'
+                '   - **Single responsibility** (`solid.single-responsibility`): each unit the change adds or edits answers to one owner, named in the docs.\n'
+                '   - **Open/closed** (`solid.open-closed`): new behaviour arrives as a new implementation, data entry or strategy behind an existing seam, not as a new branch on a kind inside working code.\n'
+                "   - **Liskov substitution** (`solid.liskov-substitution`): every implementation honours its interface's contract, and no caller checks which one it holds.\n"
+                "   - **Interface segregation** (`solid.interface-segregation`): an interface added or widened is shaped by its callers' roles; nothing is forced to stub what it cannot honour.\n"
+                '   - **Dependency inversion** (`solid.dependency-inversion`): policy depends on abstractions it owns, details are injected at the composition root, nothing high-level constructs or looks up a concrete detail.\n'
+                '\n'
+                "   A principle the change does not exercise says so in one line, with the reason. A principle the design cannot meet is a finding: redesign, or propose the exception (Phase 4). Where the ruleset does not carry a `solid.*` rule (the user retired or paused it, or it was never adopted), name the principle as not in the ruleset; it owes no verdict, and the user's ruleset decides.\n"
+                '3c. **Patterns** (`patterns.named-or-declined`) — for each new abstraction (an interface, protocol, base class, or a type that mediates between two others), the catalogue pattern it applies, by its id on the catalogue page (`patterns.rst#<id>`), or one sentence on why none fits. Where the ruleset names no catalogue, write `no catalogue configured` and still say in one sentence what the abstraction is for. No new abstraction: say "none".\n'
+                '4. **Data flow** — if the change alters an end-to-end flow, sketch the new flow (textual sequence is fine; the diagram edit is a design document, so it lands with item 8, before the code).\n'
+                "5. **Schema / model deltas** — any persistent-schema change. If yes, you must use the project's documented safe-migration pattern (see Phase 4 and BAIL gate B4) — never a destructive in-place alteration.\n"
+            ),
+        ),
+        (
+            (
+                "7. **Test plan** — for each touched source file, list the test file the project's conventions pair with it, the test cases you will add, and how they get the file to the configured coverage floor.\n"
+                '8. **Docs to update** — the exact architecture-doc files under `paths.docs` and which diagram blocks change.\n'
+                '9. **Decisions** — end the design phase by declaring every decision it made on the session: `invariant session decisions add <DEC_id>` for one already a need (`invariant docs decision new "<title>"` mints a record page), or `invariant session decisions add --draft "<one line>"` for one not yet written as a need. A draft holds the landing (`docs.decisions_recorded`) until `invariant session decisions resolve <n> <DEC_id>` names its need.\n'
+            ),
+            (
+                "7. **Test plan** — for each touched source file, list the test file the project's conventions pair with it, the test cases you will add, and how they get the file to the configured coverage floor.\n"
+                "8. **Design docs, updated before the code** — the exact architecture-doc files under `paths.docs` and decision records that change, and which diagram blocks and component responsibilities. Write these edits at the end of design, **before the first advance out of the design state** (`invariant pipeline advance <first build state>`): that advance records which design documents differ, and `docs.ahead_of_code` fails a structural change at review whose design documents had not changed by then. The advance prints what it recorded; a notice that none changed means write them now. `docs.design-before-code` is the review's judgement that they describe the change. A methodology with no design state takes no snapshot, and the gate says so itself. Phase 7 then reconciles the docs with what was built.\n"
+                '9. **Decisions** — end the design phase by declaring every decision it made on the session: `invariant session decisions add <DEC_id>` for one already a need (`invariant docs decision new "<title>"` mints a record page), or `invariant session decisions add --draft "<one line>"` for one not yet written as a need. A draft holds the landing (`docs.decisions_recorded`) until `invariant session decisions resolve <n> <DEC_id>` names its need.\n'
+            ),
+        ),
+        (
+            (
+                "With a ruleset, apply every rule Phase 1c printed to every touched file, and for a touched file that read could not see yet, ask for its rules with `invariant guidelines show --phase design --files <path>...`. With no ruleset, read the checklist doc now; it is the canonical checklist shared with `compliance-reviewer` — do **not** keep a private copy here (two inline copies drifted apart before the shared doc existed; that drift is why the single source exists). `invariant rules list` shows the engine-enforced subset and each rule's resolved level. At Boy-Scout time enforce the build-time subset on every touched file: clean architecture & dependency injection, migrations & data safety, the project's documented store/scope invariants, UI rules, testing rules, ecosystem gotchas, and code quality. The coverage floor is handled in Phase 6.\n"
+                '\n'
+            ),
+            (
+                "With a ruleset, apply every rule Phase 1c printed to every touched file, and for a touched file that read could not see yet, ask for its rules with `invariant guidelines show --phase design --files <path>...`. With no ruleset, read the checklist doc now; it is the canonical checklist shared with `compliance-reviewer` — do **not** keep a private copy here (two inline copies drifted apart before the shared doc existed; that drift is why the single source exists). `invariant rules list` shows the engine-enforced subset and each rule's resolved level. At Boy-Scout time enforce the build-time subset on every touched file: clean architecture & dependency injection, migrations & data safety, the project's documented store/scope invariants, UI rules, testing rules, ecosystem gotchas, and code quality. The coverage floor is handled in Phase 6.\n"
+                '\n'
+                "**The five SOLID principles, on every touched file.** Beside the rules Phase 1c printed, judge each touched file against single responsibility, open/closed, Liskov substitution, interface segregation and dependency inversion, by name, as Phase 2's SOLID block judged the design, and against the derived `layers.<layer id>-depends-inward` rules for its layer. A pre-existing violation in a touched file is a REFACTOR-TODO like any other; one that would take a refactor beyond the file is a B3 bail. With no ruleset, they are judged by hand as checklist lines.\n"
+                '\n'
+                '### Propose, never waive\n'
+                '\n'
+                "Some rules are the user's alone to set aside: `guidelines show` marks them `Owner: user` (the five `solid.*` rules, the derived layer rules, `patterns.named-or-declined` and `docs.design-before-code` in the default set). A finding on one of them that you would otherwise waive is never answered N/A, never downgraded and never left out of the report. There are three routes past it, and only the first is yours:\n"
+                '\n'
+                '1. **Fix the code.**\n'
+                '2. **A user-ruled exception.** Put it under `PROPOSED EXCEPTIONS` in the report: the rule, the path, the finding, why an exception is right here, and the exact line for the user to run, with `--by` left for the user:\n'
+                '\n'
+                '   ```\n'
+                '   invariant guidelines except <rule-id> <path> [--fingerprint <fp>] --by <who> --reason <why>\n'
+                '   ```\n'
+                '\n'
+                '3. **The user changes the rule**, where the rule itself looks wrong for this project rather than for this one path. Propose it the same way, naming the line, and leave it to the user:\n'
+                '\n'
+                '   ```\n'
+                '   invariant guidelines loosen <rule-id> --to warn|off --by <who> --reason <why>\n'
+                '   invariant guidelines retire <rule-id> --by <who> --reason <why>\n'
+                '   ```\n'
+                '\n'
+                'Never run any of the three commands yourself: they ask for the user at a terminal. Where the project has no ruleset there is nothing to except; a finding you cannot fix is `[NEEDS-USER]`, and the report names `invariant guidelines adopt` as how the project gets the default rules.\n'
+                '\n'
+            ),
+        ),
+        (
+            (
+                '\n'
+                'For every structural change identified in Phase 2 sections 3 / 4 / 5, update the corresponding doc under `paths.docs`:\n'
+                '\n'
+            ),
+            (
+                '\n'
+                'The design-document edits were written at the end of design (Phase 2 item 8), before the first advance out of the design state. This phase reconciles them with what was built: where the code moved from the design, update the docs to match. For every structural change identified in Phase 2 sections 3 / 4 / 5, the corresponding doc under `paths.docs` must cover:\n'
+                '\n'
+            ),
+        ),
+        (
+            (
+                '    (or "none found")\n'
+                '  Affected components:\n'
+                '    - DetailsSheet                          [NEW]\n'
+                '    - SettingsScreen                        [MODIFIED]\n'
+                '    - ManagementViewModel                   [MODIFIED]\n'
+                '    - Registry                              [READ-ONLY-DEPENDENCY]\n'
+                '  Dependency arrows:\n'
+                '    + SettingsScreen → DetailsSheet (new presentation)\n'
+                '  Data flow:\n'
+            ),
+            (
+                '    (or "none found")\n'
+                '  Affected components (layer):\n'
+                '    - DetailsSheet                          [NEW]                   Interface Adapters\n'
+                '    - SettingsScreen                        [MODIFIED]              Interface Adapters\n'
+                '    - ManagementViewModel                   [MODIFIED]              Use Cases\n'
+                '    - Registry                              [READ-ONLY-DEPENDENCY]  Entities\n'
+                '  Dependency arrows (each inward):\n'
+                '    + SettingsScreen → DetailsSheet (new presentation; same layer)\n'
+                '  SOLID:\n'
+                '    Single responsibility   DetailsSheet only presents; ManagementViewModel owns selection\n'
+                '    Open/closed             new sheet added behind the existing presentation seam\n'
+                '    Liskov substitution     no new implementation of an existing interface\n'
+                '    Interface segregation   DetailsSheet depends on the read role only\n'
+                '    Dependency inversion    the view model receives its store through injection\n'
+                '  Patterns:\n'
+                '    - DetailsSheetPresenting   patterns.rst#gof.strategy  (or: why none fits)\n'
+                '  Data flow:\n'
+            ),
+        ),
+        (
+            (
+                '    - tests/ManagementViewModelTests.<ext>          +N tests → 91%\n'
+                '  Docs to update:\n'
+                '    - <paths.docs>/views doc (add DetailsSheet to view graph)\n'
+            ),
+            (
+                '    - tests/ManagementViewModelTests.<ext>          +N tests → 91%\n'
+                '  Design docs (edited before the first advance out of design):\n'
+                '    - <paths.docs>/views doc (add DetailsSheet to view graph)\n'
+            ),
+        ),
+        (
+            (
+                '  - (each entry: file, checklist rule, what changed)\n'
+                '\n'
+            ),
+            (
+                '  - (each entry: file, checklist rule, what changed)\n'
+                '\n'
+                "PROPOSED EXCEPTIONS (the user's to run; never applied by this agent)\n"
+                '  - solid.open-closed  src/legacy/Router.<ext>: <the finding>; <why an exception is right here>\n'
+                '      invariant guidelines except solid.open-closed src/legacy/Router.<ext> --by <who> --reason "<why>"\n'
+                '  (or "none")\n'
+                '\n'
+            ),
+        ),
+    ),
+}
+
+
 def source_text(name):
     return (LIBRARY / f"{name}.md").read_text(encoding="utf-8")
 
@@ -818,6 +1393,10 @@ def expected_render(name):
         *IDEA_052.get(name, ()),
         *IDEA_051.get(name, ()),
         *BUG_126.get(name, ()),
+        *SCOPED_RUNS.get(name, ()),
+        *QUEUE_SUCCESSOR.get(name, ()),
+        *ADR_032_I4.get(name, ()),
+        *ADR_032_I6.get(name, ()),
     ):
         assert text.count(old) == 1, f"{name}: the rewrite no longer matches {old!r}"
         text = text.replace(old, new)

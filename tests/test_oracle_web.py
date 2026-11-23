@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import time
 import urllib.parse
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -759,6 +760,264 @@ class TestPaired:
         assert tree_fingerprint(*roots, home) == before
 
 
+# -- the last-message excerpt (ADR-029 increment 1, ADR-009 D17) ----------------
+
+LIVE_HOST = "2abd173c-1111-2222-3333-444455556666"
+SECRET = "The token is <script>alert(1)</script> hunter2"
+
+
+@dataclass(frozen=True)
+class _Entry:
+    role: str
+    text: str
+    at: float = 0.0
+    cut: bool = False
+
+
+@dataclass(frozen=True)
+class _Conversation:
+    entries: tuple
+    unreadable: object = None
+
+
+class RecordingTalk:
+    """A ``SessionTalk`` that reads nothing: it records the hosts asked for."""
+
+    def __init__(self, entries=(("user", "Ship it"), ("assistant", SECRET)), fail=False):
+        self.asked: list[str] = []
+        self.entries = tuple(_Entry(role, text) for role, text in entries)
+        self.fail = fail
+        self.unreadable = None
+
+    def conversation(self, host):
+        self.asked.append(host.host_id)
+        if self.fail:
+            raise OSError("the transcript went away")
+        return _Conversation(self.entries, self.unreadable)
+
+
+def _talking_document() -> dict:
+    row = {"kind": "session", "project": "K", "session_id": "s1", "name": "ship-s1",
+           "hosts": [{"host_session_id": LIVE_HOST, "current": True, "alive": True}],
+           "signals": [], "recommendation": None}
+    gone = {"kind": "session", "project": "K", "session_id": "s2", "name": "old-s2",
+            "hosts": [{"host_session_id": "dead", "current": True, "alive": False}],
+            "signals": [], "recommendation": None}
+    return {"now": 1.0, "projects": [{"project": {"key": "K", "name": "Heap", "root": "/r"},
+                                      "rows": [row, gone]}]}
+
+
+def _talking_app(store, talk):
+    return WebApp(store, lambda: _loaded(_talking_document()), [TS4], clock=Clock(),
+                  nonce=lambda: "n", talk=talk)
+
+
+class TestTheExcerpt:
+    def test_the_view_carries_each_live_windows_last_message(self, store):
+        token = _paired(store)
+        talk = RecordingTalk()
+        body = json.loads(_get(_talking_app(store, talk), "/api/state", token=token).body)
+        assert talk.asked == [LIVE_HOST]
+        card = body["view"]["groups"][0]["cards"][0]
+        assert card["excerpt"] == SECRET
+        assert body["view"]["details"]["K|s1"]["last"] == {
+            "claude": SECRET, "you": "Ship it", "head": None}
+        assert body["view"]["details"]["K|s2"]["last"] is None
+
+    def test_it_never_enters_the_document(self, store):
+        token = _paired(store)
+        body = json.loads(_get(_talking_app(store, RecordingTalk()), "/api/state",
+                               token=token).body)
+        assert "hunter2" not in json.dumps(body["document"])
+        assert body["document"] == _talking_document()
+
+    def test_it_is_served_uncached(self, store):
+        token = _paired(store)
+        response = _get(_talking_app(store, RecordingTalk()), "/api/state", token=token)
+        assert response.header("cache-control") == "no-store"
+
+    @pytest.mark.parametrize("path", ["/", "/api/state"])
+    def test_an_unpaired_request_reads_no_transcript(self, store, path):
+        _paired(store)
+        talk = RecordingTalk()
+        response = _get(_talking_app(store, talk), path, token="forged")
+        assert response.status == 401
+        assert talk.asked == []
+        assert b"hunter2" not in response.body
+
+    def test_only_the_state_read_reads_a_transcript(self, store):
+        token = _paired(store)
+        talk = RecordingTalk()
+        app = _talking_app(store, talk)
+        for path in ("/", "/nope", webpage.MANIFEST_PATH):
+            _get(app, path, token=token)
+        assert talk.asked == []
+
+    def test_a_read_that_fails_shows_nothing_for_that_window(self, store):
+        token = _paired(store)
+        talk = RecordingTalk(fail=True)
+        response = _get(_talking_app(store, talk), "/api/state", token=token)
+        assert response.status == 200
+        body = json.loads(response.body)
+        assert talk.asked == [LIVE_HOST]
+        assert body["view"]["details"]["K|s1"]["last"] is None
+
+    def test_a_window_with_no_text_from_claude_shows_nothing(self, store):
+        token = _paired(store)
+        talk = RecordingTalk(entries=(("user", "hello?"),))
+        body = json.loads(_get(_talking_app(store, talk), "/api/state", token=token).body)
+        assert body["view"]["groups"][0]["cards"][0]["excerpt"] is None
+
+    def test_without_a_reader_there_is_no_excerpt(self, store):
+        token = _paired(store)
+        app = WebApp(store, lambda: _loaded(_talking_document()), [TS4], clock=Clock(),
+                     nonce=lambda: "n")
+        body = json.loads(_get(app, "/api/state", token=token).body)
+        assert body["view"]["details"]["K|s1"]["last"] is None
+
+    def test_the_command_hands_its_reader_to_the_page(self, capsys, oracle_web, monkeypatch):
+        talk = RecordingTalk()
+        monkeypatch.setattr(cli_main, "_oracle_talk", lambda: talk)
+        oracle_web.addresses = [TS4]
+        run_cli(capsys, "oracle", "web")
+        assert oracle_web.servers[0].app.talk is talk
+
+    def test_the_real_reader_is_claude_codes(self):
+        from invariant.hosts.claude_code_talk import ClaudeCodeTalk
+
+        assert isinstance(cli_main._real_oracle_talk(), ClaudeCodeTalk)
+
+
+# -- the conversation (ADR-029 increment 2, ADR-009 D17) ------------------------------
+
+
+class TestTheConversation:
+    """``GET /api/session``: one live window's conversation, read on demand (D19 to D22)."""
+
+    def _session(self, store, talk, path="/api/session?row=K%7Cs1", token=None, load=None):
+        app = WebApp(store, load or (lambda: _loaded(_talking_document())), [TS4],
+                     clock=Clock(), nonce=lambda: "n", talk=talk)
+        return _get(app, path, token=token if token is not None else _paired(store))
+
+    def test_it_serves_the_windows_turns_with_the_head(self, store):
+        talk = RecordingTalk(entries=(("user", "Ship it"), ("tool", "Ran ls"),
+                                      ("assistant", SECRET)))
+        response = self._session(store, talk)
+        assert response.status == 200
+        body = json.loads(response.body)
+        assert talk.asked == [LIVE_HOST]
+        assert body["row"] == "K|s1" and body["live"] is True
+        assert body["head"]["kicker"] == "Heap · Conversation"
+        assert [(t["role"], t["text"]) for t in body["turns"]] == [
+            ("user", "Ship it"), ("tool", "Ran ls"), ("assistant", SECRET)]
+        assert body["unreadable"] is False
+        assert body["offered"] == {"send": False, "answer": False, "interrupt": False,
+                                   "why": "reading_only"}
+        assert "nonce" not in body and "sends" not in body and "pending" not in body
+
+    def test_it_is_served_uncached(self, store):
+        response = self._session(store, RecordingTalk())
+        assert response.header("cache-control") == "no-store"
+
+    @pytest.mark.parametrize("token", ["forged", ""])
+    def test_an_unpaired_request_reads_no_transcript(self, store, token):
+        _paired(store)
+        talk = RecordingTalk()
+        app = WebApp(store, lambda: _loaded(_talking_document()), [TS4], clock=Clock(),
+                     nonce=lambda: "n", talk=talk)
+        response = _get(app, "/api/session?row=K%7Cs1", token=token or None)
+        assert response.status == 401
+        assert talk.asked == [] and b"hunter2" not in response.body
+
+    def test_the_same_read_again_is_unchanged_and_carries_no_text(self, store):
+        talk = RecordingTalk()
+        token = _paired(store)
+        first = json.loads(self._session(store, talk, token=token).body)
+        again = json.loads(self._session(
+            store, talk, f"/api/session?row=K%7Cs1&after={first['cursor']}", token=token).body)
+        assert again["unchanged"] is True and again["cursor"] == first["cursor"]
+        assert "turns" not in again and "hunter2" not in json.dumps(again)
+        assert again["head"] == first["head"]
+
+    def test_a_changed_read_is_the_whole_conversation(self, store):
+        talk = RecordingTalk()
+        token = _paired(store)
+        first = json.loads(self._session(store, talk, token=token).body)
+        talk.entries = (*talk.entries, _Entry("assistant", "and one more"))
+        later = json.loads(self._session(
+            store, talk, f"/api/session?row=K%7Cs1&after={first['cursor']}", token=token).body)
+        assert "unchanged" not in later and later["cursor"] != first["cursor"]
+        assert [t["text"] for t in later["turns"]] == ["Ship it", SECRET, "and one more"]
+
+    def test_a_stopped_read_says_it_cannot_read_the_session(self, store):
+        talk = RecordingTalk(entries=(("assistant", "newer"),))
+        talk.unreadable = object()
+        body = json.loads(self._session(store, talk).body)
+        assert body["unreadable"] is True and [t["text"] for t in body["turns"]] == ["newer"]
+        assert body["offered"]["why"] == "unreadable"
+
+    def test_a_read_that_fails_is_unreadable_not_an_error(self, store):
+        body = json.loads(self._session(store, RecordingTalk(fail=True)).body)
+        assert body["unreadable"] is True and body["turns"] == []
+
+    def test_a_gone_window_reads_nothing_and_says_so(self, store):
+        talk = RecordingTalk()
+        body = json.loads(self._session(store, talk, "/api/session?row=K%7Cs2").body)
+        assert talk.asked == []
+        assert body["live"] is False and body["turns"] == []
+        assert body["offered"]["why"] == "gone"
+
+    def test_a_row_that_is_not_there_is_not_found(self, store):
+        talk = RecordingTalk()
+        response = self._session(store, talk, "/api/session?row=K%7Cnope")
+        assert response.status == 404 and talk.asked == []
+
+    def test_a_row_must_be_named(self, store):
+        assert self._session(store, RecordingTalk(), "/api/session").status == 400
+
+    def test_a_load_that_fails_is_unavailable(self, store):
+        def broken():
+            raise OSError("no snapshot")
+
+        response = self._session(store, RecordingTalk(), load=broken)
+        assert response.status == 503
+
+    def test_a_response_is_at_most_512_kib_dropping_the_oldest(self, store):
+        big = "\u00e9" * 19_000
+        talk = RecordingTalk(entries=tuple(("assistant", f"{n} {big}") for n in range(40)))
+        response = self._session(store, talk)
+        body = json.loads(response.body)
+        assert web.SESSION_RESPONSE_CAP == 512 << 10
+        assert len(response.body) <= web.SESSION_RESPONSE_CAP
+        assert body["turns"] and body["turns"][-1]["text"].startswith("39 ")
+        assert not body["turns"][0]["text"].startswith("0 ")
+
+    def test_only_a_get_reads_it(self, store):
+        talk = RecordingTalk()
+        app = WebApp(store, lambda: _loaded(_talking_document()), [TS4], clock=Clock(),
+                     nonce=lambda: "n", talk=talk)
+        response = app.handle(Request("POST", "/api/session?row=K%7Cs1",
+                                      {"host": f"{TS4}:7341",
+                                       "cookie": f"{COOKIE_NAME}={_paired(store)}"}, b""))
+        assert response.status == 405 and talk.asked == []
+
+    def test_without_a_reader_there_is_no_route(self, store):
+        app = WebApp(store, lambda: _loaded(_talking_document()), [TS4], clock=Clock(),
+                     nonce=lambda: "n")
+        assert _get(app, "/api/session?row=K%7Cs1", token=_paired(store)).status == 404
+
+    def test_the_detail_offers_it_only_with_a_reader(self, store):
+        token = _paired(store)
+        body = json.loads(_get(_talking_app(store, RecordingTalk()), "/api/state",
+                               token=token).body)
+        assert body["view"]["details"]["K|s1"]["conversation"] is True
+        assert body["view"]["details"]["K|s2"]["conversation"] is False
+        app = WebApp(store, lambda: _loaded(_talking_document()), [TS4], clock=Clock(),
+                     nonce=lambda: "n")
+        plain = json.loads(_get(app, "/api/state", token=token).body)
+        assert plain["view"]["details"]["K|s1"]["conversation"] is False
+
+
 # -- the page's refresh loop ----------------------------------------------------
 
 
@@ -1129,6 +1388,7 @@ class TestTheCommands:
                                                  monkeypatch):
         monkeypatch.setattr(cli_main, "_oracle_cache",
                             lambda: ScanCache(probe=machine_world["probe"]))
+        monkeypatch.setattr(cli_main, "_oracle_talk", RecordingTalk)
         oracle_web.addresses = [TS4]
         run_cli(capsys, "oracle", "web")
         app = oracle_web.servers[0].app
@@ -1190,7 +1450,7 @@ class TestTheCommands:
         code, out = run_cli(capsys, "oracle", "web", "devices")
         assert code == 0 and device.id in out and "phone" in out
         code, out = run_cli(capsys, "oracle", "web", "devices", "--json")
-        assert json.loads(out) == {"devices": [device.to_dict()], "pending": 0}
+        assert json.loads(out) == {"devices": [{**device.to_dict(), "push": 0}], "pending": 0}
         code, out = run_cli(capsys, "oracle", "web", "revoke", device.id)
         assert code == 0 and "revoked" in out
         code, out = run_cli(capsys, "oracle", "web", "devices")
@@ -1235,7 +1495,7 @@ def test_the_guard_refuses_the_real_tailscale():
 def test_the_web_modules_import_no_host_and_no_toolkit():
     import re
 
-    for name in ("web.py", "webpage.py", "devices.py", "panel.py"):
+    for name in ("web.py", "webpage.py", "devices.py", "panel.py", "talk.py"):
         source = (Path(web.__file__).parent / name).read_text()
         imports = re.findall(r"^\s*(?:from|import)\s+(\S+)", source, re.MULTILINE)
         assert not [i for i in imports if "hosts" in i or "textual" in i or "tui" in i], name
@@ -1737,3 +1997,403 @@ class TestTheHomeScreenApp:
     def test_the_not_paired_page_links_to_the_pairing_form(self, store):
         body = _get(_app(store), "/").body.decode()
         assert 'href="/pair"' in body
+
+
+# -- sending a message (ADR-029 increment 3) -----------------------------------------
+
+
+def _sending_document(waiting=None) -> dict:
+    host = {"host_session_id": LIVE_HOST, "current": True, "alive": True, "pid": 4242,
+            "process_start": "s", "tty": "ttys004", "pid_source": "both", "status": "idle",
+            "attention": {"turn": "ended", "turn_since": "2026-11-20T10:00:00+00:00"}}
+    signals = [{"kind": "waiting", "cause": waiting, "alert": True, "severity": "high"}] \
+        if waiting else []
+    row = {"kind": "session", "project": "K", "session_id": "s1", "name": "ship-s1",
+           "hosts": [host], "signals": signals, "recommendation": None}
+    return {"now": 1.0, "projects": [{"project": {"key": "K", "name": "Heap", "root": "/r"},
+                                      "rows": [row]}]}
+
+
+class Sent:
+    """The talker's world: what was audited, and the sends' loop held back."""
+
+    def __init__(self, document=None):
+        from invariant.oracle.talk import RecordingTalk, Talker
+
+        self.document = document or _sending_document()
+        self.talk = RecordingTalk()
+        self.lines: list[dict] = []
+        self.sender = Talker(self.talk, lambda: self.document, self.lines.append,
+                             attention=lambda project, host: None, typist=None,
+                             background=lambda work: None, token=iter(
+                                 [f"t{n}" for n in range(100)]).__next__)
+
+
+def _sending_app(store, sent, talk=True):
+    return WebApp(store, lambda: _loaded(sent.document), [TS4], clock=Clock(),
+                  nonce=lambda: "n", talk=sent.talk if talk else None, sender=sent.sender)
+
+
+def _talk_post(app, path, body, token, origin=f"http://{TS4}:7341", raw=None,
+               content_type="application/json"):
+    headers = {"host": f"{TS4}:7341", "cookie": f"{COOKIE_NAME}={token}",
+               "content-type": content_type}
+    if origin:
+        headers["origin"] = origin
+    data = raw if raw is not None else json.dumps(body).encode()
+    return app.handle(Request("POST", path, headers, data))
+
+
+class TestSending:
+    def _read(self, app, token):
+        return json.loads(_get(app, "/api/session?row=K%7Cs1", token=token).body)
+
+    def test_the_read_offers_send_with_a_nonce_and_this_devices_sends(self, store):
+        token = _paired(store)
+        sent = Sent()
+        body = self._read(_sending_app(store, sent), token)
+        assert body["offered"] == {"send": True, "answer": False, "interrupt": False,
+                                   "why": None, "running": False}
+        assert body["nonce"] == "t0" and body["sends"] == [] and body["boot"] == sent.sender.boot
+
+    def test_each_read_issues_a_new_nonce_even_unchanged(self, store):
+        token = _paired(store)
+        app = _sending_app(store, Sent())
+        first = self._read(app, token)
+        again = json.loads(_get(app, f"/api/session?row=K%7Cs1&after={first['cursor']}",
+                                token=token).body)
+        assert again["unchanged"] is True and again["nonce"] != first["nonce"]
+        assert again["cursor"] == first["cursor"]
+
+    def test_a_message_is_held_and_listed_for_its_device(self, store):
+        token = _paired(store)
+        sent = Sent()
+        app = _sending_app(store, sent)
+        nonce = self._read(app, token)["nonce"]
+        response = _talk_post(app, "/api/talk", {"row": "K|s1", "nonce": nonce,
+                                                 "kind": "message", "text": "hunter2"}, token)
+        assert response.status == 202 and response.header("cache-control") == "no-store"
+        body = json.loads(response.body)
+        assert body["send"]["state"] == "held" and b"hunter2" not in response.body
+        listed = self._read(app, token)["sends"]
+        assert [s["id"] for s in listed] == [body["send"]["id"]]
+        assert [line["event"] for line in sent.lines] == ["talk-held"]
+
+    def test_a_form_body_is_taken_too(self, store):
+        token = _paired(store)
+        app = _sending_app(store, Sent())
+        nonce = self._read(app, token)["nonce"]
+        raw = urllib.parse.urlencode({"row": "K|s1", "nonce": nonce, "kind": "message",
+                                      "text": "go"}).encode()
+        response = _talk_post(app, "/api/talk", None, token, raw=raw,
+                              content_type="application/x-www-form-urlencoded")
+        assert response.status == 202
+
+    def test_undo_cancels_it(self, store):
+        token = _paired(store)
+        app = _sending_app(store, Sent())
+        nonce = self._read(app, token)["nonce"]
+        held = json.loads(_talk_post(app, "/api/talk", {
+            "row": "K|s1", "nonce": nonce, "kind": "message", "text": "go"}, token).body)
+        response = _talk_post(app, "/api/talk/cancel", {"id": held["send"]["id"]}, token)
+        assert response.status == 200
+        assert self._read(app, token)["sends"] == []
+
+    @pytest.mark.parametrize("origin", [None, "http://evil.example", "null"])
+    def test_a_post_from_another_origin_sends_nothing(self, store, origin):
+        token = _paired(store)
+        sent = Sent()
+        app = _sending_app(store, sent)
+        nonce = self._read(app, token)["nonce"]
+        response = _talk_post(app, "/api/talk", {"row": "K|s1", "nonce": nonce,
+                                                 "kind": "message", "text": "go"}, token,
+                              origin=origin)
+        assert response.status == 403 and sent.lines == []
+
+    def test_a_cross_site_fetch_is_refused(self, store):
+        token = _paired(store)
+        app = _sending_app(store, Sent())
+        headers = {"host": f"{TS4}:7341", "cookie": f"{COOKIE_NAME}={token}",
+                   "content-type": "application/json", "origin": f"http://{TS4}:7341",
+                   "sec-fetch-site": "cross-site"}
+        response = app.handle(Request("POST", "/api/talk", headers, b"{}"))
+        assert response.status == 403
+
+    def test_an_unpaired_post_sends_nothing(self, store):
+        _paired(store)
+        sent = Sent()
+        response = _talk_post(_sending_app(store, sent), "/api/talk", {}, "forged")
+        assert response.status == 401 and sent.lines == []
+
+    def test_only_a_post_reaches_it(self, store):
+        token = _paired(store)
+        assert _get(_sending_app(store, Sent()), "/api/talk", token=token).status == 405
+
+    @pytest.mark.parametrize(("raw", "content_type", "status"), [
+        (b"x" * (32 * 1024 + 1), "application/json", 413),
+        (b"not json", "application/json", 400),
+        (b"[1]", "application/json", 400),
+        (b"{}", "text/plain", 415),
+    ])
+    def test_a_body_it_cannot_take_is_refused(self, store, raw, content_type, status):
+        token = _paired(store)
+        response = _talk_post(_sending_app(store, Sent()), "/api/talk", None, token, raw=raw,
+                              content_type=content_type)
+        assert response.status == status
+
+    def test_a_post_naming_no_row_is_refused(self, store):
+        token = _paired(store)
+        response = _talk_post(_sending_app(store, Sent()), "/api/talk",
+                              {"nonce": "x", "kind": "message", "text": "go"}, token)
+        assert response.status == 400
+
+    def test_a_refusal_is_a_409_with_one_reason(self, store):
+        token = _paired(store)
+        sent = Sent()
+        sent.talk.refusal = "menu_command"
+        app = _sending_app(store, sent)
+        nonce = self._read(app, token)["nonce"]
+        response = _talk_post(app, "/api/talk", {"row": "K|s1", "nonce": nonce,
+                                                 "kind": "message", "text": "/model"}, token)
+        assert response.status == 409
+        assert json.loads(response.body)["reason"] == "menu_command"
+
+    def test_a_window_with_no_terminal_offers_no_send_and_no_nonce(self, store):
+        token = _paired(store)
+        document = _sending_document()
+        document["projects"][0]["rows"][0]["hosts"][0]["tty"] = None
+        body = self._read(_sending_app(store, Sent(document)), token)
+        assert body["offered"]["why"] == "no_tab" and body["nonce"] is None
+
+    def test_a_gone_window_offers_nothing(self, store):
+        token = _paired(store)
+        document = _sending_document()
+        document["projects"][0]["rows"][0]["hosts"][0]["alive"] = False
+        body = self._read(_sending_app(store, Sent(document)), token)
+        assert body["offered"]["why"] == "gone" and body["nonce"] is None
+
+    def test_the_state_carries_the_boot_and_a_waiting_card_offers_reply(self, store):
+        token = _paired(store)
+        sent = Sent(_sending_document(waiting="input"))
+        body = json.loads(_get(_sending_app(store, sent), "/api/state", token=token).body)
+        assert body["boot"] == sent.sender.boot
+        card = body["view"]["groups"][0]["cards"][0]
+        assert card["reply"] == {"text": "Reply…"} and card["tap"] is False
+
+    def test_without_a_reader_there_is_no_sending(self, store):
+        token = _paired(store)
+        app = _sending_app(store, Sent(), talk=False)
+        assert app.sender is None
+        assert _talk_post(app, "/api/talk", {}, token).status == 405
+        assert "boot" not in json.loads(_get(app, "/api/state", token=token).body)
+
+    def test_only_the_talk_routes_take_a_larger_body(self):
+        assert web.body_cap("/api/talk") == 32 * 1024
+        assert web.body_cap("/api/talk/cancel?x=1") == 32 * 1024
+        assert web.body_cap("/api/act") == web.MAX_BODY
+
+    def test_the_command_hands_its_talker_to_the_page(self, capsys, oracle_web,
+                                                      _no_real_talk):
+        oracle_web.addresses = [TS4]
+        run_cli(capsys, "oracle", "web")
+        app = oracle_web.servers[0].app
+        assert app.talk is _no_real_talk and app.sender is not None
+        assert app.sender.talk is _no_real_talk
+
+
+class TestTheTalkerSeams:
+    def test_the_alert_names_the_session_never_the_text(self, _no_real_notifier, tmp_path):
+        index = cli_main._project_index()
+        talker = cli_main._oracle_talker(index, None, dict, _no_real_notifier)
+        talker.alert("Heap", "Ship it")
+        talker.alert("", "Ship it")
+        sent = _no_real_notifier.sent
+        assert (sent[0].title, sent[0].subtitle, sent[0].message) == (
+            "invariant: Heap", "Ship it", "A message from the phone was not confirmed")
+        assert sent[1].title == "invariant"
+
+    def test_a_revoked_device_is_not_paired(self, _no_real_notifier):
+        index = cli_main._project_index()
+        devices = DeviceStore(index.home)
+        device, _ = devices.redeem(devices.issue("phone", ttl=60).code)
+        talker = cli_main._oracle_talker(index, None, dict, _no_real_notifier)
+        assert talker.paired(device.id) is True
+        assert talker.paired("someone-else") is False
+
+    def test_the_typist_is_the_oracle_homes_lock(self, _no_real_notifier):
+        index = cli_main._project_index()
+        talker = cli_main._oracle_talker(index, None, dict, _no_real_notifier)
+        with talker.typist("ttys004"):
+            assert (index.home / "locks" / "type-ttys004.lock").exists()
+
+
+# -- stopping a turn (ADR-029 increment 4) -----------------------------------------------
+
+
+def _running_document() -> dict:
+    document = _sending_document()
+    host = document["projects"][0]["rows"][0]["hosts"][0]
+    host["status"] = "busy"
+    host["attention"] = {"turn": "running", "turn_since": "2026-11-20T10:00:00+00:00"}
+    return document
+
+
+class TestStopping:
+    def _read(self, app, token):
+        return json.loads(_get(app, "/api/session?row=K%7Cs1", token=token).body)
+
+    def test_a_running_turn_offers_stop_and_send_for_when_it_ends(self, store):
+        token = _paired(store)
+        body = self._read(_sending_app(store, Sent(_running_document())), token)
+        assert body["offered"] == {"send": True, "answer": False, "interrupt": True,
+                                   "why": None, "running": True}
+        assert body["nonce"] == "t0"
+
+    def test_a_session_it_cannot_read_still_offers_stop_with_a_nonce(self, store):
+        from types import SimpleNamespace
+
+        token = _paired(store)
+        sent = Sent(_running_document())
+        sent.talk.conversations[LIVE_HOST] = SimpleNamespace(
+            entries=(), unreadable=SimpleNamespace(reason="x", version=None))
+        body = self._read(_sending_app(store, sent), token)
+        assert (body["offered"]["send"], body["offered"]["interrupt"]) == (False, True)
+        assert body["nonce"] == "t0"
+
+    def test_stop_is_held_like_a_message_and_carries_no_text(self, store):
+        token = _paired(store)
+        sent = Sent(_running_document())
+        app = _sending_app(store, sent)
+        nonce = self._read(app, token)["nonce"]
+        response = _talk_post(app, "/api/talk", {"row": "K|s1", "nonce": nonce,
+                                                 "kind": "interrupt"}, token)
+        assert response.status == 202
+        send = json.loads(response.body)["send"]
+        assert (send["kind"], send["state"], send["length"]) == ("interrupt", "held", 0)
+        assert [line["kind"] for line in sent.lines] == ["interrupt"]
+
+    def test_a_window_waiting_for_input_offers_no_stop(self, store):
+        token = _paired(store)
+        body = self._read(_sending_app(store, Sent()), token)
+        assert body["offered"]["interrupt"] is False
+
+
+# -- answering a question (ADR-029 increment 5) -----------------------------------------
+
+
+def _asking_document() -> dict:
+    document = _sending_document(waiting="question")
+    host = document["projects"][0]["rows"][0]["hosts"][0]
+    host["status"] = "waiting"
+    host["attention"] = {"turn": "running", "turn_since": "2026-11-20T10:00:00+00:00",
+                         "waiting": {"kind": "question", "since": "2026-11-20T10:01:00+00:00"}}
+    return document
+
+
+def _question(call="toolu_q1", text="Pick one hue\nThen we go on"):
+    from types import SimpleNamespace as NS
+
+    choices = (NS(label="Crimson", description="red"), NS(label="Teal", description=""))
+    return NS(id=call, kind="question", other=True,
+              questions=(NS(text=text, header="Hue", multi=False, choices=choices),))
+
+
+def _asking(question=None):
+    sent = Sent(_asking_document())
+    sent.talk.questions[LIVE_HOST] = question if question is not None else _question()
+    return sent
+
+
+class TestAnswering:
+    def _read(self, app, token, after=None):
+        path = "/api/session?row=K%7Cs1" + (f"&after={after}" if after else "")
+        return json.loads(_get(app, path, token=token).body)
+
+    def test_the_read_serves_the_question_and_offers_an_answer(self, store):
+        token = _paired(store)
+        body = self._read(_sending_app(store, _asking()), token)
+        assert body["offered"]["answer"] is True and body["nonce"] == "t0"
+        assert body["pending"] == {
+            "kind": "question", "id": "toolu_q1", "unreadable": False,
+            "questions": [{"text": "Pick one hue\nThen we go on", "header": "Hue",
+                           "multi": False, "other": True,
+                           "choices": [{"label": "Crimson", "description": "red"},
+                                       {"label": "Teal", "description": ""}]}]}
+
+    def test_a_question_it_cannot_read_turns_answer_off_and_says_so(self, store):
+        from types import SimpleNamespace
+
+        token = _paired(store)
+        sent = _asking(SimpleNamespace(reason="a new shape", version="2.1.999"))
+        body = self._read(_sending_app(store, sent), token)
+        assert body["pending"] == {"kind": "question", "unreadable": True}
+        assert body["offered"]["answer"] is False
+
+    def test_an_unchanged_read_carries_no_question_and_a_new_one_a_new_cursor(self, store):
+        token = _paired(store)
+        sent = _asking()
+        app = _sending_app(store, sent)
+        first = self._read(app, token)
+        again = self._read(app, token, first["cursor"])
+        assert again["unchanged"] is True and "pending" not in again
+        sent.talk.questions[LIVE_HOST] = _question(call="toolu_q2")
+        assert self._read(app, token, first["cursor"])["cursor"] != first["cursor"]
+
+    def test_a_window_not_waiting_on_a_question_reads_none(self, store):
+        token = _paired(store)
+        sent = Sent()
+        sent.talk.questions[LIVE_HOST] = _question()
+        body = self._read(_sending_app(store, sent), token)
+        assert body["pending"] is None and body["offered"]["answer"] is False
+
+    def test_an_answer_is_held_and_audited_by_index(self, store):
+        token = _paired(store)
+        sent = _asking()
+        app = _sending_app(store, sent)
+        nonce = self._read(app, token)["nonce"]
+        response = _talk_post(app, "/api/talk", {
+            "row": "K|s1", "nonce": nonce, "kind": "question",
+            "answers": [{"choices": [], "other": "my own hue"}]}, token)
+        assert response.status == 202
+        send = json.loads(response.body)["send"]
+        assert (send["kind"], send["state"]) == ("question", "held")
+        assert sent.lines[0]["choice"] == [[2]] and "my own" not in repr(sent.lines)
+
+    def test_an_answer_the_read_did_not_offer_is_refused(self, store):
+        token = _paired(store)
+        app = _sending_app(store, _asking())
+        nonce = self._read(app, token)["nonce"]
+        response = _talk_post(app, "/api/talk", {"row": "K|s1", "nonce": nonce,
+                                                 "kind": "question",
+                                                 "answers": [{"choices": [5]}]}, token)
+        assert response.status == 400 and json.loads(response.body)["reason"] == "answer"
+
+    def test_the_card_waiting_on_it_offers_answer_with_the_question_as_its_note(self, store):
+        token = _paired(store)
+        view = json.loads(_get(_sending_app(store, _asking()), "/api/state",
+                               token=token).body)["view"]
+        card = view["groups"][0]["cards"][0]
+        assert card["answer"] == {"text": "Answer…"} and card["note"] == "Pick one hue"
+        assert card["tap"] is False and card["reply"] is None
+
+    def test_a_card_whose_question_cannot_be_read_says_so_and_opens(self, store):
+        from types import SimpleNamespace
+
+        token = _paired(store)
+        sent = _asking(SimpleNamespace(reason="x", version=None))
+        card = json.loads(_get(_sending_app(store, sent), "/api/state",
+                               token=token).body)["view"]["groups"][0]["cards"][0]
+        assert card["answer"] is None and card["tap"] is True
+        assert card["note"] == "Can't read this prompt here — use the Mac."
+
+    def test_a_question_read_that_raises_costs_only_its_card(self, store):
+        token = _paired(store)
+        sent = _asking()
+
+        def broken(host):
+            raise OSError("gone")
+
+        sent.talk.pending = broken
+        card = json.loads(_get(_sending_app(store, sent), "/api/state",
+                               token=token).body)["view"]["groups"][0]["cards"][0]
+        assert card["note"] == "Can't read this prompt here — use the Mac."

@@ -26,6 +26,7 @@ from urllib.parse import urlsplit
 from . import git, storescan
 from .errors import ManifestError
 from .identity import normalise_origin
+from .privacy import AttributionTrailer
 from .stores import STORE_MANIFEST, read_store_manifest
 
 #: The ruled defaults (ruling 7), in force only in a store project.
@@ -584,7 +585,9 @@ class Push:
         }
 
 
-def push(root: Path, sync: SyncSettings) -> Push:
+def push(
+    root: Path, sync: SyncSettings, trailers: Sequence[AttributionTrailer] = ()
+) -> Push:
     """Publish the store's branch to its remote, once the screen passed it.
 
     Every commit the push would publish is scanned, content and message,
@@ -592,7 +595,9 @@ def push(root: Path, sync: SyncSettings) -> Push:
     linking a remote reads the whole unpublished history, and while
     ``privacy.store.scan: false`` is present the whole history (ruling 10).
     A finding, or a commit the screen cannot read, refuses the push. The
-    store's ``pre-push`` hook screens it again.
+    store's ``pre-push`` hook screens it again. ``trailers`` are the host's
+    attribution trailers, which a message's trailer block may carry
+    (ADR-024 D5); the CLI supplies them.
     """
     root = Path(root)
     out = Push(state="no_remote", store=root.name)
@@ -615,7 +620,7 @@ def push(root: Path, sync: SyncSettings) -> Push:
     out.whole = storescan.relaxation(root).declared
     commits = storescan.outgoing(root, "HEAD", remote, whole=True) if out.whole else pending
     out.commits = len(pending)
-    out.screen = storescan.scan_commits(root, commits or [])
+    out.screen = storescan.scan_commits(root, commits or [], trailers)
     if commits is None:
         out.screen.problem = "git cannot list the store's history"
     if not out.screen.clean:

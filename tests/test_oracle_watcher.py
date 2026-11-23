@@ -192,9 +192,10 @@ class TestNoTestReachesARealOsascript:
         assert subprocess.run(["true"], check=False).returncode == 0
 
     def test_the_real_seam_is_osascript_with_the_hosts_quoting(self):
-        notifier = cli_main._real_oracle_notifier()
-        assert isinstance(notifier, OsascriptNotifier)
-        assert notifier.quote is applescript_string
+        # Since ADR-027 increment 4 the seam fans out; the Mac banner leads it.
+        name, mac = cli_main._real_oracle_notifier().channels[0]
+        assert name == "mac" and isinstance(mac, OsascriptNotifier)
+        assert mac.quote is applescript_string
 
 
 # -- the tick ----------------------------------------------------------------

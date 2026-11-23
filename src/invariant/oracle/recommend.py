@@ -73,6 +73,7 @@ from .signals import (
     ORPHAN_LEFTOVER,
     ORPHAN_UNMANAGED,
     PARKED,
+    STALLED,
     STRANDED,
     STUCK,
     TEARDOWN_PENDING,
@@ -337,7 +338,7 @@ def _for_session(row: Row, has) -> Recommendation | None:
             "see which gates refused, and what clears them",
             (CLI, "pipeline", "gates", "--id", sid), here, RUN,
         )
-    if has(STUCK):
+    if has(STUCK) or has(STALLED):
         return Recommendation(
             "read what the session is being told", (CLI, "context", "--id", sid), here, RUN
         )

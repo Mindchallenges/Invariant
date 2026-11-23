@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -341,6 +342,16 @@ class TestP1:
         assert result.problems == ()
         assert result.record.ruleset == DIGEST
 
+    def test_a_pin_whose_rules_cannot_be_read_names_why(self):
+        """DN-6 as amended (DEC_ADR_012_B115): with the pinned rules unread,
+        every rule is refused while the tree is not the pin, and the reason is
+        named."""
+        drifted = facts(tree_digest=EDITED, pinned_problem="no base recorded")
+        result = checked(sub(citations=(cite(),)), drifted)
+        message = next(p.message for p in result.problems if p.predicate == "P1")
+        assert "no base recorded" in message and EDITED in message and DIGEST in message
+        assert result.record is None
+
     def test_a_submitted_ruleset_must_be_the_trees(self):
         result = checked(sub(citations=(cite(),), ruleset="0123456789ab"))
         assert predicates(result) == ["P1"]
@@ -406,6 +417,64 @@ class TestP1:
         result = checked(sub(citations=(cite(),)), facts(touched=None))
         assert "P1" in predicates(result)
         assert "could not be established" in result.problems[0].message
+
+
+# -- DN-6 as amended for BUG_115 (DEC_ADR_012_B115) -----------------------------------------
+
+#: The tree's ruleset digest once the change has edited it.
+EDITED = "0123456789ab"
+
+
+def pinned(*, without=(), changed=None):
+    """The pinned ruleset's rules by id, as ``core/rules`` reads them at the base."""
+    rules = {r.id: r for r in RULESET_OBJ.rules if r.id not in without}
+    if changed is not None:
+        rules[changed] = replace(rules[changed], statement="Reworded at the pin.")
+    return rules
+
+
+class TestTheAmendedPin:
+    def test_a_rule_the_pin_lacks_is_judged_against_the_tree(self):
+        """BUG_115: a rule the change adds holds no pinned obligation to dodge."""
+        f = facts(tree_digest=EDITED, pinned_rules=pinned(without=("data.single-open",)))
+        result = checked(sub(citations=(cite(),)), f)
+        assert result.problems == ()
+        assert result.record.ruleset == EDITED
+        assert verdicts.judged_against(rule("data.single-open"), f) == EDITED
+
+    def test_a_rule_the_pin_holds_unchanged_is_judged_against_the_pin(self):
+        """D3: an edit elsewhere in the ruleset does not change this rule's obligation."""
+        f = facts(tree_digest=EDITED, pinned_rules=pinned())
+        result = checked(sub(citations=(cite(),)), f)
+        assert result.problems == ()
+        assert result.record.ruleset == DIGEST
+
+    def test_a_rule_the_change_edits_is_still_refused(self):
+        """DN-6's guard: a rule the pin holds, edited by the change, is judged
+        against the pin, which the tree no longer holds."""
+        f = facts(tree_digest=EDITED, pinned_rules=pinned(changed="data.single-open"))
+        result = checked(sub(citations=(cite(),)), f)
+        assert predicates(result) == ["P1"]
+        problem = result.problems[0]
+        assert "data.single-open" in problem.message and "DN-6" in problem.message
+        assert EDITED in problem.message and DIGEST in problem.message
+        assert "restore data.single-open" in problem.fix
+        assert result.record is None
+        assert verdicts.judged_against(rule("data.single-open"), f) is None
+
+    def test_a_submitted_ruleset_must_be_the_one_judged_against(self):
+        f = facts(tree_digest=EDITED, pinned_rules=pinned(without=("data.single-open",)))
+        result = checked(sub(citations=(cite(),), ruleset=DIGEST), f)
+        assert predicates(result) == ["P1"]
+        assert DIGEST in result.problems[0].message and EDITED in result.problems[0].message
+        assert checked(sub(citations=(cite(),), ruleset=EDITED), f).problems == ()
+
+    def test_the_tree_at_the_pin_reads_no_pinned_rules(self):
+        assert verdicts.judged_against(rule("data.single-open"), facts()) == DIGEST
+
+    def test_the_trees_ruleset_stands_for_a_null_pin(self):
+        f = facts(pin=None, tree_digest=EDITED)
+        assert verdicts.judged_against(rule("data.single-open"), f) == EDITED
 
 
 # -- P2, evidence of an allowed kind ---------------------------------------------------------
@@ -774,6 +843,21 @@ def context(root, *, base="master", files=(), **kw) -> RuleContext:
     )
 
 
+#: A judgement rule a change adds to the ruleset the pipeline pinned (BUG_115).
+ADDED_RULE = """\
+  - id: data.added
+    section: data
+    title: A rule the change adds
+    statement: Added by the change under review.
+    severity: blocker
+    phases: [review]
+    applies_to: ["app/*.py"]
+    check:
+      kind: judgement
+      evidence: citation
+      scope: file
+"""
+
 ONE = [{"rule": "data.single-open", "status": "pass",
         "citations": [{"path": "app/m.py", "lines": [2, 2]}], "note": "checked"}]
 
@@ -831,14 +915,64 @@ class TestPlan:
         ran = pipeline(runs=[green(SELECTOR)])
         assert plan_verdicts(context(repo, pipeline=ran), sub_).ok
 
-    def test_a_ruleset_edited_mid_pipeline_is_refused_naming_both(self, repo):
+    def test_a_rule_edited_mid_pipeline_is_refused_naming_both(self, repo):
+        """DN-6's guard, as amended (DEC_ADR_012_B115): the change edits the rule."""
         write(repo, "app/m.py", "one\nTWO\nthree\n")
-        edited = RULESET.replace("title: Style", "title: Styling")
+        edited = RULESET.replace(
+            "No code path holds two store handles at once.", "Two handles are fine."
+        )
         write(repo, RULESET_REL, edited)
         plan = plan_verdicts(context(repo), ONE)
         assert not plan.ok
         new = guidelines.digest_of(edited.encode("utf-8"))
-        assert any(new in line and DIGEST in line for line in plan.problems)
+        assert any(
+            new in line and DIGEST in line and "data.single-open" in line and "DN-6" in line
+            for line in plan.problems
+        )
+
+    def test_an_edit_elsewhere_leaves_a_pinned_rule_answerable_under_the_pin(self, repo):
+        write(repo, "app/m.py", "one\nTWO\nthree\n")
+        write(repo, RULESET_REL, RULESET.replace("title: Style", "title: Styling"))
+        plan = plan_verdicts(context(repo), ONE)
+        assert plan.ok, plan.problems
+        assert plan.records[0].ruleset == DIGEST
+
+    def test_a_rule_the_change_adds_is_recorded_under_the_trees_ruleset(self, repo):
+        write(repo, "app/m.py", "one\nTWO\nthree\n")
+        added = RULESET.replace("  - id: data.design-only", ADDED_RULE + "  - id: data.design-only")
+        write(repo, RULESET_REL, added)
+        plan = plan_verdicts(context(repo), [
+            {"rule": "data.added", "status": "pass",
+             "citations": [{"path": "app/m.py", "lines": [1, 3]}]},
+        ])
+        assert plan.ok, plan.problems
+        assert plan.records[0].ruleset == guidelines.digest_of(added.encode("utf-8"))
+
+    @pytest.mark.parametrize(
+        ("pipe", "base", "why"),
+        [
+            ({"digest": "0" * 12}, "master", "not the pinned"),
+            ({"path": None}, "master", "records no ruleset path"),
+            ({}, "", "no base recorded"),
+            ({}, "no-such-branch", "merge base"),
+            ({"path": "docs/gone.yaml"}, "master", "does not exist"),
+        ],
+    )
+    def test_a_pin_whose_rules_cannot_be_read_refuses_every_rule(self, repo, pipe, base, why):
+        """With the pinned ruleset unreadable, DN-6 refuses as it always did, and says why."""
+        write(repo, "app/m.py", "one\nTWO\nthree\n")
+        added = RULESET.replace("  - id: data.design-only", ADDED_RULE + "  - id: data.design-only")
+        write(repo, RULESET_REL, added)
+        ran = pipeline()
+        ran["ruleset"] = {**ran["ruleset"], **pipe}
+        plan = plan_verdicts(context(repo, base=base, files=["app/m.py"], pipeline=ran), [
+            {"rule": "data.added", "status": "pass",
+             "citations": [{"path": "app/m.py", "lines": [1, 3]}]},
+        ])
+        assert not plan.ok
+        assert any("P1" in line and "DN-6" in line and why in line for line in plan.problems), (
+            plan.problems
+        )
 
     def test_a_null_pinned_digest_compares_against_the_tree(self, repo):
         write(repo, "app/m.py", "one\nTWO\nthree\n")

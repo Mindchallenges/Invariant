@@ -84,7 +84,10 @@ class TestTheLane:
     def test_reading_back_and_going_back_are_ungated(self, make_manifest):
         machine = load_pipeline_machine(make_manifest({}), LANE)
         domain = PipelineDomain(make_manifest({}))
-        assert domain.gates_for("drafting", "reviewing", machine) == ["docs.read_architecture"]
+        assert domain.gates_for("drafting", "reviewing", machine) == [
+            "docs.read_architecture",
+            "docs.ahead_of_code",
+        ]
         assert domain.gates_for("reviewing", "drafting", machine) == []
 
 

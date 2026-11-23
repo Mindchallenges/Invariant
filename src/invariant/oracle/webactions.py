@@ -46,6 +46,14 @@ that changed in between (another window took it) is not started. A start is a
 job like any other, audited, one per project at a time; :meth:`observe` marks
 it once a scan sees its window, so the panel can end its "Starting…" card.
 
+**The chain's actions** (ADR-027 increment 3, ruling 14) take the same path
+as a row's step: the confirm and the action name a chain action by its key
+(``<project>|chain:<action>[:<entry>]``, ``oracle/chainview``) and nothing
+else, the server reads the chain afresh with the reader the CLI injected and
+derives the ``invariant`` argv itself (``chainview.derive``), and a step that
+changed since the confirm is not run. One chain action runs per project at a
+time. A server without a reader offers none of them.
+
 **Before a restart, the actions drain** (BUG_089). When invariant changes
 under the serving process, :meth:`RemoteActions.close` is called: from then
 on no action or start is reserved, and the service restarts only once
@@ -72,7 +80,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import InvariantError, StateError
-from . import panel
+from . import chainview, panel
 from .actions import (
     Actions,
     Outcome,
@@ -86,7 +94,7 @@ from .actions import (
 from .closehost import outcome_word
 from .devices import Device
 from .home import append_private
-from .recommend import INFO, TERMINAL
+from .recommend import INFO, RUN, TERMINAL
 from .scan import row_key
 from .startsession import START, Starter, find_started
 
@@ -400,10 +408,14 @@ class RemoteActions:
         token: Callable[[], str] | None = None,
         ttl: float = CONFIRM_TTL,
         starter: Starter | None = None,
+        chains: chainview.ChainReader | None = None,
     ) -> None:
         self.actions = actions
         #: The CLI's start path; ``None`` and the page offers no start.
         self.starter = starter
+        #: The chain's reader (ADR-027 increment 3); ``None`` and the page shows no
+        #: chain and offers none of its actions.
+        self.chains = chains
         #: A fresh read of the machine: the ``assess`` document, scanned now.
         self.fresh = fresh
         self.audit = audit
@@ -438,15 +450,22 @@ class RemoteActions:
         document, failed = self._document()
         return (find_row(document, key) if document is not None else None), failed
 
+    def read_chains(self, document: dict[str, Any]) -> dict[str, Any] | None:
+        """The chain as ``document``'s projects stand, for the page; ``None`` without a reader."""
+        return self.chains.read(document) if self.chains is not None else None
+
     def confirm(self, device: Device, key: str) -> Answer:
         """What the confirm view shows for row ``key``, and its nonce if it may run.
 
         ``lines`` are the TUI's confirm, word for word; ``words`` are the same
-        step in the panel's words, for the bottom sheet (ADR-009 D6).
+        step in the panel's words, for the bottom sheet (ADR-009 D6). A chain
+        action's key is confirmed by :meth:`_chain_confirm`.
         """
         body: dict[str, Any] = {"row": key, "nonce": None, "refused": None, "lines": [],
                                 "kind": None, "subject": "", "expires_in": None,
                                 "words": None}
+        if chainview.parse_key(key) is not None:
+            return self._chain_confirm(device, key, body)
         row, failed = self._read(key)
         if failed:
             return Answer(HTTPStatus.SERVICE_UNAVAILABLE, {**body, "refused": failed})
@@ -482,6 +501,8 @@ class RemoteActions:
         command, why = self.confirms.spend(nonce, device.id, key)
         if why:
             return _refused(HTTPStatus.FORBIDDEN, why)
+        if chainview.parse_key(key) is not None:
+            return self._chain_act(device, key, command)
         row, failed = self._read(key)
         if failed:
             return _refused(HTTPStatus.SERVICE_UNAVAILABLE, f"{failed}; nothing ran")
@@ -503,6 +524,74 @@ class RemoteActions:
         name = terminal_request(step)[0] if step.kind == TERMINAL else None
         job = self._reserve(device, key, step.subject, step.kind, step.argv, step.cwd,
                             remote_control=name)
+        if isinstance(job, str):
+            return _refused(HTTPStatus.CONFLICT, job)
+        try:
+            self.audit.record(self._entry("start", job, device))
+        except StateError as exc:
+            with self._lock:
+                del self._jobs[job.id]
+            return _refused(HTTPStatus.SERVICE_UNAVAILABLE,
+                            f"the action could not be recorded in the audit log ({exc}); "
+                            f"nothing ran")
+        self.spawn(lambda: self._run(job, step, device))
+        return Answer(HTTPStatus.ACCEPTED, {"job": self.job(device, job.id)})
+
+    # -- the chain's actions (ADR-027 increment 3) -------------------------------
+
+    def _chain_step(self, key: str) -> tuple[Any, str | None, int]:
+        """The step chain action ``key`` runs now, from a fresh read; else why not.
+
+        Returns ``(derived, None, 200)``, or ``(None, reason, status)``.
+        """
+        if self.chains is None:
+            return None, "the chain's actions are not offered here", HTTPStatus.NOT_FOUND
+        document, failed = self._document()
+        if failed:
+            return None, failed, HTTPStatus.SERVICE_UNAVAILABLE
+        project = chainview.parse_key(key)[0]  # type: ignore[index]
+        read = self.chains.read(document, only=project)
+        derived = chainview.derive(read, document, key, self.chains.home)
+        if isinstance(derived, str):
+            return None, derived, HTTPStatus.CONFLICT
+        return derived, None, HTTPStatus.OK
+
+    @staticmethod
+    def _as_step(derived: chainview.Derived) -> Step:
+        return Step(label=derived.action, kind=RUN, argv=derived.argv, cwd=derived.cwd,
+                    subject=derived.name)
+
+    def _chain_confirm(self, device: Device, key: str, body: dict[str, Any]) -> Answer:
+        derived, why, status = self._chain_step(key)
+        if derived is None:
+            return Answer(status if status != HTTPStatus.CONFLICT else HTTPStatus.OK,
+                          {**body, "refused": why})
+        step = self._as_step(derived)
+        body.update(kind=step.kind, subject=step.subject)
+        reason = refusal(step, {})
+        if reason:
+            return Answer(HTTPStatus.OK, {**body, "refused": reason})
+        words = panel.chain_confirm_words(derived.action, derived.name, derived.facts,
+                                          derived.argv, derived.cwd, now=self.clock())
+        confirm = self.confirms.issue(device.id, key, step)
+        return Answer(HTTPStatus.OK, {**body, "lines": confirm_lines(step, None),
+                                      "nonce": confirm.nonce,
+                                      "expires_in": self.confirms.ttl, "words": words})
+
+    def _chain_act(self, device: Device, key: str, command: tuple[Any, ...]) -> Answer:
+        derived, why, status = self._chain_step(key)
+        if derived is None:
+            return _refused(status, f"{why}; nothing ran")
+        step = self._as_step(derived)
+        reason = refusal(step, {})
+        if reason:
+            return _refused(HTTPStatus.CONFLICT, reason)
+        if command_of(step) != command:
+            return _refused(HTTPStatus.CONFLICT,
+                            "the chain changed since it was confirmed; nothing ran. Open it "
+                            "again to see what would run")
+        job = self._reserve(device, chainview.job_row(key), step.subject, step.kind,
+                            step.argv, step.cwd)
         if isinstance(job, str):
             return _refused(HTTPStatus.CONFLICT, job)
         try:
@@ -556,10 +645,13 @@ class RemoteActions:
 
     # -- starting a new session (ADR-009 D16) -------------------------------------
 
-    def confirm_start(self, device: Device, key: str, label: str, prompt: str) -> Answer:
+    def confirm_start(self, device: Device, key: str, label: str, prompt: str,
+                      model: str = "") -> Answer:
         """What the "New session" sheet shows for project ``key``, with its nonce.
 
-        ``label`` blank takes the time; ``prompt`` blank is none. The project
+        ``label`` blank takes the time; ``prompt`` blank is none; ``model``
+        blank takes the configured window model, and the nonce binds the
+        model the sheet shows (DEC_ADR_030_D6). The project
         is resolved from the index by the CLI's path, never from a path the
         client sent, and every refusal is the command's own. Nothing runs.
         """
@@ -574,10 +666,11 @@ class RemoteActions:
             return Answer(HTTPStatus.SERVICE_UNAVAILABLE, {**body, "refused": failed})
         try:
             prepared = self.starter.prepare_in(  # type: ignore[union-attr]
-                document, key, label.strip() or None, prompt or None)
+                document, key, label.strip() or None, prompt or None, model.strip() or None)
         except InvariantError as exc:
             return Answer(HTTPStatus.OK, {**body, "refused": str(exc)})
-        command = (START, key, prepared["label"], prepared["name"], prepared["prompt"])
+        command = (START, key, prepared["label"], prepared["name"], prepared["prompt"],
+                   prepared.get("model"))
         confirm = self.confirms.bind(device.id, _start_row(key), command)
         return Answer(HTTPStatus.OK, {
             **body, "nonce": confirm.nonce, "expires_in": self.confirms.ttl,
@@ -591,12 +684,12 @@ class RemoteActions:
             return _refused(HTTPStatus.FORBIDDEN, why)
         if not command or command[0] != START:
             return _refused(HTTPStatus.FORBIDDEN, "this confirm is not a start; nothing ran")
-        _, _, label, name, prompt = command
+        _, _, label, name, prompt, model = command
         document, failed = self._document()
         if failed:
             return _refused(HTTPStatus.SERVICE_UNAVAILABLE, f"{failed}; nothing ran")
         prepared, moved = self.starter.again(  # type: ignore[union-attr]
-            document, key, label, name, prompt)
+            document, key, label, name, prompt, model)
         if prepared is None:
             return _refused(HTTPStatus.CONFLICT, str(moved))
         job = self._reserve(device, _start_row(key), prepared["project"].get("name") or "",

@@ -147,6 +147,15 @@ class TranscriptIndex(Protocol):
         """
         ...
 
+    def turn_ends(self) -> dict[str, dict[str, Any]]:
+        """Host session id to how its last turn ended, for the hosts whose last
+        turn was a failed request: ``{error, limit, resets_at}`` (ADR-027 D7).
+
+        Optional: an index without it diagnoses no stall, and every stall
+        reads as of no known cause.
+        """
+        ...
+
 
 class HostProcess(Protocol):
     """One running host process, as the host's own per-process record says.
@@ -359,6 +368,21 @@ class ScanCache:
         except Exception:  # noqa: BLE001 - a host format we cannot read costs one column
             return {}
 
+    def transcript_ends(self, root: Path) -> dict[str, dict[str, Any]]:
+        """Host id to how its last turn ended, for the hosts that ended on a
+        failed request (ADR-027 D7). From the same transcript source as
+        :meth:`transcript_activity`; a probe or source without ``turn_ends``,
+        or one that fails, answers nothing.
+        """
+        if self.probe is None:
+            return {}
+        try:
+            source = self._cached("transcripts", str(root), lambda: self.probe.transcripts(root))
+            ends = getattr(source, "turn_ends", None)
+            return dict(ends()) if callable(ends) else {}
+        except Exception:  # noqa: BLE001 - a format we cannot read diagnoses nothing
+            return {}
+
     def host_alive(self, pid: int | None) -> bool | None:
         """Whether ``pid`` is a live host; ``None`` when that cannot be asked.
 
@@ -539,6 +563,11 @@ class HostView:
     #: none, ``None`` when unread: not alive, a pid not verified as this
     #: host's, or a read that could not say (IDEA_035). Names only.
     inherited_env: list[str] | None = None
+    #: How the host's last turn ended, when it ended on a failed request:
+    #: ``{error, limit, resets_at}`` from the probe's transcripts
+    #: (``TranscriptIndex.turn_ends``), else ``None``. What the ``stalled``
+    #: signal's diagnosis reads (ADR-027 D7).
+    turn_end: dict[str, Any] | None = None
 
 
 @dataclass
@@ -620,6 +649,14 @@ class Row:
     #: document when there are none, so a project with no steps reads as
     #: before.
     step_debts: list[dict[str, Any]] = field(default_factory=list)
+    #: On a ``session`` row: the session's latest ``session report``,
+    #: ``{outcome, note, at, state}`` (ADR-027 D11), or ``None`` when it has
+    #: made none. Left out of the row's document when ``None``.
+    report: dict[str, Any] | None = None
+    #: On a ``session`` row: the project's ``oracle.chain.stall_after``, the
+    #: hours it may go without activity before it reads ``stalled`` (ADR-027
+    #: ruling 11). Left out of the row's document when ``None``.
+    stall_after: float | None = None
 
     @property
     def current_host(self) -> HostView | None:
@@ -635,7 +672,18 @@ class Row:
         out = asdict(self)
         if not out["step_debts"]:
             del out["step_debts"]
+        if out["report"] is None:
+            del out["report"]
+        if out["stall_after"] is None:
+            del out["stall_after"]
         return out
+
+
+def _hours(value: Any) -> float | None:
+    """A configured number of hours, or ``None`` for anything else."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def subject_of(kind: str, session_id: str | None, host: str | None, path: str | None) -> str:
@@ -838,6 +886,7 @@ class _ProjectReader:
         self.attention = AttentionStore(self.store)
         self.stages = session_stages(self.sessions.machine)
         self._transcripts: dict[str, float] = {}
+        self._ends: dict[str, dict[str, Any]] = {}
         self._processes: dict[str, list[HostProcess]] = {}
         self._privacy: PrivacyScanner | None = None
         self._docs: dict[str, dict[str, Any]] = {}
@@ -856,6 +905,7 @@ class _ProjectReader:
         records, errors = self._records()
         live = [s for s in records if self.stages.get(s.state, STAGE_EARLY) != STAGE_ENDED]
         self._transcripts = self.cache.transcript_activity(self.root)
+        self._ends = self.cache.transcript_ends(self.root)
         self._processes = self.cache.host_processes()
         self._docs = self._docs_lock(live)
         self._debts = steps_reader.debt_summary(steps_reader.open_debts(self.store))
@@ -910,6 +960,8 @@ class _ProjectReader:
             hosts=hosts,
             docs_lock=self._docs.get(session.id),
             step_debts=[dict(row) for row in self._debts],
+            report=dict(session.reports[-1]) if session.reports else None,
+            stall_after=_hours(self.manifest.get("oracle.chain.stall_after")),
             last_activity=_latest(
                 [session.heartbeat, session.plan_touched]
                 + [h.attention_written for h in hosts]
@@ -993,6 +1045,7 @@ class _ProjectReader:
             attention=record,
             attention_written=written,
             transcript_written=self._transcripts.get(host_id),
+            turn_end=self._ends.get(host_id),
         )
         self._liveness(view, pid, self._processes.get(host_id, []))
         self._inherited(view)

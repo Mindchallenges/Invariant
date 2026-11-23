@@ -537,6 +537,11 @@ text left open:
    :part_of: DEC_ADR_021
    :affects: COMP_CORE_MANIFEST, COMP_CORE_RULINGS, COMP_CORE_RULES, COMP_CMD_RULES, COMP_HOSTS_CLAUDE_CODE
 
+   *Amended 2026-11-22 by* :need:`DEC_ADR_032_D7` *(ADR-032, ruling: user;
+   built in increment 2,* :need:`DEC_ADR_032_I2` *).* ``config.rulings_by_user`` also refuses an agent's edit that
+   adds or changes a ``ruled`` entry in the configured guidelines ruleset or
+   catalogue; its level is unchanged.
+
    - **One module answers what loosens.** ``core/rulings`` holds the
      loosenings, the load's judgement, the plans and the write;
      ``Manifest.validate`` asks it at call time, after the floor. The

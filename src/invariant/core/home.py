@@ -11,6 +11,9 @@ the user level of the configuration is its ``config.yaml``:
     defaults: {...}             # level 5a: below every project's own settings
     repos:                      # repo identity -> the store it uses (D2)
       <identity>: {store: <path>}
+    chain:                      # the machine's own chain limits (ADR-027 D5)
+      machine_cap: 10
+      weekly_usage_max: 95      # the plan's weekly usage that holds auto-starts
 
 The user level holds no project-specific keys except ``repos:`` (D3), so a
 project's policy can never be set by one operator's home directory alone:
@@ -49,7 +52,14 @@ USER_CONFIG = "config.yaml"
 STORE_NAMINGS = ("repo", "url")
 
 #: The keys the user level may hold.
-_TOP_KEYS = ("version", "store_naming", "defaults", "repos")
+_TOP_KEYS = ("version", "store_naming", "defaults", "repos", "chain")
+
+#: The keys of ``chain``: limits that hold for the whole machine, not for one
+#: project, so they live here and nowhere else (ADR-027 D5). ``machine_cap``
+#: is the most oracle-started sessions live at once across every project;
+#: ``weekly_usage_max`` the plan's weekly usage, in percent, at or above which
+#: nothing starts or is proposed on its own (ADR-027 ruling 10).
+_CHAIN_KEYS = ("machine_cap", "weekly_usage_max")
 
 #: Blocks no user default may set: they say what one project IS, and where
 #: its records live, which only that project's own levels may say.
@@ -97,6 +107,8 @@ class UserConfig:
     defaults: dict[str, Any] = field(default_factory=dict)
     repos: dict[str, dict[str, Any]] = field(default_factory=dict)
     store_naming: str = "repo"
+    #: ``chain``, as written: the machine's chain limits (ADR-027 D5).
+    chain: dict[str, Any] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
@@ -130,6 +142,7 @@ def load_user_config(env: Mapping[str, str] | None = None) -> UserConfig:
         defaults=_defaults(raw, where),
         repos=_repos(raw, where),
         store_naming=_store_naming(raw, where),
+        chain=_chain(raw, where),
     )
 
 
@@ -193,6 +206,34 @@ def _repos(raw: Mapping[str, Any], where: str) -> dict[str, dict[str, Any]]:
             )
         found[identity] = dict(entry)
     return found
+
+
+def _chain(raw: Mapping[str, Any], where: str) -> dict[str, Any]:
+    chain = raw.get("chain") or {}
+    if not isinstance(chain, Mapping):
+        raise ManifestError(
+            f"the user config {where}: chain must be a mapping, e.g. {{machine_cap: 10}}"
+        )
+    for key in chain:
+        if key not in _CHAIN_KEYS:
+            raise ManifestError(
+                f"the user config {where}: chain.{key} is not a key this build reads; "
+                f"it reads {', '.join('chain.' + k for k in _CHAIN_KEYS)}"
+            )
+    cap = chain.get("machine_cap")
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+        raise ManifestError(
+            f"the user config {where}: chain.machine_cap is {cap!r}; give a whole "
+            f"number of at least 1"
+        )
+    most = chain.get("weekly_usage_max")
+    if most is not None and (isinstance(most, bool) or not isinstance(most, (int, float))
+                             or not 0 < most <= 100):
+        raise ManifestError(
+            f"the user config {where}: chain.weekly_usage_max is {most!r}; give a "
+            f"percentage above 0 and at most 100"
+        )
+    return dict(chain)
 
 
 def _store_naming(raw: Mapping[str, Any], where: str) -> str:

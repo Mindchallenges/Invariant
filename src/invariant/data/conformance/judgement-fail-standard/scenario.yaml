@@ -1,11 +1,12 @@
 description: >
-  The same judgement fail under the standard profile warns rather than
-  blocks, and the landing keeps it (ADR-012 D5 "The gate", ruling 7, DN-7).
-  The blocker judgement rule app.answer-is-stable is answered in review with
-  a fail cited on the line the change added. The fail is current and fails
-  guidelines.verdicts_complete, which the standard profile holds at warn, so
-  the landing goes through unforced, and its record in the pipeline's
-  evidence still keeps the fail.
+  The same judgement fail under the standard profile (ADR-012 D5 "The gate",
+  ruling 7, DN-7; ADR-032 D7). The blocker judgement rule
+  app.answer-is-stable is answered in review with a fail cited on the line
+  the change added. The fail is current: guidelines.verdicts_complete, which
+  the standard profile holds at warn, only warns, and
+  guidelines.blocking_verdicts, which it holds at block (ADR-032 increment
+  2), refuses the landing. The advance is then forced, and the landing's
+  record in the pipeline's evidence keeps the fail.
 
 manifest:
   version: 1
@@ -48,6 +49,17 @@ steps:
       cwd: "{worktree}"
       tool_name: Task
       tool_input: {subagent_type: feature-architect}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
   - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
   - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
   - kind: write
@@ -60,17 +72,6 @@ steps:
   - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
   - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
   - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
-  - kind: write
-    in: worktree
-    path: docs/architecture/overview.md
-    content: |
-      # Overview
-
-      ```mermaid
-      graph TD
-          APP[app] --> CHECK[check]
-          APP --> ANSWER[answer]
-      ```
   - kind: hook
     in: worktree
     event: post-tool-use
@@ -90,13 +91,17 @@ steps:
            --cite, app.py, "3", "3"]
   - {id: standing, kind: cli, in: worktree, argv: [guidelines, verdicts, show]}
   - {id: land, kind: cli, in: worktree, argv: [pipeline, advance, committed]}
+  - id: forced
+    kind: cli
+    in: worktree
+    argv: [pipeline, advance, committed, --force, --reason, the fail is known]
   - {id: record, kind: cli, in: worktree, argv: [pipeline, status]}
 
 expect:
   gates:
     red: {docs.read_architecture: pass}
     green: {test.new_test_fails: pass}
-    reviewing: {test.all_pass: pass}
+    reviewing: {test.all_pass: pass, docs.ahead_of_code: pass}
     committed:
       test.all_pass: pass
       coverage.meets_floor: pass
@@ -115,6 +120,9 @@ expect:
       guidelines.generated_current: pass
       guidelines.mechanical_clean: pass
       guidelines.verdicts_complete: warn
+      guidelines.blocking_verdicts: block
+      guidelines.user_rules_ruled: pass
   verdicts:
     standing: {app.answer-is-stable: fail}
-  refusals: {}
+  refusals:
+    land: [guidelines.blocking_verdicts]

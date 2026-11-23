@@ -179,8 +179,9 @@ class TestStorePathsAreJoinedOntoTheStore:
 
 class TestTheRecordPathTable:
     def test_every_record_with_paths_is_listed(self):
+        # The queue joined them with ADR-027 D10.
         assert set(RECORD_PATH_KEYS) == {
-            "docs", "backlog", "guidelines", "memory", "reports", "sweeps",
+            "docs", "backlog", "guidelines", "memory", "reports", "sweeps", "queue",
         }
 
     def test_the_policy_files_follow_the_guidelines(self):

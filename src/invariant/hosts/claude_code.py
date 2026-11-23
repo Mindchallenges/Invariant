@@ -63,6 +63,7 @@ from ..core.rules import (
     edit_advisory,
     edit_guidelines,
     evaluate_event,
+    forbidden_entry,
     is_architecture_doc,
     is_exempt_path,
     standdown_in_force,
@@ -210,6 +211,10 @@ class AttentionSignal:
 
     ``kind`` and ``message`` accompany ``waiting``; ``rules`` accompanies
     ``turn-ended`` and names the closeout rules that refused the turn, if any.
+    ``received`` accompanies ``prompt``: the receipt's hash of the prompt as
+    Claude Code reported it (ADR-029 D3), never its text; and ``answered``,
+    for an ``AskUserQuestion`` the person answered: the hash of its answers
+    (ADR-029 D43).
     ``turn-stopped`` is the Stop as it arrives, before the closeout has said
     anything; see :meth:`ClaudeCodeHost.arrival_attention`.
 
@@ -224,6 +229,7 @@ class AttentionSignal:
     message: str | None = None
     rules: tuple[str, ...] = ()
     tasks: tuple[str, ...] = ()
+    received: str | None = None
 
 
 #: ``notification_type`` values as Claude Code sends them.
@@ -416,6 +422,35 @@ ATTRIBUTION_TRAILERS = (
     ),
 )
 
+#: The model a window this host opens runs on where no level sets
+#: ``host.window_model`` (DEC_ADR_030_D2, D6), passed to ``claude`` as
+#: ``--model``. A model name lives here and in configuration, never in the
+#: engine (the user's ruling 5, 2026-11-21).
+WINDOW_MODEL = "opus"
+
+#: The forbidden-model list where no level sets ``host.forbidden_models``
+#: (DEC_ADR_030_D2, the user's ruling 4). Each entry forbids every model whose
+#: name holds it, ignoring case (``core/rules.forbidden_entry``).
+FORBIDDEN_MODELS: tuple[str, ...] = ("haiku",)
+
+
+def forbidden_models(manifest: Manifest | None) -> tuple[str, ...]:
+    """The forbidden-model list in force: the configured one, else this host's default.
+
+    An empty configured list forbids nothing; only an unset one (null) takes
+    the default, so a project can opt out in writing and never by accident.
+    """
+    configured = manifest.get("host.forbidden_models") if manifest is not None else None
+    if configured is None:
+        return FORBIDDEN_MODELS
+    return tuple(str(entry) for entry in configured)
+
+
+def window_model(manifest: Manifest | None) -> str:
+    """The model a window opened in ``manifest``'s project runs on, unless one is chosen."""
+    configured = manifest.get("host.window_model") if manifest is not None else None
+    return str(configured) if configured else WINDOW_MODEL
+
 #: Each neutral capability as this host's tools (ADR-012 D8). ``dispatch`` is
 #: the host's own agent tool, the one :data:`AGENT_TOOLS` names today.
 CAPABILITY_TOOLS = {
@@ -496,6 +531,8 @@ class TierHint:
 class ClaudeCodeHost:
     INSTRUCTION_FILES = INSTRUCTION_FILES
     ATTRIBUTION_TRAILERS = ATTRIBUTION_TRAILERS
+    FORBIDDEN_MODELS = FORBIDDEN_MODELS
+    WINDOW_MODEL = WINDOW_MODEL
 
     def __init__(
         self, root: Path, manifest: Manifest | None = None, *, record: bool = True
@@ -1768,13 +1805,13 @@ class ClaudeCodeHost:
             response = self._post_tool_use(payload, ctx)
             self.attention = _signal_or_none(
                 lambda: _background_launch(payload)
-            ) or AttentionSignal(ATTENTION_ANSWERED)
+            ) or AttentionSignal(ATTENTION_ANSWERED, received=_answer_receipt(payload))
             return response
         if event == "user-prompt-submit":
             response = _context_response("UserPromptSubmit", build_context(ctx))
             self.attention = _signal_or_none(
                 lambda: _task_notification(payload)
-            ) or AttentionSignal(ATTENTION_PROMPT)
+            ) or AttentionSignal(ATTENTION_PROMPT, received=_prompt_receipt(payload))
             return response
         if event == "session-start":
             return _context_response("SessionStart", build_context(ctx, greeting=True))
@@ -2013,6 +2050,38 @@ class ClaudeCodeHost:
         except InvariantError:
             pass
 
+    @staticmethod
+    def _forbidden_dispatch(payload: dict, ctx) -> str | None:
+        """Why a subagent dispatch is refused for its model, or ``None``.
+
+        The launch half of the user's ruling 4 (DEC_ADR_030_D7): the model a
+        dispatch asks for, else the ``model`` line of the agent's installed
+        copy, checked against the forbidden-model list in force. A dispatch
+        whose model this hook cannot see is not refused, and a failure to read
+        anything refuses nothing: the gates still judge what the run was
+        observed on.
+        """
+        agent = dispatched_agent(payload)
+        if agent is None:
+            return None
+        try:
+            manifest = ctx.manifest
+            tool_input = payload.get("tool_input") or {}
+            asked = tool_input.get("model")
+            if not isinstance(asked, str) or not asked:
+                asked = ClaudeCodeHost(manifest.root, manifest)._rendered_model(agent)
+            entries = forbidden_models(manifest)
+        except Exception:  # noqa: BLE001 - a refusal is never a crash of the hook
+            return None
+        entry = forbidden_entry(asked, entries)
+        if entry is None:
+            return None
+        return (
+            f"invariant: {agent} would run on {asked}, and the forbidden-model list "
+            f"forbids it (it holds {entry!r}). Dispatch it on an allowed model, or "
+            f"change host.forbidden_models or host.tier_map."
+        )
+
     def _pre_tool_use(self, payload: dict, ctx) -> dict:
         """The surface where the operator meets the tool, and the only one with
         a human in the loop.
@@ -2030,6 +2099,15 @@ class ClaudeCodeHost:
         cannot soften a rule from inside the call it is refusing. A one-shot
         override granted beforehand is spent here, and spending it is recorded.
         """
+        refused = self._forbidden_dispatch(payload, ctx)
+        if refused is not None:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": refused,
+                }
+            }
         self._docs_lock_access(payload, ctx)
         rule_ctx = ctx.rule_context(payload=payload)
         verdicts = evaluate_event("pre-tool-use", rule_ctx)
@@ -2699,6 +2777,28 @@ def _background_launch(payload: dict) -> AttentionSignal | None:
     if not isinstance(task, str) or not _TASK_ID.match(task):
         return None
     return AttentionSignal(ATTENTION_BACKGROUND_STARTED, kind=kind, tasks=(task,))
+
+
+def _prompt_receipt(payload: dict) -> str | None:
+    """The receipt's hash of the submitted prompt (ADR-029 D3), or ``None``
+    when the payload carries no prompt text. The hash is the talk module's, so
+    the oracle compares like with like; the text goes no further."""
+    from .claude_code_talk import prompt_digest
+
+    prompt = payload.get("prompt")
+    return prompt_digest(prompt) if isinstance(prompt, str) else None
+
+
+def _answer_receipt(payload: dict) -> str | None:
+    """The receipt's hash of an answered question (ADR-029 D43), or ``None``
+    for any other tool call. The hash is the talk module's, so the oracle
+    compares like with like; the answers go no further."""
+    from .claude_code_talk import answer_receipt
+
+    try:
+        return answer_receipt(payload)
+    except Exception:  # noqa: BLE001 - a receipt that cannot be made is none
+        return None
 
 
 def _task_notification(payload: dict) -> AttentionSignal | None:

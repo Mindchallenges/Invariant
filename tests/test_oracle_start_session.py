@@ -346,7 +346,9 @@ class TestTheCommand:
         assert Path(out["cwd"]).resolve() == project.resolve()
         assert out["argv"] == [
             str(macos_with_claude), "--name", out["name"], "--remote-control", out["name"],
+            "--model", "opus",
         ]
+        assert out["model"] == "opus"
         assert list(plan.argv) == out["argv"]
         assert out["successor"] == {"pid": 4242}
         assert out["facts"] == {"open_windows": 0, "uncommitted": 0, "dirty": False}
@@ -660,7 +662,7 @@ class TestConfirmingAgain:
     def _starter(self, taken=(), refuse=None):
         calls = []
 
-        def prepare(key, label, prompt, project):
+        def prepare(key, label, prompt, project, model=None):
             calls.append((key, label, prompt, project))
             if refuse:
                 raise InvariantError(refuse)

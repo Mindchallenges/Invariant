@@ -511,7 +511,10 @@ class TestInstructionBlockRefusals:
 
     def test_an_instruction_file_exempt_from_isolation(self, make_manifest, blocks_tree):
         dom = host_default(make_manifest, blocks_tree, {"instruction_files": [".claude/CLAUDE.md"]})
-        assert "exempt from session isolation" in str(self.refused(dom, insert=(INDEX,)))
+        refused = self.refused(dom, insert=(INDEX,))
+        assert "exempt from session isolation" in str(refused)
+        # A file the project named itself: "none" is not offered (BUG_161).
+        assert "instruction_files: []" not in refused.fix
         assert not (blocks_tree / ".claude/CLAUDE.md").exists()
 
     def test_an_instruction_file_in_a_declared_store_is_refused_unasked(

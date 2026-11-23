@@ -33,6 +33,11 @@ MACHINE_DIR = Path(__file__).resolve().parent.parent / "data" / "machines"
 #: injections are: a machine this library has never seen labels its own states.
 ABANDON_ROLE = "abandon"
 
+#: The role of the state a pipeline DESIGNS in: the one the docs-first read
+#: gate leaves, and the one whose exit into a build state records the design
+#: snapshot ``docs.ahead_of_code`` judges (ADR-032 increment 3).
+DESIGN_ROLE = "design"
+
 #: The role of the state a pipeline LANDS in: the role the landing gates are
 #: injected by, and the one whose entry records the landing's guidelines
 #: decisions in pipeline evidence (ADR-012 DN-7, A4.6).
@@ -54,8 +59,14 @@ LANDING_ROLE = "landing"
 #: change is unfinished was then asked to update the architecture docs before
 #: it could go back and finish it (BUG_037). It now rides ``landing`` as an
 #: ENTRY gate. Same moment on the shipping edge, absent on every other.
+#:
+#: ``docs.ahead_of_code`` (ADR-032 D6, increment 3) rides the review state's
+#: ENTRY: it judges the design snapshot taken when design was left, so it
+#: belongs where the review begins, before the reviewer runs. Entry rather
+#: than exit for BUG_037's reason: a review's retreats owe nothing of it.
 DOCS_FIRST_GATES: dict[str, dict[str, list[str]]] = {
-    "design": {"exit": ["docs.read_architecture"]},
+    DESIGN_ROLE: {"exit": ["docs.read_architecture"]},
+    "review": {"entry": ["docs.ahead_of_code"]},
     "landing": {
         "entry": [
             "docs.updated",
@@ -162,6 +173,10 @@ FRESHNESS_GATE = "sweep.fresh"
 #: ``guidelines.verdicts_complete`` (A4 increment 3), which asks whether every
 #: judgement guideline the change owes a verdict has one that still holds; it
 #: rides the landing entry by role, as ``agents.review_agent_ran`` does (D5).
+#: ADR-032 increment 2 adds ``guidelines.blocking_verdicts`` (the same
+#: standings at blocker, blocking in ``standard``) and
+#: ``guidelines.user_rules_ruled`` (an ``owner: user`` rule changed against
+#: the base branch's copy carries a new ruling, blocking everywhere).
 #: A running pipeline that pinned a ruleset at ``start`` keeps them whatever
 #: the manifest says later (``guidelines=True``).
 GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
@@ -171,6 +186,8 @@ GUIDELINES_GATES: dict[str, dict[str, list[str]]] = {
             "guidelines.generated_current",
             "guidelines.mechanical_clean",
             "guidelines.verdicts_complete",
+            "guidelines.blocking_verdicts",
+            "guidelines.user_rules_ruled",
         ]
     },
 }

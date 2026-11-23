@@ -1429,11 +1429,14 @@ class FakeStarter:
         self.refuse: str | None = None
         self.fail: str | None = None
         self.crash: Exception | None = None
+        #: The model each prepare was asked for, beside ``prepared``.
+        self.models: list = []
 
-    def prepare(self, key, label, prompt, project):
+    def prepare(self, key, label, prompt, project, model=None):
         from invariant.core.errors import UsageError
 
         self.prepared.append((key, label, prompt, project))
+        self.models.append(model)
         if self.refuse:
             raise UsageError(self.refuse)
         if key != "K":
@@ -1448,6 +1451,7 @@ class FakeStarter:
         return {"project": {"key": key, "name": "p", "root": self.cwd, "via": "manual"},
                 "name": name, "label": label, "cwd": self.cwd, "argv": argv,
                 "prompt": prompt, "by_hand": "cd x && claude", "dry_run": False,
+                "model": model or "configured-model",
                 "successor": None,
                 "facts": {"open_windows": windows, "uncommitted": 2, "dirty": True}}
 
@@ -1693,9 +1697,9 @@ def _start_post(app, token, body, origin=ORIGIN):
     return app.handle(Request("POST", "/api/start", headers, json.dumps(body).encode()))
 
 
-def _start_confirm_path(project="K", label="", prompt=""):
+def _start_confirm_path(project="K", label="", prompt="", **more):
     return "/api/start/confirm?" + urllib.parse.urlencode(
-        {"project": project, "label": label, "prompt": prompt})
+        {"project": project, "label": label, "prompt": prompt, **more})
 
 
 class TestStartOverHttp:
@@ -1716,6 +1720,22 @@ class TestStartOverHttp:
         assert response.status == 202, response.body
         assert json.loads(response.body)["job"]["remote_control"] == "p-x"
         assert starting.starter.launched[0]["prompt"] == "go on"
+
+    def test_the_model_the_sheet_showed_is_the_one_started(self, starting, store):
+        """DEC_ADR_030_D6: the nonce binds the model the sheet showed, chosen or not."""
+        app = _app(starting, store)
+        _, token = _paired(store)
+        body = json.loads(_get(app, _start_confirm_path(label="x", model=" chosen "),
+                               token).body)
+        assert body["words"]["model_line"] == "Runs on chosen"
+        _start_post(app, token, {"project": "K", "nonce": body["nonce"]})
+        assert starting.starter.models == ["chosen", "chosen"]
+        assert starting.starter.launched[0]["model"] == "chosen"
+
+        blank = json.loads(_get(app, _start_confirm_path(label="y"), token).body)
+        assert blank["words"]["model_line"] == "Runs on configured-model"
+        _start_post(app, token, {"project": "K", "nonce": blank["nonce"]})
+        assert starting.starter.models[2:] == [None, "configured-model"]
 
     def test_the_confirm_needs_a_project(self, starting, store):
         app = _app(starting, store)
@@ -1805,7 +1825,7 @@ class TestStartThroughTheCommand:
         (plan,) = _no_real_terminal_launch.plans
         assert Path(plan.cwd).resolve() == machine_world["gamma"].root.resolve()
         assert plan.argv[1:] == ("--name", "gamma-flaky", "--remote-control", "gamma-flaky",
-                                 "look at it")
+                                 "--model", "opus", "look at it")
         assert job["ok"] is True and "pid 4242" in job["output"]
         lines = (oracle_home() / AUDIT_FILE).read_text().splitlines()
         assert [json.loads(line)["kind"] for line in lines] == ["start", "start"]

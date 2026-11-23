@@ -8,7 +8,9 @@ One document per host session, ``<state_root>/attention/<host-id>.json``::
      "turn": "running|ended" | null, "turn_since": "<iso>" | null,
      "ended": false,
      "degraded": {"event", "error", "since"} | null,
-     "background": {"<task id>": {"kind": "agent|command", "since"}} | null}
+     "background": {"<task id>": {"kind": "agent|command", "since"}} | null,
+     "prompts": 3 | null, "prompted": "<iso>" | null,
+     "received": {"kind": "message|question", "hash": "<sha256>", "at": "<iso>"} | null}
 
 It answers the questions the session record cannot: is this host sitting on a
 permission prompt, did its last turn end on a refusal, is it still alive, is
@@ -38,6 +40,21 @@ notice the host absorbs into a turn already running fires no hook, so an
 entry can outlive its task; the reader lets an entry lapse once the host has
 been quiet past a threshold (``signals.background_work``), and the ledger is
 bounded here, oldest out.
+
+**The person's prompts** (ADR-027 ruling 21): ``prompts`` counts the turns
+the person started (``UserPromptSubmit`` of a prompt, never a background
+task's notice), and ``prompted`` is when the last one began. The chain step
+reads them to tell a turn the user typed into a landed session's window
+since its teardown, which makes the window the user's. A record written
+before them counts from nothing.
+
+**The receipt** (ADR-029 D3): ``received`` is what the last prompt the host
+reported hashed to, and when: the SHA-256 the host layer computes from the
+prompt as Claude Code reported it, never the text. The oracle's talk path
+compares it with the message it typed; a prompt typed at the Mac replaces it
+as well, which is how a send overtaken there reads as not confirmed. A
+question the person answered records the hash of its answers the same way,
+of the kind ``question`` (ADR-029 D43).
 
 **Keys this build does not know are kept** (the BUG_061 contract), and a record
 that cannot be read is replaced by the next write rather than wedging its host:
@@ -70,6 +87,11 @@ SURFACE_CLI = "cli"
 
 TURN_RUNNING = "running"
 TURN_ENDED = "ended"
+
+#: The kind of input a receipt is for (ADR-029 D3): a message (increment 3),
+#: and a question's answer (increment 5, D43).
+RECEIVED_MESSAGE = "message"
+RECEIVED_QUESTION = "question"
 
 #: What a background ledger entry is: a subagent, or a shell command.
 BACKGROUND_AGENT = "agent"
@@ -106,6 +128,9 @@ class AttentionRecord(PreservesUnknownKeys):
     ended: bool = False
     degraded: dict[str, Any] | None = None
     background: dict[str, Any] | None = None
+    prompts: int | None = None
+    prompted: str | None = None
+    received: dict[str, Any] | None = None
     _extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -152,21 +177,35 @@ class AttentionStore:
 
         self._update(host_id, mutate, pid_source)
 
-    def answered(self, host_id: str, pid_source: PidSource | None = None) -> bool:
+    def answered(self, host_id: str, pid_source: PidSource | None = None,
+                 received: str | None = None) -> bool:
         """A tool finished, so whatever it waited on was answered.
 
         Fires after every tool call, so it reads first and writes only when
-        something is waiting. Returns whether it wrote.
+        something is waiting, or when the tool was a question the person
+        answered: ``received`` is its answers' receipt hash, recorded as
+        ``received`` of the kind ``question`` with the time (ADR-029 D43).
+        Returns whether it wrote.
         """
+        now = self.clock()
+
         def mutate(record: AttentionRecord) -> None:
             record.waiting = None
+            if received:
+                record.received = {"kind": RECEIVED_QUESTION, "hash": received, "at": now}
 
         return self._update(
-            host_id, mutate, pid_source, only_if=lambda r: r.waiting is not None
+            host_id, mutate, pid_source,
+            only_if=None if received else (lambda r: r.waiting is not None)
         )
 
-    def prompt(self, host_id: str, pid_source: PidSource | None = None) -> None:
-        """The person spoke: a turn starts, and every earlier ask is answered."""
+    def prompt(self, host_id: str, pid_source: PidSource | None = None,
+               received: str | None = None) -> None:
+        """The person spoke: a turn starts, and every earlier ask is answered.
+
+        ``received`` is the prompt's receipt hash, recorded as ``received``
+        with the time (ADR-029 D3); without one the last receipt stands.
+        """
         now = self.clock()
 
         def mutate(record: AttentionRecord) -> None:
@@ -176,6 +215,12 @@ class AttentionStore:
             record.blocked = None
             record.degraded = None
             record.ended = False
+            count = record.prompts
+            record.prompts = (count if isinstance(count, int) and not isinstance(count, bool)
+                              else 0) + 1
+            record.prompted = now
+            if received:
+                record.received = {"kind": RECEIVED_MESSAGE, "hash": received, "at": now}
 
         self._update(host_id, mutate, pid_source)
 

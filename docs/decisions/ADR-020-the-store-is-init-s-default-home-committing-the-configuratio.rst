@@ -708,6 +708,12 @@ Decisions
    :amends: DEC_ADR_012_D3, DEC_ADR_012_D13, DEC_ADR_020_I1
    :affects: COMP_CMD_SETUP, COMP_DOMAINS_DOCS, COMP_CORE_GUIDELINES, COMP_CORE_NEEDS, COMP_CORE_RULES
 
+   *Amended 2026-11-22 by* :need:`DEC_ADR_032_D8` *(ADR-032, ruling: user; not
+   yet built).* The starter's ruleset at this place carries the ADR-032 default
+   set rather than the two docs rules, with the pattern catalogue beside it;
+   ``guidelines adopt`` writes the same place for an existing project with no
+   ruleset.
+
    Ruling :ref:`9 <adr-020-ruling-9>`. Built with this record's increment 1
    follow-up (2026-11-11).
 

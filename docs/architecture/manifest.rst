@@ -218,6 +218,13 @@ Full schema
                                   # of text the engine never interprets. Empty
                                   # means the host's default for every agent
                                   # (ADR-012 D9, ruling 10)
+     window_model: null           # the model a window invariant opens runs on,
+                                  # passed as --model; null = the host adapter's
+                                  # default (opus for claude_code). ADR-030 D2, D6
+     forbidden_models: null       # models no development may run on, each a
+                                  # case-insensitive substring of a model's
+                                  # name; null = the adapter's default ([haiku]
+                                  # for claude_code), [] = none. ADR-030 D2 to D7
 
    guidelines:                    # the project's coding guidelines (ADR-012 D3, D13)
      ruleset: null                # path of the one YAML ruleset; null = no
@@ -245,8 +252,9 @@ Full schema
                                   # never exempt from isolation
      instruction_files: null      # the .md files carrying the managed
                                   # guidelines/index block; null = the host
-                                  # adapter's default (CLAUDE.md for claude_code).
-                                  # Generated between the block's markers only
+                                  # adapter's default (CLAUDE.md for claude_code),
+                                  # [] = none (BUG_161). Generated between the
+                                  # block's markers only
      injection:
        max_lines: 40              # cap on the guidelines/index block, the turn
                                   # index and what an edit carries, at least 2
@@ -553,6 +561,8 @@ rather than the project root:
 +----------------+-----------------------------------------------------+
 | ``sweeps``     | ``paths.sweeps``                                    |
 +----------------+-----------------------------------------------------+
+| ``queue``      | ``paths.queue``                                     |
++----------------+-----------------------------------------------------+
 
 ``RECORD_PATH_KEYS`` in ``core/manifest`` is that table, and
 ``store_record_paths`` joins one record's keys onto a store root. A path under
@@ -714,7 +724,11 @@ project (its top level overlaid by the repository's ``store.repos`` block,
 ``ManifestLocation.level``), or the pointer alone. The readers of the base's
 manifest (``guidelines.baseline_only_shrinks``, ``docs.mandate_kept``,
 ``docs.needs``' change, ``config home``, ``docs assess --plan``) read it
-there rather than at ``.claude/invariant.yaml``. A store's base is the
+there rather than at ``.claude/invariant.yaml``. The user level is in no
+base tree, so the guidelines' base reader takes its ``guidelines`` defaults
+as they stand now, beneath the level it reads at the base, and resolves
+``guidelines.baseline`` and ``guidelines.ruleset`` in the working
+configuration's order (D3; :need:`DEC_ADR_014_B141`). A store's base is the
 commit where the session's first docs-lock span began, or the store's HEAD
 for a session that held none; a store manifest missing there fails. A store
 project may set ``guidelines.baseline``; a project defined by a pointer
@@ -746,6 +760,124 @@ copies into the resolved docs location, repo or store, and writes the
 receipt there. Both write this repository's own level: the in-repo
 manifest, or its block in the store. Docs invariant creates go wherever
 ``paths.docs`` / ``records.docs`` resolves; there is no separate setting.
+
+**Built (:need:`ADR-027 <DEC_ADR_027>` increment 1, :need:`DEC_ADR_027_D10`).**
+``queue`` is a record type: the project's queue of work that runs next,
+``paths.queue`` (default ``docs/queue.json``), ``repo`` or ``store``. It is
+the one record with no default location of its own: when no level sets
+``records.queue``, it takes ``records.backlog``'s value as the configuration
+loads (``RECORD_FOLLOWS``), and ``config show`` names it ``default (follows
+records.backlog)``. ``DEFAULTS`` therefore carries no ``records.queue``. A
+store queue is data, like the backlog, so the docs lock never governs it
+(``core/doclock.DATA_RECORDS``). ``store migrate`` does not move the queue's
+file yet; a project that moves its records keeps its queue by moving the
+file by hand.
+
+What the oracle may start (ADR-027)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Built (:need:`ADR-027 <DEC_ADR_027>` increment 1, :need:`DEC_ADR_027_D12`).**
+
+.. code:: yaml
+
+   oracle:
+     chain:
+       queue: auto        # auto | propose | off: work from the queue
+       backlog: auto      # auto | propose | off: backlog work, mirrored or the fallback (inc 5)
+       hours: null        # null (always), or [start, end] in whole local hours
+       daily_cap: 20      # chained starts a local day (increment 2)
+       prompt: null       # a start's first prompt without a brief; null: the shipped one
+       triage_prompt: null  # a failed start's triage brief (ruling 9); null: the shipped one
+       stall_after: 2     # hours without activity before a live session reads stalled (2b)
+       mirror: true       # every open backlog item on the queue (increment 5)
+       mirror_states: null  # null: each item machine's mirror role; or type -> states
+       reproduce_first: true  # a filed bug's entry starts a reproduction first
+       reproduce_prompt: null  # that start's first prompt; null: the shipped one
+       close_ask_after: 5       # minutes a landed window is quiet before it is asked (ruling 21)
+       close_ask_again: 30      # minutes after a "not yet" before it is asked again
+       close_asks: 3            # asks in all, before the user decides
+       close_answer_within: 10  # minutes an ask waits for its answer
+
+``queue`` and ``backlog`` say what the oracle may do with work from each
+source: start it and notify (``auto``), offer it for one tap (``propose``), or
+leave it to the user (``off``). ``hours`` bounds ``auto``: outside
+``[start, end)``, which wraps past midnight when ``start`` is the later hour,
+an ``auto`` start is proposed instead. Whole hours, so no clock time is
+written in a configuration file. Refused at load, naming the key: a mode
+outside the three, ``hours`` that is not two different whole numbers from 0
+to 24, and any other key under ``oracle`` or ``oracle.chain``. Increment 1
+reads these in ``invariant oracle next``; increment 2's chain step acts on
+them.
+
+**Built (increment 2,** :need:`DEC_ADR_027_D16`, :need:`DEC_ADR_027_D19`\ **).**
+``daily_cap`` is a whole number of at least 1: the chained starts the project
+may make in one local calendar day; it holds an ``auto`` start, never a
+proposal or a start the user asks for. ``prompt`` is the first prompt of a
+start whose entry has no brief, a template naming ``{ref}``, ``{title}`` and
+``{entry}``; ``triage_prompt`` is the brief of the triage entry a failed start
+queues (ADR-027 ruling 9), naming ``{ref}``, ``{entry}``, ``{reason}`` and
+``{retry}``. Each is one line (it becomes a first prompt or a queue brief);
+null takes the shipped sentence (``DEFAULT_CHAIN_PROMPT``,
+``DEFAULT_TRIAGE_PROMPT``), and any other placeholder, a format spec, an
+unbalanced brace or a line break is refused at load. A literal brace is
+doubled. Every shipped default, ``DEFAULT_REPRODUCE_PROMPT`` too, opens with
+"First run invariant session start <task>, invariant session isolate
+--execute and invariant session plan add": a chained window binds only to the
+session it starts itself (BUG_158, :need:`DEC_ADR_027_D62`). A project's own
+template is taken as written, so it must carry that step too.
+
+**Built (increment 2b,** :need:`DEC_ADR_027_D26`\ **).** ``stall_after`` is
+the hours, a number above 0, that a live session may go with no transcript
+activity, record change or commit before the oracle's ``stalled`` signal is
+raised on it (:ref:`ruling 11 <adr-027-ruling-11>`); ``0.5`` is half an hour.
+A boolean, zero, a negative number or text is refused at load.
+
+**Built (increment 5,** :need:`DEC_ADR_027_D45`, :need:`DEC_ADR_027_D49`,
+:need:`DEC_ADR_027_D50`\ **).** The whole backlog reaches the chain
+(:ref:`rulings 18 to 20 <adr-027-ruling-18>`), on by default in every project:
+``backlog`` is ``auto``, and governs the entries the backlog mirror writes as
+well as the fallback. ``mirror`` puts every open item in a mirrored state on
+the queue, once, by backlog rank; ``mirror_states`` names those states per
+item type (``{bug: [filed, reproduced]}``), a type it leaves out not mirrored,
+and null takes each machine's ``mirror`` role (the shipped bug machine
+``filed`` and ``reproduced``, ideas ``proposed``, ``accepted`` and
+``in_progress``). ``reproduce_first`` starts an entry naming a bug in a
+``reproduce`` state (``filed``) with ``reproduce_prompt``, a template naming
+``{ref}``, ``{title}``, ``{entry}`` and ``{attempt}``, null for
+``DEFAULT_REPRODUCE_PROMPT``. Refused at load, naming the key: ``mirror`` or
+``reproduce_first`` that is not a boolean, ``mirror_states`` that is not null
+or a mapping of ``idea`` or ``bug`` to a non-empty list of state names, and a
+``reproduce_prompt`` the prompt rules above refuse. A state the machine does
+not have, or a terminal one, is refused when the mirror runs, since a
+project's own machine is read then. A project opts out of any of it here:
+``mirror: false``, ``backlog: propose`` or ``off``, ``reproduce_first: false``.
+
+**Built (ruling 21, IDEA_062,** :need:`DEC_ADR_027_D60`\ **).** A landed
+chained session's window is asked whether it may close once it has been quiet
+``close_ask_after`` minutes; after a "not yet" it is asked again
+``close_ask_again`` minutes later, ``close_asks`` times in all; and an ask
+with no answer within ``close_answer_within`` minutes goes to the user with
+Close and Leave open. The three times are minutes, numbers above 0;
+``close_asks`` is a whole number of at least 1. A boolean, zero, a negative
+number or text is refused at load. They are read when the window lands, so a
+change applies from the next one.
+
+The machine's own limits are not a project's: ``chain.machine_cap`` (default
+10), the most chained sessions live at once across every project, and
+``chain.weekly_usage_max`` (default 95, increment 2b,
+:need:`DEC_ADR_027_D25`), the plan's weekly usage in percent at or above
+which nothing starts or is proposed on its own, are a top-level block of the
+user level, ``~/.invariant/config.yaml``, beside ``defaults`` and ``repos``:
+
+.. code:: yaml
+
+   chain:
+     machine_cap: 10
+     weekly_usage_max: 95
+
+Any other key under ``chain``, a cap that is not a whole number of at least
+1, or a weekly maximum that is not a percentage above 0 and at most 100, is
+refused naming the file.
 
 Agents: the library, the project's own, and overlays
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -834,6 +966,20 @@ writes no line, so an empty map leaves the render alone. A value is written bare
 where it reads back as itself and as a double-quoted scalar where it would not,
 so ``x: y`` keeps the frontmatter valid (ADR-012, "As built: A7 increment 2").
 
+**The window model and the forbidden list** (:need:`DEC_ADR_030_D2` to
+:need:`DEC_ADR_030_D7`). ``host.window_model`` is the model every window
+invariant opens runs on: ``oracle start-session``, chained, triage and
+reproduce starts, the dashboard's terminal step and ``session handoff`` all
+pass it to the host as ``--model``, unless the person chose one at a start.
+``host.forbidden_models`` lists the models no development may run on: a
+window or a dispatch asking for one is refused, and a design, review or repro
+agent the audit observed on one fails the gate its work would satisfy. An
+entry forbids every model whose name holds it, ignoring case. Both are null in
+the engine's defaults, which means the host adapter's own (``opus`` and
+``[haiku]`` for Claude Code), so core holds no model name; ``[]`` forbids
+nothing. Both resolve at the user level like any key, so one ``defaults:``
+entry in ``~/.invariant/config.yaml`` covers every project.
+
 A copy nobody touched that differs from today's render only in that line reads
 ``tier hint moved``. It is not drift: ``agents.rendered_current`` and ``doctor``'s
 ``library agents current`` row read it as current, while ``agents install`` still
@@ -863,7 +1009,12 @@ inside it is generated. Render rewrites the text between the block's markers
 and nothing else, never inserts a block without ``--insert``, and skips a block
 edited by hand unless ``--overwrite-local`` (cli.md, Guidelines). It refuses an
 instruction file that is exempt, outside the project, not markdown, or the
-ruleset or checklist itself. A null value is the host adapter's default. The
+ruleset or checklist itself. A null value is the host adapter's default, and
+an empty list means no instruction file at all (BUG_161): render writes the
+checklist and no block, and the drift rule checks the checklist alone. That is
+how a project whose host default is exempt from isolation (a ``CLAUDE.md`` in
+``session.exempt_paths``) renders at all, so the refusal for an exempt default
+names ``instruction_files: []`` as its fix. The
 CLI supplies it from the adapter for ``host.kind``, on the rule context, to the
 pipeline domain and to the oracle's gate cache, because nothing below the CLI
 imports a host, and a host kind with no adapter has none. The drift rule,
@@ -873,7 +1024,9 @@ would write. These files are also where the always-layer warning looks (A5
 increment 4): with ``always`` rules in the ruleset and no block in any of them,
 ``doctor`` warns and the drift rule notes it, naming the files and
 ``invariant guidelines render --insert guidelines/index``; with no file to look
-in, the fix names this key.
+in, the fix names this key. An explicit empty list is the one exception: the
+project chose no standing block, as under ``records.agents: local``, so there
+is no warning and the turn index carries the always rules by design.
 
 ``guidelines.baseline`` is the third key of that kind (A3 increment 5,
 ADR-012 D6). It is the ratchet's record: one line per (rule, path,
@@ -1287,6 +1440,16 @@ earlier one. Its keys are the repository's (``patterns``, ``extra``,
   A commit's message is always read. The repository's own content is scanned
   only as far as the scope its levels name, as before: the store's default is
   not merged into anyone's configuration.
+- **A message is read as a repository commit's is** (DEC_ADR_024_D5,
+  BUG_133): the host's declared attribution trailer passes in the message's
+  trailer block, and nowhere else ("Privacy allow", below). ``privacy.clean``'s
+  store route takes the declarations of the host the project resolves, from
+  the rule context; the commit hooks, the ``pre-push`` hook and the push run
+  with no project, and take those of the host the store's own level names in
+  ``host.kind``, over the user level and the defaults. The ``commit-msg``
+  hook reads the message file as bytes, so a line break git does not make
+  reaches the scan and admits nothing, and a message holding a comment line,
+  which git keeps under ``-m`` and ``-F``, admits nothing either.
 - **Where it runs.** ``store push``, push after landing and the store's
   ``pre-push`` hook scan every outgoing commit, the first push after linking a
   remote the whole unpublished history; a finding refuses the push. The
@@ -1341,7 +1504,15 @@ N/A for a path under memory, the backlog, reports or sweeps kept in the store,
 so a session holding no unit writes them, and ``docs lock`` refuses them as
 units (increment 4a). The policy records kept there, ``docs`` and
 ``guidelines``, are what the lock governs, with any path a declared area
-matches. Policy records are never exempt. A whole session in a store project, start to merge, is proved by
+matches, and the store's own ``invariant.yaml``, which holds the guidelines'
+``baseline`` and ``ruleset`` keys since increment 4c-2 (:need:`DEC_ADR_014_B143`):
+a host's Read or edit of it takes its unit, ``file:invariant.yaml`` unless a
+declared area matches it. The CLI's own writes of that file, ``rules loosen``
+and ``rules carry-over`` at the user's terminal and ``store migrate`` under
+its session, take no unit for it and are never refused by the lock; a
+session that holds the unit cannot ``docs unlock`` while such a write is left
+uncommitted in the store, as for a doc edited by hand there. Policy records
+are never exempt. A whole session in a store project, start to merge, is proved by
 increment 2's repository proof, which the user runs on a named repository.
 
 A declared path means the same thing however it is spelled
@@ -1578,8 +1749,9 @@ Seven properties are deliberate:
   needed, and nothing reaches further: the same link in the body, after the
   block, under another token or with more after the session id is a finding,
   as is a forged link under the host's token, and a document, memory, report
-  or staged file is read as before. A store commit's message is still read
-  without the declarations (BUG_133).
+  or staged file is read as before. A store commit's message is read the same
+  way, by ``privacy.clean`` and by the store's own screen (DEC_ADR_024_D5; "A
+  store's privacy screen", above).
 - **A scoped entry needs a place.** Text scanned without a path — a commit
   message, a handoff note, a guidelines verdict note, a value the oracle
   masks — is reached by plain values only. The sweep used to scan its commit
@@ -2191,7 +2363,7 @@ only ever warns, and the engine holds that ruling at load rather than in prose.
 ``guidelines`` must be a mapping whose keys this build reads (``ruleset``,
 ``baseline``, ``checklist``, ``instruction_files``, ``injection`` and ``verdicts``). ``ruleset``,
 ``baseline`` and ``checklist`` are each null or a non-empty path, and ``instruction_files`` is null or a
-non-empty list of them; a bare string is refused, as for every declared list.
+list of them, empty meaning none (BUG_161); a bare string is refused, as for every declared list.
 ``records`` is checked as "Records and their locations" above describes.
 ``injection`` is a mapping whose keys are ``max_lines``, an integer of at least
 2 (the block's header and the line that counts what the cap left out), and
@@ -2227,12 +2399,14 @@ of ``light``, ``standard`` or ``deep``, and each name must be in ``library``: a 
 agent is refused with the fix to remove it, and any other name with the fix to
 add it to ``library`` or remove its tier.
 
-``host`` must be a mapping whose keys this build reads (``kind`` and ``tier_map``). Any
+``host`` must be a mapping whose keys this build reads (``kind``, ``tier_map``,
+``window_model`` and ``forbidden_models``). Any
 other key is refused by name, because it would load and do nothing, so a
 downstream manifest with a stray host key now fails at load (the A7 ruling 14).
 ``tier_map`` is a mapping whose keys are tiers and whose values are each one line
 of text: empty, not a string, or holding a line break, a trailing one included,
-is refused. What a value says is never checked. ``kind`` is not judged at load:
+is refused. ``window_model`` is null or one such line, and ``forbidden_models``
+null or a list of them (ADR-030 D2). What a value says is never checked. ``kind`` is not judged at load:
 the commands that need an adapter refuse a kind with none, by name.
 
 **Built (:need:`ADR-021 <DEC_ADR_021>` D1, D2, increment 1).** ``steps`` is
@@ -2456,6 +2630,8 @@ always sit side by side. Its shape:
      methodology: {gates: {coverage_min: 85}}
    repos:                    # identity -> store (D2); read and checked
      github.com/acme/widgets: {store: ~/.invariant/stores/widgets}
+   chain:                    # the machine's chain limit (ADR-027 D5, increment 2)
+     machine_cap: 10
 
 Its ``defaults`` are merged as layer 5a, **below** the project's own manifest,
 for in-repo projects too (ruling 19), so a key the project sets always wins.
@@ -2468,10 +2644,15 @@ row lists every one with its key, or says there is none
 (``Manifest.user_level_values``). A default a higher level overrides changed
 nothing, so it is in neither.
 
+``chain`` is the one block that is the machine's, not a default for every
+project: ``machine_cap`` bounds the chained sessions live at once across every
+project (:need:`DEC_ADR_027_D16`), which no project's level could say.
+
 The user level holds no project-specific keys except ``repos:`` (D3), so a
 project's policy is never set by one operator's home directory alone. Refused
 at load, naming the file: a key other than ``version``, ``store_naming``,
-``defaults`` and ``repos``; another version; ``defaults.project`` and
+``defaults``, ``repos`` and ``chain``; another version; a ``chain`` key other
+than ``machine_cap``, or a cap that is not a whole number of at least 1; ``defaults.project`` and
 ``defaults.records``, which say what one project is and where its records live;
 a ``repos`` entry that is not a mapping naming a ``store`` path and nothing else;
 and a ``store_naming`` other than ``repo`` or ``url``. A file that exists and cannot

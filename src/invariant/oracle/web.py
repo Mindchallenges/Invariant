@@ -22,8 +22,55 @@ in ADR-008. In short:
   /api/job`` is its result. ``GET /api/start/confirm`` and ``POST
   /api/start`` are the "New session" sheet's confirm and start, the same way:
   a registered project's key and a nonce, never a path (IDEA_030, ADR-009
-  D16). The home-screen app's manifest and icons
+  D16). A chain action (ADR-027 increment 3) is confirmed and run on the same
+  two routes, named by its chain key, and ``/api/state`` carries the chain's
+  read in the view. The home-screen app's manifest and icons
   (ADR-009 D10) are served under the same token, and read nothing.
+* **A live window's last message is read for the view, never the document**
+  (ADR-029 increment 1, ADR-009 D17). With a ``SessionTalk`` (``oracle/talk``,
+  injected by the CLI), ``/api/state`` reads each live window's conversation
+  through it, once the token has verified, and hands the panel each row's
+  last message. The ``assess`` document it serves beside the view never holds
+  it, the response is ``no-store`` like every other, and nothing here keeps
+  it after the response. A read that fails shows nothing for that window.
+* **A live window's conversation is read on demand** (ADR-029 increment 2).
+  ``GET /api/session?row=<key>[&after=<cursor>]``, behind the token like
+  every route, reads that one window through the same seam when the page asks:
+  its newest turns (``oracle/talk.turns``), the screen's head
+  (``oracle/panel.conversation_head``) and what the page may do (nothing, in
+  this increment, and why). ``after`` is the cursor the last answer carried;
+  a read that finds the same answers ``unchanged`` and no text. A response is
+  at most :data:`SESSION_RESPONSE_CAP`, the oldest turns dropped to fit. A
+  read that fails is "cannot read", never an error page, and a window that is
+  gone reads nothing.
+* **A paired device sends a live window a message** (ADR-029 increment 3).
+  With a :class:`~invariant.oracle.talk.Talker` (``sender``), ``/api/session``
+  also carries what the page may send and why not, this device's sends to the
+  row with their states, and a one-tap talk nonce bound to the fingerprint
+  that read saw; ``POST /api/talk`` holds a message for its Undo window and
+  ``POST /api/talk/cancel`` undoes it, both from the page's own origin, with a
+  body of at most :data:`~invariant.oracle.talk.BODY_CAP`. ``/api/state``
+  carries the sender's boot id, so a page holding a send from an older boot
+  shows it dropped. The text is held in memory until typed, and never logged.
+* **A paired device stops a running turn** (ADR-029 increment 4). The same
+  read offers ``interrupt`` while a turn runs and issues the nonce for it even
+  where send is off; ``POST /api/talk`` with ``kind: interrupt`` and no text
+  holds it for the same Undo window.
+* **A paired device answers a question** (ADR-029 increment 5). While the
+  window's record says a question waits, the read carries it as ``pending``
+  (the host's read, as plain words) and offers ``answer``, its nonce bound to
+  that question; ``POST /api/talk`` with ``kind: question`` and ``answers``,
+  each question's choices by index and an optional "Other", holds it for the
+  same Undo window. ``/api/state`` reads each waiting question too, for its
+  card's note and "Answer…".
+* **A device may opt in to web push** (ADR-027 increment 4, ruling 17). Over
+  HTTPS, with ``cryptography`` on the Mac, ``/api/state`` carries the VAPID
+  public key and whether this device is subscribed; ``GET /sw.js`` is the
+  service worker that shows a push, and ``POST /api/push/subscribe`` and
+  ``/api/push/unsubscribe`` keep or drop this device's subscription in
+  ``oracle/push``'s book, from the page's own origin only. The browser's own
+  permission prompt is the confirm: the subscription is the device's setting
+  and runs nothing on the Mac.
 * **A slow or greedy client is cut off**: a socket timeout per request, a cap
   on headers, and a cap on connections at once.
 * **Over HTTPS once there is a certificate** (IDEA_026, ADR-008 D19-D24).
@@ -61,10 +108,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
-from ..core.errors import InvariantError
+from ..core.errors import InvariantError, StateError
 from . import panel, webpage
 from .dashboard import Loaded, freshness
 from .devices import COOKIE_NAME, Device, DeviceStore, PairingError
+from .push import PushBook, PushError, check_subscription
+from .scan import row_key
+from .talk import (
+    BODY_CAP,
+    KIND_QUESTION,
+    QuestionRead,
+    SessionTalk,
+    Talker,
+    TalkHost,
+    Turns,
+    cursor,
+    fingerprint,
+    first_line,
+    last_message,
+    offered,
+    pending_view,
+    read_question,
+    read_turns,
+)
 from .watcher import STALE_INTERVALS
 from .webactions import RemoteActions
 from .webpage import MAX_BACKOFF
@@ -96,8 +162,22 @@ PROGRAM_TIMEOUT = 5
 #: missing, as it is under launchd (BUG_084, ADR-008 D19).
 PROGRAM_TERM = "dumb"
 
-#: The largest request body read: the pairing form and an action are a few bytes.
+#: The largest request body read: the pairing form, an action and a push
+#: subscription are a few hundred bytes.
 MAX_BODY = 4096
+
+#: Where the page reads a live window's conversation (ADR-029 increment 2), and
+#: the most a response may be (ADR-009 D17).
+SESSION_PATH = "/api/session"
+SESSION_RESPONSE_CAP = 512 << 10
+
+#: The talk path's routes (ADR-029 D5, increment 3).
+TALK_PATH = "/api/talk"
+TALK_CANCEL_PATH = "/api/talk/cancel"
+
+#: Where a device keeps or drops its push subscription (ADR-027 increment 4).
+SUBSCRIBE_PATH = "/api/push/subscribe"
+UNSUBSCRIBE_PATH = "/api/push/unsubscribe"
 
 #: Seconds a connection may sit between two reads before it is closed, so a
 #: client that sends a request a byte at a time holds no thread for long.
@@ -295,16 +375,157 @@ def retry_delay(interval: float, failures: int) -> float:
 
 
 def view(loaded: Loaded, acting: bool = False,
-         jobs: Iterable[Mapping[str, Any]] = (), starting: bool = False) -> dict[str, Any]:
+         jobs: Iterable[Mapping[str, Any]] = (), starting: bool = False,
+         chains: Mapping[str, Any] | None = None,
+         push: Mapping[str, Any] | None = None,
+         excerpts: Mapping[str, Mapping[str, Any]] | None = None,
+         talking: bool = False, sending: bool = False,
+         prompts: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """What the page draws: ``oracle/panel``'s view of the document.
 
     The groups, the strip's counts, the leftovers and each session's detail,
     every word from the panel's one table (ADR-009 D2, D3). With ``acting``, a
     row whose step runs gets its button; ``jobs`` are the device's recent
     actions, listed on their session, its starts under Working. With
-    ``starting``, the projects a session may be started in.
+    ``starting``, the projects a session may be started in. ``chains`` is the
+    chain's read, for its cards, lines and screens (ADR-027 increment 3).
+    ``push`` is this device's web push, for its Notifications row (increment 4).
+    ``excerpts`` is each row's live window's last message (:func:`excerpts`);
+    with ``talking`` a live window's detail offers its conversation, and with
+    ``sending`` a Needs you card waiting for input offers "Reply…". ``prompts``
+    is each waiting question's read (:func:`prompts`), for its card's note and
+    "Answer…".
     """
-    return panel.view(loaded.document, acting=acting, jobs=jobs, starting=starting)
+    return panel.view(loaded.document, acting=acting, jobs=jobs, starting=starting,
+                      chains=chains, push=push, excerpts=excerpts, talking=talking,
+                      sending=sending, prompts=prompts)
+
+
+def excerpts(document: Mapping[str, Any], talk: SessionTalk) -> dict[str, dict[str, Any]]:
+    """Each row's live window's last message, read now, by row key.
+
+    The windows are the panel's (:func:`panel.excerpt_hosts`); each is read
+    through ``talk`` on its own, so one that fails, for any reason, shows
+    nothing and costs the others nothing (ADR-029 D11). A window with no text
+    from Claude has no entry.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    for key, host_id in panel.excerpt_hosts(document).items():
+        try:
+            last = last_message(talk.conversation(TalkHost(host_id)))
+        except Exception:  # noqa: BLE001, S112 - fail closed: that window shows nothing
+            continue
+        if last is not None:
+            found[key] = last.to_dict()
+    return found
+
+
+def _row(document: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+    return next((r for p in document.get("projects", []) for r in p.get("rows", [])
+                 if row_key(r) == key), None)
+
+
+def _asked(document: Mapping[str, Any], key: str, host_id: str,
+           talk: SessionTalk) -> QuestionRead | None:
+    """The question the row's live window waits on, read now; ``None`` when
+    its attention record says no question waits (ADR-029 D44)."""
+    fp = fingerprint(_row(document, key))
+    if fp is None or fp.host != host_id or fp.waiting != KIND_QUESTION:
+        return None
+    return read_question(talk, TalkHost(host_id, fp.tty, fp.pid))
+
+
+def prompts(document: Mapping[str, Any], talk: SessionTalk) -> dict[str, dict[str, Any]]:
+    """Each row whose live window waits on a question: the question's first
+    line, or that it cannot be read, by row key (ADR-029 D45). Each read on
+    its own: one that fails costs only its own card."""
+    found: dict[str, dict[str, Any]] = {}
+    for key, host_id in panel.excerpt_hosts(document).items():
+        asked = _asked(document, key, host_id, talk)
+        if asked is None:
+            continue
+        line = first_line(asked)
+        found[key] = {"text": line, "unreadable": line is None}
+    return found
+
+
+def conversation(document: Mapping[str, Any], key: str, talk: SessionTalk,
+                 after: str | None = None,
+                 cap: int = SESSION_RESPONSE_CAP, sender: Talker | None = None,
+                 device: Device | None = None) -> tuple[int, dict[str, Any]]:
+    """``/api/session``'s status and body for the row ``key``, read now.
+
+    Only the row's live window is read (:func:`panel.excerpt_hosts`); a row
+    with none is ``live: false`` and reads nothing, and a key no row has is
+    404. The body is cut to ``cap`` bytes as served, oldest turns first, and
+    is ``unchanged`` with no turns when its cursor equals ``after``. With a
+    ``sender`` it also says what ``device`` may send and why not, lists its
+    sends to the row, and carries a talk nonce bound to this read's
+    fingerprint when a send or a stop is offered (ADR-029 increments 3 and 4),
+    and the question the window waits on, bound to the nonce when an answer
+    is offered (increment 5).
+    """
+    head = panel.conversation_head(document, key)
+    if head is None:
+        return HTTPStatus.NOT_FOUND, {"error": "no such session"}
+    host_id = panel.excerpt_hosts(document).get(key)
+    read = (read_turns(talk, TalkHost(host_id)) if host_id is not None
+            else Turns((), False))
+    live = host_id is not None
+    body: dict[str, Any] = {"row": key, "head": head, "live": live, **read.to_dict(),
+                            "offered": offered(live, read.unreadable),
+                            "cursor": "0" * 24}
+    if sender is not None and device is not None:
+        asked = _asked(document, key, host_id, talk) if host_id is not None else None
+        body.update(_sending(document, key, head, live, read.unreadable, sender, device,
+                             asked))
+    body["turns"] = _fit(body, cap)
+    body["cursor"] = cursor({"live": live, "turns": body["turns"],
+                             "unreadable": body["unreadable"],
+                             "pending": body.get("pending")})
+    if after is not None and after == body["cursor"]:
+        body = {k: v for k, v in body.items() if k not in ("turns", "unreadable", "pending")}
+        body["unchanged"] = True
+    return HTTPStatus.OK, body
+
+
+def _sending(document: Mapping[str, Any], key: str, head: Mapping[str, Any], live: bool,
+             unreadable: bool, sender: Talker, device: Device,
+             asked: QuestionRead | None = None) -> dict[str, Any]:
+    """What a server that sends adds to ``/api/session`` (ADR-029 D5): what
+    is offered, this device's sends, the nonce, and the pending question."""
+    row = _row(document, key)
+    fp = fingerprint(row) if live else None
+    shown = sender.offered(fp, live, unreadable, asked)
+    added: dict[str, Any] = {"offered": shown, "sends": sender.sends(device.id, key),
+                             "boot": sender.boot, "nonce": None,
+                             "pending": pending_view(asked)}
+    if ((shown["send"] or shown["interrupt"] or shown["answer"]) and fp is not None
+            and row is not None):
+        project = next((p for p in document.get("projects", [])
+                        if row in p.get("rows", [])), {})
+        name = (project.get("project") or {}).get("name") or row.get("project_name") or ""
+        added["nonce"] = sender.issue(device.id, key, fp, str(row.get("project") or ""),
+                                      name, str(head.get("title") or ""),
+                                      pending=asked.question if shown["answer"] and asked
+                                      else None)
+    return added
+
+
+def _fit(body: dict[str, Any], cap: int) -> list[dict[str, Any]]:
+    """``body``'s turns, the oldest dropped until the body encodes to ``cap``
+    bytes or fewer.
+
+    Each turn is measured once, on its own. Dropping one shortens the body by
+    that much and its separator besides, so the count never falls short.
+    """
+    turns = list(body["turns"])
+    over = len(_encoded(body)) - cap
+    start = 0
+    while over > 0 and start < len(turns):
+        over -= len(_encoded(turns[start]))
+        start += 1
+    return turns[start:]
 
 
 def freshness_fields(loaded: Loaded, served_at: float) -> dict[str, Any]:
@@ -363,12 +584,18 @@ _BASE_HEADERS = [
 
 def _csp(nonce: str) -> str:
     """Only the page's own nonce-tagged script and style, and its own fetches,
-    manifest and icons (ADR-009 D10): nothing from another origin."""
+    manifest and icons (ADR-009 D10) and service worker (ADR-027 increment 4):
+    nothing from another origin."""
     return (
         f"default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; "
-        f"connect-src 'self'; manifest-src 'self'; img-src 'self'; form-action 'self'; "
-        f"base-uri 'none'; frame-ancestors 'none'"
+        f"connect-src 'self'; manifest-src 'self'; img-src 'self'; worker-src 'self'; "
+        f"form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
     )
+
+
+#: The service worker's own policy: it fetches nothing, and a notification's
+#: icon is the page's own.
+WORKER_CSP = "default-src 'none'; img-src 'self'"
 
 
 def _html(status: int, text: str, nonce: str, extra: list[tuple[str, str]] | None = None):
@@ -380,12 +607,13 @@ def _html(status: int, text: str, nonce: str, extra: list[tuple[str, str]] | Non
     )
 
 
+def _encoded(body: dict[str, Any]) -> bytes:
+    return json.dumps(body, sort_keys=True, default=str).encode("utf-8")
+
+
 def _json(status: int, body: dict[str, Any]) -> Response:
-    return Response(
-        status,
-        json.dumps(body, sort_keys=True, default=str).encode("utf-8"),
-        [("Content-Type", "application/json"), *_BASE_HEADERS],
-    )
+    return Response(status, _encoded(body), [("Content-Type", "application/json"),
+                                             *_BASE_HEADERS])
 
 
 def _asset(content_type: str, body: bytes) -> Response:
@@ -464,6 +692,23 @@ def _action_fields(headers: Mapping[str, str], body: bytes,
     return row, nonce
 
 
+def _talk_fields(headers: Mapping[str, str], body: bytes) -> dict[str, Any] | int:
+    """A talk request's fields, as JSON or a form, else a status."""
+    if len(body) > BODY_CAP:
+        return HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+    content_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    text = body.decode("utf-8", "replace")
+    if content_type == "application/json":
+        try:
+            sent = json.loads(text)
+        except ValueError:
+            return HTTPStatus.BAD_REQUEST
+        return sent if isinstance(sent, dict) else HTTPStatus.BAD_REQUEST
+    if content_type == "application/x-www-form-urlencoded":
+        return {name: values[0] for name, values in parse_qs(text).items()}
+    return HTTPStatus.UNSUPPORTED_MEDIA_TYPE
+
+
 class WebApp:
     """Request in, response out. Reads the machine only for a paired device.
 
@@ -484,6 +729,10 @@ class WebApp:
         remote: RemoteActions | None = None,
         served: Served | None = None,
         insecure: str | None = None,
+        push: PushBook | None = None,
+        push_why: str | None = None,
+        talk: SessionTalk | None = None,
+        sender: Talker | None = None,
     ) -> None:
         self.devices = devices
         self.load = load
@@ -493,6 +742,16 @@ class WebApp:
         self.remote = remote
         self.served = served
         self.insecure = insecure
+        #: Web push's book, and why there is none: ``extra`` when the Mac lacks
+        #: ``cryptography``. Without either, the page shows no Notifications row.
+        self.push = push
+        self.push_why = push_why
+        #: How a live window's last message is read (ADR-029 increment 1);
+        #: without one, the view carries none.
+        self.talk = talk
+        #: The talk path that sends (ADR-029 increment 3); without one, or
+        #: without ``talk``, the page only reads.
+        self.sender = sender if talk is not None else None
         self.scheme = "https" if served is not None else "http"
         # One read at a time: a phone and a laptop open at once share it.
         self._reading = threading.Lock()
@@ -517,6 +776,10 @@ class WebApp:
             return self._act(request, headers, device)
         if starting and target.path == "/api/start":
             return self._start(request, headers, device)
+        if self.push is not None and target.path in (SUBSCRIBE_PATH, UNSUBSCRIBE_PATH):
+            return self._subscription(request, headers, device, target.path)
+        if self.sender is not None and target.path in (TALK_PATH, TALK_CANCEL_PATH):
+            return self._talk(request, headers, device, target.path)
         if request.method not in ("GET", "HEAD"):
             return _html(HTTPStatus.METHOD_NOT_ALLOWED, webpage.message(
                 nonce, "not allowed", "Only a confirmed action is sent here."), nonce,
@@ -526,11 +789,17 @@ class WebApp:
                          nonce)
         if target.path == "/api/state":
             return self._state(device)
+        if self.talk is not None and target.path == SESSION_PATH:
+            return self._session(target.query, device)
         if target.path == webpage.MANIFEST_PATH:
             return _asset("application/manifest+json",
                           webpage.manifest(panel.WORDS).encode("utf-8"))
         if target.path in webpage.ICONS:
             return _asset("image/png", webpage.icon(webpage.ICONS[target.path]))
+        if target.path == webpage.WORKER_PATH and self._push_state()["available"]:
+            return Response(HTTPStatus.OK, webpage.service_worker().encode("utf-8"), [
+                ("Content-Type", "text/javascript; charset=utf-8"),
+                ("Content-Security-Policy", WORKER_CSP), *_BASE_HEADERS])
         query = parse_qs(target.query, keep_blank_values=True)
         if acting and target.path == "/api/confirm":
             row = (query.get("row") or [""])[0]
@@ -545,7 +814,7 @@ class WebApp:
                              {"error": "name a project: ?project=<key>"})
             answer = self.remote.confirm_start(  # type: ignore[union-attr]
                 device, project, (query.get("label") or [""])[0],
-                (query.get("prompt") or [""])[0])
+                (query.get("prompt") or [""])[0], (query.get("model") or [""])[0])
             return _json(answer.status, answer.body)
         if acting and target.path == "/api/job":
             job = self.remote.job(device, (query.get("id") or [""])[0])
@@ -572,16 +841,134 @@ class WebApp:
             return _json(HTTPStatus.SERVICE_UNAVAILABLE,
                          {"error": f"{type(exc).__name__}: {exc}"})
         jobs: list[dict[str, Any]] = []
+        chains = None
         if self.remote is not None:
             self.remote.observe(loaded.document)
             jobs = self.remote.recent(device)
+            chains = self.remote.read_chains(loaded.document)
         starting = self.remote is not None and self.remote.starter is not None
-        return _json(HTTPStatus.OK, {
+        texts = excerpts(loaded.document, self.talk) if self.talk is not None else None
+        asking = prompts(loaded.document, self.talk) if self.talk is not None else None
+        body = {
             "document": loaded.document,
-            "view": view(loaded, acting=self.remote is not None, jobs=jobs, starting=starting),
+            "view": view(loaded, acting=self.remote is not None, jobs=jobs, starting=starting,
+                         chains=chains, push=self._push_device(device), excerpts=texts,
+                         talking=self.talk is not None, sending=self.sender is not None,
+                         prompts=asking),
             "freshness": freshness_fields(loaded, self.clock()),
             "jobs": jobs,
-        })
+        }
+        if self.sender is not None:
+            body["boot"] = self.sender.boot
+        return _json(HTTPStatus.OK, body)
+
+    def _session(self, query: str, device: Device) -> Response:
+        """``GET /api/session``: one row's conversation, read now (ADR-029 increment 2)."""
+        sent = parse_qs(query, keep_blank_values=True)
+        row = (sent.get("row") or [""])[0]
+        if not row:
+            return _json(HTTPStatus.BAD_REQUEST, {"error": "name a row: ?row=<key>"})
+        try:
+            with self._reading:
+                loaded = self.load()
+        except Exception as exc:  # noqa: BLE001 - shown to the page; the next read runs
+            return _json(HTTPStatus.SERVICE_UNAVAILABLE,
+                         {"error": f"{type(exc).__name__}: {exc}"})
+        after = (sent.get("after") or [None])[0]
+        status, body = conversation(loaded.document, row, self.talk,  # type: ignore[arg-type]
+                                    after, sender=self.sender, device=device)
+        return _json(status, body)
+
+    def _talk(self, request: Request, headers: Mapping[str, str], device: Device,
+              path: str) -> Response:
+        """``POST /api/talk`` or ``/api/talk/cancel``: a message held for its Undo
+        window, or its Undo, from this page only (ADR-029 D2, D5)."""
+        if request.method != "POST":
+            return _json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "POST a message"})
+        if not _origin_required(headers, self.scheme):
+            return _json(HTTPStatus.FORBIDDEN, {
+                "error": "a message must come from this page (its Origin); nothing was sent"})
+        sent = _talk_fields(headers, request.body)
+        if isinstance(sent, int):
+            return _json(sent, {"error": "send the message as JSON or a form, at most "
+                                         f"{BODY_CAP // 1024} KiB; nothing was sent"})
+        sender: Talker = self.sender  # type: ignore[assignment]
+        if path == TALK_CANCEL_PATH:
+            reply = sender.cancel(device, sent.get("id"))
+        else:
+            row = sent.get("row")
+            if not isinstance(row, str) or not row:
+                return _json(HTTPStatus.BAD_REQUEST, {"error": "name a row; nothing was sent"})
+            reply = sender.post(device, row, str(sent.get("nonce") or ""), sent.get("kind"),
+                                sent.get("text"), answers=sent.get("answers"))
+        return _json(reply.status, reply.body)
+
+    def _push_state(self) -> dict[str, Any]:
+        """Whether this server offers push now: ``{available, why, key}``.
+
+        Push needs the book (``cryptography`` on the Mac) and HTTPS (a service
+        worker and the Push API need a secure context). The key is made here
+        on first need, so the page always has one to subscribe with.
+        """
+        if self.push is None:
+            return {"available": False, "why": self.push_why or "extra"}
+        if self.served is None:
+            return {"available": False, "why": "http"}
+        try:
+            return {"available": True, "key": self.push.ensure_key()}
+        except StateError:
+            return {"available": False, "why": "read"}
+
+    def _push_device(self, device: Device) -> dict[str, Any] | None:
+        """This device's push, for its Notifications row; ``None`` with no push at all."""
+        if self.push is None and self.push_why is None:
+            return None
+        state = self._push_state()
+        if not state["available"]:
+            return state
+        try:
+            mine = self.push.for_device(device.id)  # type: ignore[union-attr]
+        except StateError:
+            return {"available": False, "why": "read"}
+        return {**state, "on": mine["on"], "error": mine["error"]}
+
+    def _subscription(self, request: Request, headers: Mapping[str, str], device: Device,
+                      path: str) -> Response:
+        """``POST /api/push/subscribe`` or ``unsubscribe``: this device's own setting.
+
+        From the page's origin only, like an action. Subscribing needs push to
+        be offered now; leaving never does, so a device can always turn it off.
+        """
+        if request.method != "POST":
+            return _json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "POST a subscription"})
+        if not _origin_required(headers, self.scheme):
+            return _json(HTTPStatus.FORBIDDEN, {
+                "error": "a subscription must come from this page (its Origin)"})
+        if len(request.body) > MAX_BODY:
+            return _json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "too large"})
+        try:
+            sent = json.loads(request.body.decode("utf-8", "replace"))
+        except ValueError:
+            sent = None
+        if not isinstance(sent, dict):
+            return _json(HTTPStatus.BAD_REQUEST, {"error": "send the subscription as JSON"})
+        book: PushBook = self.push  # type: ignore[assignment]
+        try:
+            if path == UNSUBSCRIBE_PATH:
+                endpoint = sent.get("endpoint")
+                removed = book.unsubscribe(device.id,
+                                           endpoint if isinstance(endpoint, str) else None)
+                return _json(HTTPStatus.OK, {"removed": removed})
+            if not self._push_state()["available"]:
+                return _json(HTTPStatus.CONFLICT, {
+                    "error": "the Mac does not offer push to this page now"})
+            subscription = check_subscription(sent)
+            book.subscribe(device.id, subscription, f"https://{headers.get('host', '')}")
+        except PushError as exc:
+            return _json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except StateError as exc:
+            return _json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(exc)})
+        return _json(HTTPStatus.OK, {"on": True})
 
     def _act(self, request: Request, headers: Mapping[str, str], device: Device) -> Response:
         """``POST /api/act``: the row key and the nonce, from this page only."""
@@ -647,6 +1034,13 @@ class WebApp:
 # -- the socket -----------------------------------------------------------------------
 
 
+def body_cap(target: str) -> int:
+    """The most a request to ``target`` may send: a message's route takes
+    :data:`~invariant.oracle.talk.BODY_CAP`, every other :data:`MAX_BODY`."""
+    path = urlsplit(target).path
+    return BODY_CAP if path in (TALK_PATH, TALK_CANCEL_PATH) else MAX_BODY
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "invariant-oracle"
     sys_version = ""
@@ -674,7 +1068,7 @@ class _Handler(BaseHTTPRequestHandler):
         if length < 0:
             self.send_error(HTTPStatus.BAD_REQUEST, "bad Content-Length")
             return
-        if length > MAX_BODY:
+        if length > body_cap(self.path):
             self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             return
         body = self.rfile.read(length) if length > 0 else b""

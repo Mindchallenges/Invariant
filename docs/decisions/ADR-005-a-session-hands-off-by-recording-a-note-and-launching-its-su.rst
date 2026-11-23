@@ -12,6 +12,10 @@ ADR-005 — A session hands off by recording a note and launching its successor
    - **Date:** 2026-10-19
    - **Supersedes:** nothing. Builds on ADR-004 (a session outlives its host) and
      ADR-003 D4 (what ``hosts/`` own).
+   - **To be amended by** (proposed) :ref:`ADR-031 <adr-031>` (2026-11-22): ``session
+     handoff`` is deprecated. It keeps working for the user's own context
+     resets, no shipped agent or template names it, and a later ADR removes
+     it once nothing uses it (:need:`DEC_ADR_031_D11`).
 
 Context
 -------
@@ -272,6 +276,12 @@ Decisions recorded
    the tab script finds no tab, or a finished one holding only a shell, which
    it closes. The ``no_tab`` outcome now reads as a window that closed with
    Claude. The by-hand line is never ``exec``-ed.
+
+   *To be amended by ADR-031 (proposed 2026-11-22):* the closer gains a second caller, a
+   final ``session teardown``, which ends its own window through the same
+   detached process once its last turn is over and the person's prompt
+   count is unchanged (:need:`DEC_ADR_031_D4`, :need:`DEC_ADR_031_D5`). The
+   handoff's use of it is unchanged.
 
 .. dec:: The launch file enters the main checkout, and a successor counts only there (amendment, BUG_129)
    :id: DEC_ADR_005_D8

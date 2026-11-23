@@ -693,3 +693,32 @@ Consequences
 - The sweep is the first command that commits. Its commit is confined to the
   record and the items it filed, screened by the project's own privacy
   scanner first, and never pushed.
+
+Amendment: scoped runs only, the whole suite in the evening
+-----------------------------------------------------------
+
+.. dec:: A change runs scoped tests only; the whole suite runs on an evening sweep
+   :id: DEC_ADR_010_D10
+   :status: accepted
+   :part_of: DEC_ADR_010
+   :amends: DEC_ADR_010_D5
+   :affects: COMP_DATA_AGENTS
+
+   The user ruled on 2026-11-18: "No full run per change, but you can
+   schedule an execution in the evening."
+
+   - **Per change, scoped only, cadence or not.** ``feature-architect`` and
+     ``compliance-reviewer`` record every run with ``--selector`` over the
+     change's affected tests: the touched files' tests, the touched test
+     files, and the tests of the modules that import a touched module.
+   - **The one per-change full run** is owed by a touched path under
+     ``methodology.gates.schedule.held_paths`` (D8), once, on the final tree.
+   - **The whole suite runs on a schedule outside working hours**, through
+     ``invariant sweep run`` on the cadence. A project with no cadence
+     (``cadence_days`` null) still runs scoped only; the agents say in their
+     report that nothing runs the whole suite and recommend setting
+     ``cadence_days``, rather than running the whole suite themselves.
+   - **What it replaces.** The reviewer's "the full suite is CI's job" rule,
+     which assumed every project has a CI. D5's engine detection is
+     unchanged: without a cadence, ``sweep.no_full_run`` still answers N/A,
+     and the rule lives in the agents' text (BUG_130 holds the engine side).

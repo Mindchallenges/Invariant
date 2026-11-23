@@ -119,8 +119,30 @@ def names_a_command(parser, words):
     return not words
 
 
+def optional_forms(command):
+    """The command once without and once with each optional `[...]` group.
+
+    A body spells an optional flag as the usage line does
+    (`[--fingerprint <fp>]`), so the scan reads it both ways: the command must
+    parse with the group left out and with it written in.
+    """
+    group = re.search(r"\[([^\[\]]*)\]", command)
+    if group is None:
+        return [command]
+    without = command[: group.start()] + command[group.end():]
+    within = command[: group.start()] + group.group(1) + command[group.end():]
+    return optional_forms(without) + optional_forms(within)
+
+
 def problem_with(parser, command):
     """None when the command parses or names a command; else what failed."""
+    for form in optional_forms(command):
+        if problem_with_form(parser, form) is not None:
+            return command
+    return None
+
+
+def problem_with_form(parser, command):
     for words in readings_of(tokens_of(command)):
         if words and names_a_command(parser, words):
             continue
@@ -150,6 +172,12 @@ class TestTheScan:
             "invariant config show   # the paths",
         ]
 
+    def test_an_optional_group_is_read_without_and_with_it(self):
+        assert optional_forms("invariant a [--b <c>] --d <e>") == [
+            "invariant a  --d <e>",
+            "invariant a --b <c> --d <e>",
+        ]
+
     def test_placeholders_become_arguments(self):
         assert tokens_of('invariant session plan done <n>') == ["session", "plan", "done", "1"]
         assert tokens_of('invariant item show BUG_<id>') == ["item", "show", "BUG_X"]
@@ -168,6 +196,7 @@ class TestTheScan:
             "invariant session start repro-<bug_slug> --task <bug_slug>",
             "invariant item new|lsit",
             "invariant item new ideas",
+            "invariant guidelines except <rule-id> <path> [--fingerprnt <fp>] --by <who> --reason <why>",
         ],
     )
     def test_a_dead_instruction_is_caught(self, parser, command):
@@ -183,6 +212,7 @@ class TestTheScan:
             "invariant session files add",
             "invariant item new|list|show",
             "invariant item new idea --title \"<title>\" --field priority=<p> ...",
+            "invariant guidelines except <rule-id> <path> [--fingerprint <fp>] --by <who> --reason <why>",
         ],
     )
     def test_a_command_named_in_prose_passes(self, parser, command):

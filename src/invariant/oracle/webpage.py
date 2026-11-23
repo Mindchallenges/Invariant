@@ -1,8 +1,8 @@
 """The HTML the oracle's web server sends: the control panel and three small pages.
 
-The panel (IDEA_027, ADR-009) is one page with three screens drawn in it, the
-overview, a session's detail and the leftovers, and bottom sheets for a
-confirm and its result. Everything is inline, so the page needs nothing but
+The panel (IDEA_027, ADR-009) is one page with its screens drawn in it, the
+overview, a session's detail, the leftovers, a project's chain and a
+session's conversation, and bottom sheets for a confirm and its result. Everything is inline, so the page needs nothing but
 the Mac it came from: no CDN, no font, no image; the few icons are inline SVG.
 The script and the style carry the response's nonce, which the
 Content-Security-Policy ``oracle/web`` sends is the only thing it lets run.
@@ -41,6 +41,54 @@ deed waits for its answer, so what is posted to ``/api/start`` (the project
 and the nonce) is exactly what the sheet last showed. A start is then a card
 under Working until its window appears.
 
+**It shows each project's chain** (ADR-027 increment 3, ruling 15). A
+project's row under "Projects" carries its chain line and opens its Chain
+screen, a view inside the page like the detail: what the chain is doing, with
+Pause or Resume; the chained start it follows, with Continue, Retry and Close
+when it is stalled; the proposals with Start; and the queue, each entry with
+move up, move down and Remove. The chain's cards under Needs you carry their
+actions. Every one of them opens the same confirm sheet as a row's step, by
+the action's key (ruling 14).
+
+**It lets this device opt in to web push** (ADR-027 increment 4, ruling
+17). Where the Mac offers push, the overview ends with a Notifications row:
+what this device gets, and one pill, "Turn on" or "Turn off". The script
+registers the service worker (:func:`service_worker`, served at
+:data:`WORKER_PATH`) and, on the tap, subscribes with the key the view
+carries, so the browser's own permission prompt is the confirm; the
+subscription goes to the Mac and nothing else. A browser without the push
+API, an iPhone outside the home-screen app and a blocked permission are
+each said in words from ``WORDS``.
+
+**It shows a live window's last message** (ADR-029 increment 1, ADR-009
+D17). A card carries Claude's last text in an inset block under "Claude",
+three lines at most on a full card and one on a compact card or a leftover
+window's row; the detail's "Last message" shows the prompt it answers under
+"You", then the text whole, folded behind "Show all" when the view says it is
+long. Every word of it is set with ``textContent``, so markup in it is shown
+as its characters; a row with none draws nothing in its place.
+
+**It shows a live window's conversation** (ADR-029 increment 2, ADR-009
+D17). "Open conversation" in a session's detail opens its Conversation
+screen, a view inside the page like the detail: the kicker, the title and the
+chips, then the turns from ``/api/session``, oldest first, newest at the
+bottom: the person's under "You" on a quiet card, Claude's under "Claude" on
+a card, a tool call as one monospace line, a cut text ending "Cut here: the
+rest is on the Mac", all set with ``textContent``. While it is open and the
+page visible it asks again every :data:`CONVERSATION_INTERVAL` seconds with
+the last cursor, backing off on a failure. It opens at the bottom and stays
+there as turns arrive, unless the person scrolled up; then "New messages"
+floats at the foot and scrolls down. A read that stopped at a shape the host
+does not know shows "Can't read this session here — use the Mac." above the
+newer turns; a gone window says so in place of them.
+
+**It drops every session's text in the background** (ADR-009 D17). Once the
+page has been hidden for :data:`BACKGROUND_DROP` seconds, the read state (the
+view, with its excerpts) and the open conversation are cleared from the
+screen and from memory, keeping only how fresh the last read was; coming
+back shows "Reading again…" until the next read. A drop the timer missed,
+because the browser suspended it, is made on return.
+
 **It follows the page to HTTPS** (ADR-008 D23): a state fetch answered with a
 redirect it did not follow reloads the page.
 
@@ -72,6 +120,13 @@ from .watcher import DEFAULT_INTERVAL, STALE_INTERVALS
 
 #: The longest wait between two refreshes after failures, in seconds.
 MAX_BACKOFF = 60.0
+
+#: How often an open conversation asks again, in seconds (ADR-029 D11).
+CONVERSATION_INTERVAL = 2.0
+
+#: How long the page may be hidden before it drops every session's text, in
+#: seconds (ADR-009 D17).
+BACKGROUND_DROP = 60.0
 
 #: The tokens of docs/architecture/oracle-panel.rst, "Tokens", declared once.
 _TOKENS = """
@@ -263,6 +318,83 @@ pre.output { margin: 0; font: 12px/18px var(--mono); color: var(--text-secondary
   padding: 10px 12px; min-height: 44px; width: 100%; max-width: 100%; }
 .field textarea { min-height: 88px; resize: vertical; }
 .start-name { font-family: var(--mono); font-size: 13px; }
+button.row-text { text-align: left; align-items: flex-start; flex: 1; min-height: 44px;
+                  padding: 0; }
+.row-brief { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+             overflow: hidden; }
+.inset.excerpt { gap: 4px; }
+.excerpt-label { font-size: 13px; font-weight: 600; color: var(--text-tertiary); }
+.excerpt-text { margin: 0; font-size: 15px; line-height: 22px; color: var(--text-secondary);
+                white-space: pre-wrap; overflow-wrap: break-word; }
+.excerpt-text.clamp { display: -webkit-box; -webkit-line-clamp: 3;
+                      -webkit-box-orient: vertical; overflow: hidden; }
+.excerpt-line { font-size: 13px; line-height: 18px; color: var(--text-tertiary);
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.show-all { align-self: flex-start; padding: 0; }
+.talk-open { flex: none; width: 100%; }
+.talk-title { font-size: 22px; line-height: 28px; font-weight: 700; }
+.turns { display: flex; flex-direction: column; gap: 12px; }
+.turn { gap: 4px; }
+.turn-text { margin: 0; font-size: 15px; line-height: 22px; white-space: pre-wrap;
+             overflow-wrap: break-word; }
+.cut-line { font-size: 13px; line-height: 18px; color: var(--text-tertiary); }
+.tool-line { color: var(--text-tertiary); line-height: 18px; }
+.new-pill { position: fixed; left: 50%; transform: translateX(-50%);
+            bottom: calc(24px + env(safe-area-inset-bottom)); height: 44px; border-radius: 22px;
+            padding: 0 16px; background: var(--surface-button); color: var(--link);
+            font-size: 15px; font-weight: 600; white-space: nowrap; }
+#composer { position: fixed; left: 0; right: 0; bottom: 0; background: var(--surface-sheet);
+             border-radius: 18px 18px 0 0; display: flex; flex-direction: column; gap: 6px;
+             padding: 10px calc(16px + env(safe-area-inset-right))
+                      calc(10px + env(safe-area-inset-bottom))
+                      calc(16px + env(safe-area-inset-left)); }
+main.talking { padding-bottom: 96px; }
+main.talking .new-pill { bottom: calc(96px + env(safe-area-inset-bottom)); }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer-input { flex: 1; font: 16px/22px var(--font); color: var(--text);
+                  background: var(--surface-inset); border: 1px solid var(--border);
+                  border-radius: 22px; padding: 10px 14px; min-height: 44px;
+                  max-height: 132px; resize: none; overflow-y: auto; }
+.send-btn { flex: 0 0 44px; width: 44px; height: 44px; border-radius: 22px;
+            background: var(--accent-primary); color: #FFFFFF; display: flex;
+            align-items: center; justify-content: center; padding: 0; }
+.send-btn:disabled { opacity: 0.4; }
+.stop-btn { flex: 0 0 44px; width: 44px; height: 44px; border-radius: 22px;
+            background: var(--surface-button); color: var(--text); display: flex;
+            align-items: center; justify-content: center; padding: 0; }
+.stop-btn:disabled { opacity: 0.4; }
+.composer-error { margin: 0; font-size: 13px; line-height: 18px; color: var(--accent-problem); }
+.send { gap: 4px; }
+.send-line { display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px;
+             font-size: 13px; line-height: 18px; }
+.send-state { color: var(--text-secondary); }
+.send-state.tone-working { background: none; color: var(--accent-working); }
+.send-state.tone-problem { background: none; color: var(--accent-problem); }
+.send-state.tone-idle { background: none; color: var(--text-secondary); }
+.send-act { font-size: 13px; padding: 0 4px; }
+.talk-off { margin: 0; font-size: 14px; line-height: 20px; color: var(--text-secondary); }
+.asking { background: var(--tile-needs); gap: 16px; }
+.question { display: flex; flex-direction: column; gap: 8px; }
+.question-text { margin: 0; font-size: 17px; line-height: 22px; font-weight: 600;
+                 white-space: pre-wrap; overflow-wrap: break-word; }
+.choice { height: auto; min-height: 48px; flex: none; width: 100%; flex-direction: column;
+          align-items: flex-start; justify-content: center; gap: 2px; padding: 10px 14px;
+          text-align: left; }
+.choice.picked { background: var(--accent-primary); color: #FFFFFF; }
+.choice-label { overflow-wrap: break-word; }
+.choice-note { font-size: 13px; line-height: 18px; font-weight: 400;
+               color: var(--text-secondary); overflow-wrap: break-word; }
+.choice.picked .choice-note { color: #FFFFFF; }
+.other-open, .other-send, .send-answer { flex: none; width: 100%; }
+.answer-other { font: 16px/22px var(--font); color: var(--text); width: 100%;
+                background: var(--surface-inset); border: 1px solid var(--border);
+                border-radius: 12px; padding: 10px 12px; min-height: 44px; }
+.answer-error { margin: 0; font-size: 13px; line-height: 18px; color: var(--accent-problem); }
+.entry-row { flex-wrap: wrap; }
+.entry-actions { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+.buttons.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.buttons.grid .btn { flex: none; }
+.now-actions { flex-wrap: wrap; }
 form { display: grid; gap: 12px; max-width: 360px; margin-top: 16px; }
 form input { font: inherit; padding: 10px; text-transform: uppercase; letter-spacing: .1em;
              min-height: 44px; }
@@ -275,6 +407,8 @@ _SCRIPT = r"""
 const MAX_BACKOFF = __MAX_BACKOFF__;
 const STALE_INTERVALS = __STALE_INTERVALS__;
 const DEFAULT_INTERVAL = __INTERVAL__;
+const TALK_INTERVAL = __TALK_INTERVAL__;
+const DROP_AFTER = __DROP_AFTER__;
 const WORDS = __WORDS__;
 
 const ORACLE = (function () {
@@ -350,7 +484,8 @@ const ORACLE = (function () {
   // carries the project and the nonce the Mac answered with.
   function startUrl(form) {
     return "/api/start/confirm?project=" + encodeURIComponent(form.project) +
-      "&label=" + encodeURIComponent(form.label) + "&prompt=" + encodeURIComponent(form.prompt);
+      "&label=" + encodeURIComponent(form.label) + "&prompt=" + encodeURIComponent(form.prompt) +
+      (form.model ? "&model=" + encodeURIComponent(form.model) : "");
   }
   function startBody(project, nonce) {
     return JSON.stringify({project: project, nonce: nonce});
@@ -372,11 +507,15 @@ const ORACLE = (function () {
     refresh: [["path", {d: "M21 12a9 9 0 1 1-2.6-6.4"}], ["path", {d: "M21 4v5h-5"}]],
     right: [["path", {d: "M9 6l6 6-6 6"}]],
     left: [["path", {d: "M15 6l-6 6 6 6"}]],
+    up: [["path", {d: "M6 15l6-6 6 6"}]],
     down: [["path", {d: "M6 9l6 6 6-6"}]],
     copy: [["rect", {x: "9", y: "9", width: "11", height: "11", rx: "2"}],
            ["path", {d: "M5 15V6a2 2 0 0 1 2-2h9"}]],
     cross: [["path", {d: "M18 6L6 18"}], ["path", {d: "M6 6l12 12"}]],
     tick: [["path", {d: "M5 12l5 5 9-10"}]],
+    send: [["path", {d: "M12 19V5"}], ["path", {d: "M6 11l6-6 6 6"}]],
+    stop: [["rect", {x: "7", y: "7", width: "10", height: "10", rx: "2",
+                     fill: "currentColor"}]],
   };
   function icon(h, name, size, stroke, cls) {
     return h("svg", {cls: cls || "icon", attrs: {
@@ -393,36 +532,78 @@ const ORACLE = (function () {
                          on: {toggle: (event, node) => on.toggle(id, node.open)}},
              [h("summary", {text: summary}), h("div", {cls: "disclosure-body"}, body)]);
   }
+  // A card of a row, or of the chain (ADR-027 increment 3): a chain card's
+  // Details opens its project's Chain screen, and its buttons name the
+  // chain action they confirm.
   function fullCard(h, on, card) {
-    const open = () => on.open(card.row);
+    const open = () => card.chain ? on.chain(card.chain) : on.open(card.row);
     const parts = [
       h("div", {cls: "meta"}, [h("span", {cls: "project", text: card.project}),
                                h("span", {cls: "age", text: card.age})]),
       h("div", {cls: "card-title", text: card.title}),
     ];
     if (card.chips.length) parts.push(chips(h, card.chips));
+    if (card.excerpt) parts.push(excerpt(h, WORDS.claude, card.excerpt, "excerpt-text clamp"));
     if (card.note) parts.push(h("div", {cls: "note", text: card.note}));
     if (card.tap) {
       return h("div", {cls: "card tap", attrs: {role: "button", tabindex: "0"},
                        on: {click: open}}, parts);
     }
     const buttons = [];
-    if (card.button) {
-      buttons.push(h("button", {cls: "btn primary", text: card.button.text,
-                                on: {click: () => on.confirm(card.row)}}));
+    const actions = card.actions || [];
+    if (card.reply) {
+      buttons.push(h("button", {cls: "btn primary", text: card.reply.text,
+                                on: {click: () => on.reply(card.row)}}));
     }
-    buttons.push(h("button", {cls: "btn secondary" + (card.button ? " narrow" : ""),
-                              text: WORDS.details, on: {click: open}}));
-    parts.push(h("div", {cls: "buttons"}, buttons));
-    return h("div", {cls: "card"}, parts);
+    if (card.answer) {
+      buttons.push(h("button", {cls: "btn primary", text: card.answer.text,
+                                on: {click: () => on.answer(card.row)}}));
+    }
+    if (card.button) {
+      const target = card.button.row || card.row;
+      buttons.push(h("button", {cls: "btn primary", text: card.button.text,
+                                on: {click: () => on.confirm(target)}}));
+    }
+    actions.forEach((action, n) => buttons.push(h("button", {
+      cls: "btn " + (n === 0 ? "primary" : "secondary"), text: action.text,
+      on: {click: () => on.confirm(action.row)}})));
+    buttons.push(h("button", {
+      cls: "btn secondary" + (card.button && !actions.length ? " narrow" : ""),
+      text: WORDS.details, on: {click: open}}));
+    parts.push(h("div", {cls: actions.length ? "buttons grid" : "buttons"}, buttons));
+    return h("div", {cls: card.kind === "chain" ? "card chain-card" : "card"}, parts);
   }
   function compactCard(h, on, card) {
     return h("button", {cls: "card compact", on: {click: () => on.open(card.row)}}, [
       h("span", {cls: "compact-text"}, [
         h("span", {cls: "project", text: card.project}),
         h("span", {cls: "card-title", text: card.title}),
-        card.line ? h("span", {cls: "note", text: card.line}) : null]),
+        card.line ? h("span", {cls: "note", text: card.line}) : null,
+        card.excerpt ? h("span", {cls: "excerpt-line", text: card.excerpt}) : null]),
       icon(h, "right", 18, "2", "chevron")]);
+  }
+  // A session's own text (ADR-029 increment 1): an inset block under its
+  // label, set as text and never as markup (ADR-009 D17).
+  function excerpt(h, label, text, cls) {
+    return h("div", {cls: "inset excerpt"}, [h("span", {cls: "excerpt-label", text: label}),
+                                             h("p", {cls: cls, text: text})]);
+  }
+  // The detail's "Last message": the prompt, then Claude's text, folded
+  // behind "Show all" past the panel's length until it is opened.
+  function lastMessage(h, ui, on, d) {
+    const id = "last:" + d.row;
+    const folded = d.last.head && !ui.more[id];
+    const nodes = [h("span", {cls: "section-label", text: WORDS.last_message})];
+    if (d.last.you) nodes.push(excerpt(h, WORDS.you, d.last.you, "excerpt-text"));
+    const block = excerpt(h, WORDS.claude, folded ? d.last.head : d.last.claude,
+                          "excerpt-text");
+    if (folded) {
+      block.appendChild(h("button", {cls: "link show-all", text: WORDS.show_all,
+                                     attrs: {"aria-expanded": "false"},
+                                     on: {click: () => on.more(id)}}));
+    }
+    nodes.push(block);
+    return nodes;
   }
   // A start of this device: "Starting…" until its window appears, or why it did not.
   function startCard(h, on, card) {
@@ -434,14 +615,23 @@ const ORACLE = (function () {
                         on: {click: () => on.startJob(card)}},
              [h("span", {cls: "compact-text"}, parts), icon(h, "right", 18, "2", "chevron")]);
   }
-  function projects(h, on, start) {
-    const rows = start.projects.map((project) => h("div", {cls: "list-row"}, [
-      h("span", {cls: "row-text"}, [h("span", {cls: "row-title", text: project.name}),
-                                    h("span", {cls: "row-line", text: project.line})]),
-      h("button", {cls: "pill row-pill",
-                   attrs: {"aria-label": WORDS.new_session + " " + project.name},
-                   on: {click: () => on.newSession(project.id)}},
-        [h("span", {text: WORDS.new_session})])]));
+  // A project's row: its sessions, its chain line, which opens its Chain
+  // screen, and New session… when the page may start one.
+  function projects(h, on, view) {
+    const rows = view.projects.map((project) => {
+      const lines = [h("span", {cls: "row-title", text: project.name}),
+                     h("span", {cls: "row-line", text: project.line})];
+      if (project.chain) lines.push(h("span", {cls: "row-line chain-line", text: project.chain}));
+      const chain = view.chain && view.chain.projects[project.id];
+      const text = chain
+        ? h("button", {cls: "row-text chain-open", on: {click: () => on.chain(project.id)}}, lines)
+        : h("span", {cls: "row-text"}, lines);
+      const pill = view.start ? h("button", {cls: "pill row-pill",
+        attrs: {"aria-label": WORDS.new_session + " " + project.name},
+        on: {click: () => on.newSession(project.id)}}, [h("span", {text: WORDS.new_session})])
+        : null;
+      return h("div", {cls: "list-row"}, [text, pill]);
+    });
     return h("div", {cls: "section projects"}, [
       h("div", {cls: "section-head"}, [h("span", {cls: "section-label", text: WORDS.projects})]),
       h("div", {cls: "list"}, rows)]);
@@ -467,12 +657,65 @@ const ORACLE = (function () {
                                           h("span", {cls: "note", text: left.line})]),
         icon(h, "right", 18, "2", "chevron")]));
     }
-    if (view.start && view.start.projects.length) nodes.push(projects(h, on, view.start));
+    if ((view.start || view.chain) && view.projects && view.projects.length) {
+      nodes.push(projects(h, on, view));
+    }
+    if (view.push) nodes.push(pushSection(h, on, view.push, ui.push || {}));
     return nodes;
   }
-  function back(h, on) {
+  // This device's web push (ADR-027 increment 4): what the Mac offers, what
+  // this browser can do (``local``, which only the browser knows), and the one
+  // pill that changes it.
+  function pushSection(h, on, push, local) {
+    let line = push.line;
+    let pill = null;
+    if (push.available) {
+      const here = push.on && local.subscribed;
+      if (!local.supported) {
+        line = local.homeScreen ? WORDS.push_home_screen : WORDS.push_unsupported;
+      } else if (local.busy) {
+        line = WORDS.push_busy;
+      } else if (local.blocked) {
+        line = WORDS.push_blocked;
+      } else {
+        line = local.error ? fill(WORDS.push_failed, {error: local.error})
+                           : here ? push.line_on : WORDS.push_off;
+        pill = here ? {text: WORDS.push_turn_off, act: on.pushOff}
+                    : {text: WORDS.push_turn_on, act: on.pushOn};
+      }
+    }
+    const row = h("div", {cls: "list-row"}, [
+      h("span", {cls: "row-text"}, [h("span", {cls: "row-title", text: WORDS.push_title}),
+                                    h("span", {cls: "row-line", text: line})]),
+      pill ? h("button", {cls: "pill row-pill", on: {click: () => pill.act()}},
+               [h("span", {text: pill.text})]) : null]);
+    return h("div", {cls: "section push"}, [
+      h("div", {cls: "section-head"},
+        [h("span", {cls: "section-label", text: WORDS.notifications})]),
+      h("div", {cls: "list"}, [row])]);
+  }
+  // A base64url key as the bytes PushManager.subscribe wants; no atob, so it
+  // runs in every engine the suite drives.
+  function keyBytes(text) {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const out = [];
+    let value = 0;
+    let bits = 0;
+    for (const ch of String(text)) {
+      const digit = alphabet.indexOf(ch);
+      if (digit < 0) continue;
+      value = ((value << 6) | digit) & 0xffffff;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out.push((value >> bits) & 255);
+      }
+    }
+    return new Uint8Array(out);
+  }
+  function back(h, on, label) {
     return h("button", {cls: "back", on: {click: () => on.back()}},
-             [icon(h, "left", 20, "2.2"), h("span", {text: WORDS.back})]);
+             [icon(h, "left", 20, "2.2"), h("span", {text: label || WORDS.back})]);
   }
   function detail(view, ui, h, on, now) {
     const d = view.details[ui.key];
@@ -484,6 +727,11 @@ const ORACLE = (function () {
     if (d.going_on.length) {
       nodes.push(h("div", {cls: "card"}, [h("span", {cls: "label", text: WORDS.going_on}),
                                           h("p", {cls: "body", text: d.going_on.join(" ")})]));
+    }
+    if (d.last) nodes.push(...lastMessage(h, ui, on, d));
+    if (d.conversation) {
+      nodes.push(h("button", {cls: "btn secondary tall talk-open", text: WORDS.open_conversation,
+                              on: {click: () => on.conversation(d.row)}}));
     }
     if (d.step) {
       const target = h("div", {cls: "mono scroll copy-text", text: d.step.copy, hidden: true});
@@ -523,7 +771,8 @@ const ORACLE = (function () {
       const rows = (all ? section.rows : section.rows.slice(0, section.shown)).map((row) =>
         h("div", {cls: "list-row"}, [h("span", {cls: "row-text"}, [
           h("span", {cls: "row-title", text: row.title}),
-          h("span", {cls: "row-line", text: row.line})]),
+          h("span", {cls: "row-line", text: row.line}),
+          row.excerpt ? h("span", {cls: "excerpt-line", text: row.excerpt}) : null]),
           row.button ? h("button", {cls: "pill row-pill",
                                     on: {click: () => on.confirm(row.row)}},
                          [h("span", {text: row.button.text})]) : null]));
@@ -538,10 +787,265 @@ const ORACLE = (function () {
     }
     return nodes;
   }
-  // The screen ui says, or the overview when its session has gone.
+  function listSection(h, label, rows) {
+    return h("div", {cls: "section"}, [
+      h("div", {cls: "section-head"}, [h("span", {cls: "section-label", text: label})]),
+      h("div", {cls: "list"}, rows)]);
+  }
+  function confirmButton(h, on, cls, button) {
+    return h("button", {cls: cls, text: button.text, on: {click: () => on.confirm(button.row)}});
+  }
+  // A project's Chain screen (ADR-027 increment 3): what the chain does, the
+  // start it follows, the proposals and the queue, every button a confirm.
+  function chainScreen(view, ui, h, on, now) {
+    const c = view.chain.projects[ui.key];
+    const nodes = [back(h, on), h("div", {cls: "detail-head"}, [
+      h("span", {cls: "kicker", text: c.kicker}), h("h1", {cls: "detail-title", text: c.title}),
+      chips(h, c.chips)])];
+    const going = [h("span", {cls: "label", text: WORDS.going_on}),
+                   h("p", {cls: "body", text: c.going_on.join(" ")})];
+    if (c.control) {
+      going.push(h("div", {cls: "buttons"}, [confirmButton(
+        h, on, "btn chain-control " + (c.control.primary ? "primary" : "secondary"),
+        c.control)]));
+    }
+    nodes.push(h("div", {cls: "card"}, going));
+    if (c.now) {
+      const parts = [h("span", {cls: "label", text: WORDS.chain_now}),
+                     h("div", {cls: "step"}, [h("span", {cls: "step-name now-title",
+                                                         text: c.now.title}),
+                                              h("span", {cls: "note", text: c.now.line})])];
+      if (c.now.actions.length) {
+        parts.push(h("div", {cls: "buttons now-actions"}, c.now.actions.map((action, n) =>
+          confirmButton(h, on, "btn " + (n === 0 ? "primary" : "secondary"), action))));
+      }
+      nodes.push(h("div", {cls: "card"}, parts));
+    }
+    if (c.proposed.length) {
+      nodes.push(listSection(h, WORDS.chain_proposed, c.proposed.map((p) =>
+        h("div", {cls: "list-row"}, [
+          h("span", {cls: "row-text"}, [h("span", {cls: "row-title", text: p.title}),
+                                        h("span", {cls: "row-line", text: p.line})]),
+          p.button ? h("button", {cls: "pill row-pill", on: {click: () => on.confirm(p.button.row)}},
+                       [h("span", {text: p.button.text})]) : null]))));
+    }
+    const rows = c.queue.map((row) => {
+      const text = [h("span", {cls: "row-title", text: row.title}),
+                    h("span", {cls: "row-line", text: row.line})];
+      if (row.brief) text.push(h("span", {cls: "row-line row-brief", text: row.brief}));
+      const controls = [];
+      for (const [name, move] of [["up", row.up], ["down", row.down]]) {
+        if (!move) continue;
+        controls.push(h("button", {cls: "iconbtn entry-" + name, attrs: {"aria-label": move.label},
+                                   on: {click: () => on.confirm(move.row)}},
+                        [icon(h, name, 20)]));
+      }
+      if (row.remove) {
+        controls.push(h("button", {cls: "pill row-pill", on: {click: () => on.confirm(row.remove.row)}},
+                        [h("span", {text: row.remove.text})]));
+      }
+      return h("div", {cls: "list-row entry-row"}, [h("span", {cls: "row-text"}, text),
+        controls.length ? h("div", {cls: "entry-actions"}, controls) : null]);
+    });
+    if (!rows.length && c.empty) {
+      rows.push(h("div", {cls: "list-row"}, [h("span", {cls: "quiet", text: c.empty})]));
+    }
+    if (rows.length) nodes.push(listSection(h, WORDS.chain_queue, rows));
+    if (c.recent.length) {
+      nodes.push(h("span", {cls: "section-label", text: WORDS.recent}));
+      nodes.push(h("div", {cls: "card"}, c.recent.map((event) => h("div", {cls: "recent-row"}, [
+        h("span", {text: event.text}), h("span", {cls: "when", text: clock(event.at, now)})]))));
+    }
+    if (c.technical.lines.length) {
+      nodes.push(disclosure(h, ui, on, "technical:chain:" + ui.key, WORDS.technical,
+                            c.technical.lines.map((line) => h("div", {text: line}))));
+    }
+    return nodes;
+  }
+  // The Conversation screen (ADR-029 increment 2): a live window's turns,
+  // oldest first, each the session's own text set as text, never markup.
+  function turn(h, t) {
+    if (t.role === "tool") return h("div", {cls: "mono scroll tool-line", text: t.text});
+    const you = t.role === "user";
+    const parts = [h("span", {cls: "excerpt-label", text: you ? WORDS.you : WORDS.claude}),
+                   h("p", {cls: "turn-text", text: t.text})];
+    if (t.cut) parts.push(h("span", {cls: "cut-line", text: WORDS.cut_here}));
+    return h("div", {cls: you ? "card quiet-card turn" : "card turn"}, parts);
+  }
+  function notice(h, text) {
+    return h("div", {cls: "card quiet-card"}, [h("p", {cls: "body", text: text})]);
+  }
+  // A send from this device (ADR-029 increment 3): its line, worded by its
+  // state, and the one thing it lets the person do.
+  function reasonText(reason, what) {
+    const said = WORDS["talk_why_" + reason] || reason || "";
+    const more = what ? WORDS["changed_" + what] : "";
+    return more ? said + " " + more : said;
+  }
+  function sendLine(s, restarted) {
+    if (restarted) return {text: WORDS.talk_dropped_boot, tone: "problem"};
+    switch (s.state) {
+      case "held": return {text: WORDS.talk_held, tone: "idle", action: WORDS.undo};
+      case "due": return {text: WORDS.talk_due, tone: "idle"};
+      case "queued": return {text: WORDS.talk_queued, tone: "working", action: WORDS.cancel};
+      case "typed": return {text: WORDS.talk_typed, tone: "idle"};
+      case "delivered": return {text: WORDS.talk_delivered, tone: "idle"};
+      case "not_confirmed": return {text: WORDS.talk_not_confirmed, tone: "problem"};
+      case "dropped":
+        return {text: s.reason === "ring" ? WORDS.talk_dropped_ring
+                      : s.reason === "revoked" ? fill(WORDS.talk_refused,
+                                                      {reason: reasonText(s.reason)})
+                      : WORDS.talk_dropped, tone: "problem"};
+      default:
+        return {text: fill(WORDS.talk_refused, {reason: reasonText(s.reason, s.what)}),
+                tone: "problem"};
+    }
+  }
+  function sendCard(h, on, s, text, restarted) {
+    const line = sendLine(s, restarted);
+    if (s.kind === "interrupt") text = WORDS.stop;
+    const parts = [h("span", {cls: "send-state tone-" + line.tone, text: line.text})];
+    if (line.action) {
+      parts.push(h("span", {cls: "send-state", text: "·", attrs: {"aria-hidden": "true"}}));
+      parts.push(h("button", {cls: "link send-act", text: line.action,
+                              on: {click: () => on.undo(s.id)}}));
+    }
+    const row = h("div", {cls: "send-line"}, parts);
+    if (!text || s.state === "delivered") return h("div", {cls: "send"}, [row]);
+    return h("div", {cls: "card quiet-card turn send"}, [
+      h("span", {cls: "excerpt-label", text: WORDS.you}),
+      h("p", {cls: "turn-text", text: text}), row]);
+  }
+  function offText(data) {
+    const offered = data.offered || {};
+    if (!data.live || data.unreadable || offered.send || !offered.why) return null;
+    return WORDS["talk_why_" + offered.why] && offered.why !== "reading_only"
+      && offered.why !== "unreadable" && offered.why !== "gone"
+      ? WORDS["talk_why_" + offered.why] : null;
+  }
+  function conversation(view, ui, h, on) {
+    const talk = ui.talk;
+    const data = talk.data;
+    const head = data && data.head;
+    const known = view.details[ui.key];
+    const nodes = [back(h, on, head ? head.title : known ? known.title : null)];
+    if (head) {
+      const parts = [h("span", {cls: "kicker", text: head.kicker}),
+                     h("h1", {cls: "talk-title", text: head.title})];
+      if (head.chips.length) parts.push(chips(h, head.chips));
+      nodes.push(h("div", {cls: "detail-head"}, parts));
+    }
+    if (!data) {
+      if (talk.dropped) nodes.push(h("p", {cls: "quiet", text: WORDS.reading_again}));
+      return nodes;
+    }
+    const list = [];
+    if (!data.live) {
+      list.push(notice(h, WORDS.window_gone));
+    } else {
+      if (data.unreadable) list.push(notice(h, WORDS.cant_read_session));
+      for (const t of data.turns) list.push(turn(h, t));
+    }
+    for (const s of talk.sends || []) {
+      list.push(sendCard(h, on, s, (talk.texts || {})[s.id], s.restarted));
+    }
+    const pending = data.live ? data.pending : null;
+    if (pending && pending.unreadable) {
+      list.push(notice(h, WORDS.cant_read_question));
+    } else if (pending && pending.questions && (data.offered || {}).answer
+               && !answering(talk)) {
+      list.push(answerBlock(h, on, pending, askingFor(ui, pending)));
+    }
+    const off = offText(data);
+    if (off) list.push(h("p", {cls: "talk-off", text: off}));
+    nodes.push(h("div", {cls: "turns"}, list));
+    nodes.push(h("button", {cls: "new-pill", text: WORDS.new_messages, hidden: !talk.unseen,
+                            attrs: {id: "newpill"}, on: {click: () => on.toBottom()}}));
+    return nodes;
+  }
+  // What Claude waits on (ADR-029 increment 5): a question's block, the last
+  // of the screen. A lone single-select question sends on one tap; otherwise
+  // each choice is a toggle and one "Send answer" sends them all. "Other…"
+  // opens a one-line field. Its state lives in ui.asking, so a read every
+  // two seconds keeps what the person chose; a new question starts afresh.
+  function askingFor(ui, pending) {
+    if (!ui.asking || ui.asking.id !== pending.id) {
+      ui.asking = {id: pending.id, picks: pending.questions.map(() => []),
+                   other: pending.questions.map(() => ""),
+                   open: pending.questions.map(() => false), inputs: [], error: "",
+                   busy: false, typing: false, stale: false};
+    }
+    return ui.asking;
+  }
+  function lone(pending) {
+    return pending.questions.length === 1 && !pending.questions[0].multi;
+  }
+  function answerComplete(pending, state) {
+    return pending.questions.every((q, n) => state.picks[n].length > 0
+      || (state.open[n] && !!state.other[n].trim()));
+  }
+  function answering(talk) {
+    return (talk.sends || []).some((s) => s.kind === "question" && !s.restarted
+      && ["held", "due", "typed"].includes(s.state));
+  }
+  function answerSummary(pending, answers) {
+    return answers.map((a, n) => {
+      const q = pending.questions[n];
+      const parts = a.choices.map((c) => q.choices[c].label);
+      if (a.other !== null) parts.push(a.other);
+      return parts.join(", ");
+    }).join("\n");
+  }
+  function answerBlock(h, on, pending, state) {
+    const one = lone(pending);
+    const parts = [];
+    state.inputs = [];
+    pending.questions.forEach((q, qi) => {
+      const items = [h("p", {cls: "question-text", text: q.text})];
+      q.choices.forEach((c, ci) => {
+        const picked = state.picks[qi].includes(ci);
+        const kids = [h("span", {cls: "choice-label", text: c.label})];
+        if (c.description) kids.push(h("span", {cls: "choice-note", text: c.description}));
+        items.push(h("button", {
+          cls: "btn secondary tall choice" + (picked ? " picked" : ""),
+          attrs: one ? {} : {"aria-pressed": picked ? "true" : "false"},
+          on: {click: () => on.pick(qi, ci)}}, kids));
+      });
+      if (q.other && state.open[qi]) {
+        const input = h("input", {cls: "answer-other", value: state.other[qi], attrs: {
+          type: "text", maxlength: "8000", "aria-label": WORDS.your_answer,
+          placeholder: WORDS.other_placeholder},
+          on: {input: (event, node) => on.otherInput(qi, node.value),
+               focus: () => on.typing(true), blur: () => on.typing(false)}});
+        state.inputs[qi] = input;
+        items.push(input);
+        if (one) {
+          items.push(h("button", {cls: "btn primary tall other-send", text: WORDS.send,
+                                  on: {click: () => on.sendOther()}}));
+        }
+      } else if (q.other) {
+        items.push(h("button", {cls: "btn secondary tall other-open", text: WORDS.other,
+                                on: {click: () => on.otherOpen(qi)}}));
+      }
+      parts.push(h("div", {cls: "question"}, items));
+    });
+    if (!one) {
+      const send = h("button", {cls: "btn primary tall send-answer", text: WORDS.send_answer,
+                                on: {click: () => on.sendAnswer()}});
+      send.disabled = state.busy || !answerComplete(pending, state);
+      parts.push(send);
+    }
+    if (state.error) parts.push(h("p", {cls: "answer-error", text: state.error}));
+    return h("div", {cls: "card asking"}, parts);
+  }
+  // The screen ui says, or the overview when its session or project has gone.
   function screen(view, ui, h, on, now) {
+    if (ui.screen === "conversation" && ui.talk) return conversation(view, ui, h, on);
     if (ui.screen === "detail" && view.details[ui.key]) return detail(view, ui, h, on, now);
     if (ui.screen === "leftovers") return leftovers(view, ui, h, on);
+    if (ui.screen === "chain" && view.chain && view.chain.projects[ui.key]) {
+      return chainScreen(view, ui, h, on, now);
+    }
     ui.screen = "overview";
     ui.key = null;
     return overview(view, ui, h, on);
@@ -628,8 +1132,13 @@ const ORACLE = (function () {
                               value: form.label, on: {input: edit("label")}});
     const prompt = h("textarea", {attrs: {rows: "3", "aria-label": WORDS.prompt_field},
                                   value: form.prompt, on: {input: edit("prompt")}});
+    const model = h("input", {attrs: {type: "text", autocomplete: "off", autocapitalize: "none",
+                                      spellcheck: "false", "aria-label": WORDS.model_field,
+                                      placeholder: WORDS.model_hint},
+                              value: form.model || "", on: {input: edit("model")}});
     const built = {
-      picker: picker, label: label, prompt: prompt,
+      picker: picker, label: label, prompt: prompt, model: model,
+      modelLine: h("div", {cls: "note start-model"}),
       title: h("h2", {cls: "sheet-title"}), sentence: h("p", {cls: "sentence"}),
       name: h("div", {cls: "note start-name"}), facts: h("div", {cls: "inset checked"}),
       refused: h("p", {cls: "refused start-refused", hidden: true}),
@@ -651,6 +1160,7 @@ const ORACLE = (function () {
       field(h, WORDS.project_field, [picker]),
       field(h, WORDS.label_field, [label, built.name]),
       field(h, WORDS.prompt_field, [prompt, h("span", {cls: "note", text: WORDS.prompt_hint})]),
+      field(h, WORDS.model_field, [model, built.modelLine]),
       built.facts, built.refused,
       h("details", {cls: "sheet-toggle"}, [
         h("summary", {text: WORDS.exact_start}),
@@ -674,6 +1184,7 @@ const ORACLE = (function () {
     built.title.textContent = w.title;
     built.sentence.textContent = w.sentence;
     built.name.textContent = w.name_line;
+    built.modelLine.textContent = w.model_line || "";
     built.facts.replaceChildren(h("span", {cls: "label", text: WORDS.checked_now}),
                                 ...w.facts.map((line) => h("div", {text: line})));
     built.command.textContent = w.command;
@@ -715,15 +1226,32 @@ const ORACLE = (function () {
           countdown: countdown, makeLoop: makeLoop, actionBody: actionBody, jobPoll: jobPoll,
           moved: moved, clock: clock, screen: screen, messageSheet: messageSheet,
           confirmSheet: confirmSheet, resultSheet: resultSheet, startUrl: startUrl,
-          startBody: startBody, startSheet: startSheet, fillStart: fillStart};
+          startBody: startBody, startSheet: startSheet, fillStart: fillStart,
+          keyBytes: keyBytes, icon: icon, sendLine: sendLine, reasonText: reasonText,
+          lone: lone, answerComplete: answerComplete, answerSummary: answerSummary};
 })();
 
 if (typeof document !== "undefined") {
   const byId = (id) => document.getElementById(id);
   const SVG = "http://www.w3.org/2000/svg";
   const SVG_TAGS = {svg: true, path: true, rect: true};
-  const ui = {screen: "overview", key: null, open: {}, more: {}, scroll: {}};
+  // The open conversation (ADR-029 increment 2): its row, its last read, and
+  // whether turns arrived below the person's view.
+  const talk = {key: null, data: null, unseen: false, dropped: false, failures: 0,
+                timer: null, reading: false, pending: null, sends: [], texts: {}};
+  // This device's sends (ADR-029 increment 3): each one's text, in memory only
+  // until it is delivered or gone, and the boot it was sent under.
+  const sent = {};
+  let serverBoot = null;
+  const compose = {box: null, input: null, button: null, stop: null, error: null,
+                   busy: false, focus: false};
+  const ui = {screen: "overview", key: null, open: {}, more: {}, scroll: {}, talk: talk,
+              push: {supported: false, homeScreen: false, subscribed: false, busy: false,
+                     error: "", blocked: false}};
   let current = null;
+  // Every session's text dropped after a while in the background (ADR-009 D17).
+  let dropped = false;
+  let hiddenAt = null;
   let lastError = "";
   let panelJob = null;
   let countdownTimer = null;
@@ -753,13 +1281,278 @@ if (typeof document !== "undefined") {
   }
 
   function draw() {
+    if (ui.asking && ui.asking.typing) {
+      // The person is typing an "Other" answer: a redraw would take the field
+      // from under them. It is drawn when they leave it.
+      ui.asking.stale = true;
+      return;
+    }
+    if (dropped) {
+      byId("screen").replaceChildren(h("p", {cls: "quiet", text: WORDS.reading_again}));
+      return;
+    }
     if (!current) return;
     const y = window.scrollY;
     const nodes = ORACLE.screen(current.view, ui, h, on, Date.now());
     byId("screen").replaceChildren(...nodes);
-    byId("screen").className = ui.screen === "overview" ? "" : "sub";
+    const composing = showComposer();
+    byId("screen").className = (ui.screen === "overview" ? "" : "sub")
+      + (composing ? " talking" : "");
     byId("top").className = ui.screen === "overview" ? "" : "sub";
     window.scrollTo(0, y);
+  }
+
+  // -- the composer (ADR-029 increment 3): built once, outside the redrawn
+  // screen, so a read every two seconds never takes the person's draft.
+  function buildComposer() {
+    if (compose.box) return;
+    compose.input = h("textarea", {cls: "composer-input", value: "", attrs: {
+      rows: "1", maxlength: "8000", "aria-label": WORDS.message_claude,
+      placeholder: WORDS.message_claude}});
+    compose.button = h("button", {cls: "send-btn", attrs: {"aria-label": WORDS.send},
+                                  on: {click: () => sendMessage()}},
+                       [ORACLE.icon(h, "send", 22, "2.2")]);
+    // Stop (ADR-029 increment 4): a secondary round button beside Send while a
+    // turn runs; it stays when send is off, as the one way to stop the turn.
+    compose.stop = h("button", {cls: "stop-btn", attrs: {"aria-label": WORDS.stop},
+                                on: {click: () => stopTurn()}},
+                     [ORACLE.icon(h, "stop", 22, "2")]);
+    compose.error = h("p", {cls: "composer-error", hidden: true});
+    compose.box = byId("composer");
+    compose.box.replaceChildren(compose.error, h("div", {cls: "composer-row"},
+                                                 [compose.input, compose.stop, compose.button]));
+  }
+  function showComposer() {
+    const box = byId("composer");
+    const data = talk.data;
+    const offered = (data && data.offered) || {};
+    const shown = !dropped && ui.screen === "conversation" && !!data && !!data.live
+      && (!!offered.send || !!offered.interrupt);
+    box.hidden = !shown;
+    if (!shown) return false;
+    buildComposer();
+    compose.input.hidden = !offered.send;
+    compose.button.hidden = !offered.send;
+    compose.stop.hidden = !offered.interrupt;
+    compose.stop.disabled = compose.busy;
+    compose.input.setAttribute("placeholder", data.offered.running ? WORDS.message_turn_end
+                                                                   : WORDS.message_claude);
+    compose.button.disabled = compose.busy;
+    if (compose.focus) {
+      compose.focus = false;
+      compose.input.focus();
+    }
+    return true;
+  }
+  function composeError(text) {
+    if (!compose.error) return;
+    compose.error.textContent = text || "";
+    compose.error.hidden = !text;
+  }
+  // The sends shown: the server's list for this row, with the text this page
+  // still holds; one from an older boot of the server is dropped (D7).
+  function mergeSends() {
+    const listed = (talk.data && talk.data.sends) || [];
+    const seen = {};
+    const shown = [];
+    for (const s of listed) {
+      seen[s.id] = true;
+      shown.push(s);
+    }
+    for (const id of Object.keys(sent)) {
+      const mine = sent[id];
+      if (seen[id] || mine.row !== talk.key || mine.boot === serverBoot) continue;
+      if (!mine.live && !mine.restarted) continue;
+      mine.restarted = true;
+      shown.push({id: id, state: "dropped", reason: "restart", restarted: true});
+    }
+    talk.sends = shown;
+    talk.texts = {};
+    for (const s of shown) {
+      const mine = sent[s.id];
+      if (!mine) continue;
+      mine.live = !s.restarted && ["held", "queued", "due", "typed"].includes(s.state);
+      if (mine.text) talk.texts[s.id] = mine.text;
+    }
+  }
+  function noteBoot(boot) {
+    if (boot) serverBoot = boot;
+  }
+  async function talkPost(url, body) {
+    const response = await fetch(url, {method: "POST", credentials: "same-origin",
+                                       redirect: "manual",
+                                       headers: {"Content-Type": "application/json"},
+                                       body: JSON.stringify(body)});
+    if (ORACLE.moved(response)) {
+      location.reload();
+      throw new Error(WORDS.moved);
+    }
+    let answer = {};
+    try { answer = await response.json(); } catch (e) {}
+    return {status: response.status, body: answer};
+  }
+  async function sendMessage() {
+    if (!compose.input || compose.busy || talk.key === null) return;
+    const text = compose.input.value;
+    if (!text.trim()) return;
+    compose.busy = true;
+    composeError("");
+    draw();
+    if (talk.pending) await talk.pending;
+    const key = talk.key;
+    try {
+      const nonce = (talk.data && talk.data.nonce) || "";
+      const answer = await talkPost("/api/talk", {row: key, nonce: nonce, kind: "message",
+                                                  text: text});
+      if (answer.status === 202 && answer.body.send) {
+        noteBoot(answer.body.boot);
+        sent[answer.body.send.id] = {text: text, boot: answer.body.boot, row: key,
+                                     live: true};
+        compose.input.value = "";
+        if (talk.data) {
+          talk.data.nonce = null;
+          talk.data.sends = [...(talk.data.sends || []), answer.body.send];
+        }
+      } else {
+        const why = answer.body.reason && WORDS["talk_why_" + answer.body.reason]
+          ? ORACLE.reasonText(answer.body.reason) : (answer.body.error || "HTTP " + answer.status);
+        composeError(ORACLE.fill(WORDS.talk_refused, {reason: why}));
+      }
+    } catch (err) {
+      composeError(ORACLE.fill(WORDS.talk_unreached, {error: err.message}));
+    } finally {
+      compose.busy = false;
+      mergeSends();
+      draw();
+      wakeTalk();
+    }
+  }
+  // Stop (ADR-029 increment 4): an interrupt, one tap with the same Undo; the
+  // draft in the composer is the person's and stays as it is.
+  async function stopTurn() {
+    if (compose.busy || talk.key === null) return;
+    compose.busy = true;
+    composeError("");
+    draw();
+    if (talk.pending) await talk.pending;
+    const key = talk.key;
+    try {
+      const nonce = (talk.data && talk.data.nonce) || "";
+      const answer = await talkPost("/api/talk", {row: key, nonce: nonce, kind: "interrupt"});
+      if (answer.status === 202 && answer.body.send) {
+        noteBoot(answer.body.boot);
+        sent[answer.body.send.id] = {text: "", boot: answer.body.boot, row: key, live: true};
+        if (talk.data) {
+          talk.data.nonce = null;
+          talk.data.sends = [...(talk.data.sends || []), answer.body.send];
+        }
+      } else {
+        const why = answer.body.reason && WORDS["talk_why_" + answer.body.reason]
+          ? ORACLE.reasonText(answer.body.reason) : (answer.body.error || "HTTP " + answer.status);
+        composeError(ORACLE.fill(WORDS.talk_refused, {reason: why}));
+      }
+    } catch (err) {
+      composeError(ORACLE.fill(WORDS.talk_unreached, {error: err.message}));
+    } finally {
+      compose.busy = false;
+      mergeSends();
+      draw();
+      wakeTalk();
+    }
+  }
+  async function undoSend(id) {
+    try {
+      const answer = await talkPost("/api/talk/cancel", {id: id});
+      if (answer.status === 200) {
+        const mine = sent[id];
+        if (mine && mine.kind !== "question" && compose.input && !compose.input.value) {
+          compose.input.value = mine.text || "";
+        }
+        delete sent[id];
+        if (talk.data) talk.data.sends = (talk.data.sends || []).filter((s) => s.id !== id);
+        composeError("");
+      } else {
+        composeError(ORACLE.fill(WORDS.talk_refused, {reason: answer.body.error || ""}));
+      }
+    } catch (err) {
+      composeError(ORACLE.fill(WORDS.talk_unreached, {error: err.message}));
+    }
+    mergeSends();
+    draw();
+    wakeTalk();
+  }
+
+  // A question's answer (ADR-029 increment 5): one tap with the same Undo;
+  // the page keeps what was chosen until the answer is delivered or gone.
+  async function postAnswer(answers) {
+    const state = ui.asking;
+    const pending = talk.data && talk.data.pending;
+    if (!state || !pending || state.busy || talk.key === null) return;
+    state.busy = true;
+    state.error = "";
+    draw();
+    if (talk.pending) await talk.pending;
+    const key = talk.key;
+    try {
+      const nonce = (talk.data && talk.data.nonce) || "";
+      const answer = await talkPost("/api/talk", {row: key, nonce: nonce, kind: "question",
+                                                  answers: answers});
+      if (answer.status === 202 && answer.body.send) {
+        noteBoot(answer.body.boot);
+        sent[answer.body.send.id] = {text: ORACLE.answerSummary(pending, answers),
+                                     boot: answer.body.boot, row: key, live: true,
+                                     kind: "question"};
+        if (talk.data) {
+          talk.data.nonce = null;
+          talk.data.sends = [...(talk.data.sends || []), answer.body.send];
+        }
+      } else {
+        const why = answer.body.reason && WORDS["talk_why_" + answer.body.reason]
+          ? ORACLE.reasonText(answer.body.reason) : (answer.body.error || "HTTP " + answer.status);
+        state.error = ORACLE.fill(WORDS.talk_refused, {reason: why});
+      }
+    } catch (err) {
+      state.error = ORACLE.fill(WORDS.talk_unreached, {error: err.message});
+    } finally {
+      state.busy = false;
+      mergeSends();
+      draw();
+      wakeTalk();
+    }
+  }
+  function pickAnswer(qi, ci) {
+    const pending = talk.data && talk.data.pending;
+    const state = ui.asking;
+    if (!pending || !state) return;
+    if (ORACLE.lone(pending)) {
+      postAnswer([{choices: [ci], other: null}]);
+      return;
+    }
+    const picks = state.picks[qi];
+    if (pending.questions[qi].multi) {
+      state.picks[qi] = picks.includes(ci) ? picks.filter((c) => c !== ci) : [...picks, ci];
+    } else {
+      state.picks[qi] = [ci];
+      state.open[qi] = false;
+    }
+    draw();
+  }
+  function openOther(qi) {
+    const pending = talk.data && talk.data.pending;
+    const state = ui.asking;
+    if (!pending || !state) return;
+    state.open[qi] = true;
+    if (!pending.questions[qi].multi) state.picks[qi] = [];
+    draw();
+    if (state.inputs[qi]) state.inputs[qi].focus();
+  }
+  function sendAnswers() {
+    const pending = talk.data && talk.data.pending;
+    const state = ui.asking;
+    if (!pending || !state || !ORACLE.answerComplete(pending, state)) return;
+    postAnswer(pending.questions.map((q, n) => ({
+      choices: [...state.picks[n]].sort((a, b) => a - b),
+      other: state.open[n] && state.other[n].trim() ? state.other[n] : null})));
   }
 
   function go(screen, key, push) {
@@ -768,8 +1561,115 @@ if (typeof document !== "undefined") {
     ui.key = key || null;
     ui.more = {};
     if (push) history.pushState({screen: screen, key: ui.key}, "");
+    if (screen !== "conversation") stopTalk();
+    else if (talk.key !== ui.key) openTalk(ui.key);
     draw();
     window.scrollTo(0, screen === "overview" ? (ui.scroll.overview || 0) : 0);
+    if (screen === "conversation" && talk.timer === null && !talk.reading) readTalk();
+  }
+
+  // -- the conversation: read on demand, every 2 s while open and seen ------------------
+  function stopTalk() {
+    if (talk.timer !== null) clearTimeout(talk.timer);
+    talk.timer = null;
+    talk.key = null;
+    talk.data = null;
+    talk.sends = [];
+    talk.texts = {};
+    composeError("");
+    talk.unseen = false;
+    talk.dropped = false;
+    talk.failures = 0;
+  }
+  function openTalk(key) {
+    stopTalk();
+    ui.asking = null;
+    talk.key = key;
+  }
+  function atBottom() {
+    return window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 48;
+  }
+  function toBottom() {
+    talk.unseen = false;
+    const pill = byId("newpill");
+    if (pill) pill.hidden = true;
+    window.scrollTo(0, document.documentElement.scrollHeight);
+  }
+  function showTalk(data) {
+    const changed = !talk.data || data.cursor !== talk.data.cursor;
+    const pinned = !talk.data || atBottom();
+    talk.data = data;
+    talk.dropped = false;
+    mergeSends();
+    if (changed && !pinned) talk.unseen = true;
+    draw();
+    if (changed && pinned) toBottom();
+  }
+  function readTalk() {
+    const reading = readTalkNow();
+    talk.pending = reading;
+    return reading;
+  }
+  async function readTalkNow() {
+    talk.timer = null;
+    const key = talk.key;
+    if (ui.screen !== "conversation" || key === null || talk.reading) return;
+    if (document.visibilityState !== "visible") return;
+    talk.reading = true;
+    let url = "/api/session?row=" + encodeURIComponent(key);
+    if (talk.data && talk.data.cursor) url += "&after=" + encodeURIComponent(talk.data.cursor);
+    try {
+      const response = await fetch(url, {cache: "no-store", credentials: "same-origin",
+                                         redirect: "manual"});
+      if (ORACLE.moved(response)) {
+        location.reload();
+        return;
+      }
+      if (response.status === 404) {
+        if (key === talk.key) {
+          showTalk({live: false, turns: [], unreadable: false, cursor: "gone",
+                    head: talk.data ? talk.data.head : null});
+        }
+      } else if (!response.ok) {
+        throw new Error("HTTP " + response.status);
+      } else {
+        const data = await response.json();
+        noteBoot(data.boot);
+        if (key === talk.key) {
+          showTalk(data.unchanged ? Object.assign({}, talk.data, data) : data);
+        }
+      }
+      talk.failures = 0;
+    } catch (err) {
+      talk.failures += 1;
+    } finally {
+      talk.reading = false;
+      if (key === talk.key && ui.screen === "conversation") {
+        talk.timer = setTimeout(readTalk,
+                                ORACLE.retryDelay(TALK_INTERVAL, talk.failures) * 1000);
+      }
+    }
+  }
+  function wakeTalk() {
+    if (ui.screen !== "conversation" || talk.key === null) return;
+    if (talk.timer !== null) clearTimeout(talk.timer);
+    talk.timer = null;
+    readTalk();
+  }
+  // Hidden past DROP_AFTER: the state read and the conversation go, with
+  // every session's text in them; only how fresh the last read was stays.
+  function dropText() {
+    current = null;
+    const state = loop.state;
+    state.data = state.data ? {freshness: state.data.freshness} : null;
+    talk.data = null;
+    talk.unseen = false;
+    talk.dropped = true;
+    talk.sends = [];
+    talk.texts = {};
+    for (const id of Object.keys(sent)) sent[id].text = null;
+    dropped = true;
+    draw();
   }
 
   function showSheet(built) {
@@ -880,7 +1780,7 @@ if (typeof document !== "undefined") {
     const start = current && current.view.start;
     if (!start || !start.projects.length) return;
     closeSheet();
-    startForm = {project: project || start.projects[0].id, label: "", prompt: ""};
+    startForm = {project: project || start.projects[0].id, label: "", prompt: "", model: ""};
     showSheet(ORACLE.messageSheet(h, on, WORDS.loading, false));
     const answer = await askStart();
     if (!answer || !startForm) return;
@@ -916,6 +1816,7 @@ if (typeof document !== "undefined") {
     startForm.project = built.picker.value;
     startForm.label = built.label.value;
     startForm.prompt = built.prompt.value;
+    startForm.model = built.model.value;
     built.run.disabled = true;
     const answer = await askStart();
     if (!answer || startBuilt !== built) return;
@@ -979,6 +1880,103 @@ if (typeof document !== "undefined") {
     setTimeout(poll, 1000);
   }
 
+  // Web push (ADR-027 increment 4). The worker is registered once the Mac
+  // offers push, and this browser's own subscription is read again on every
+  // refresh, since only the browser knows it.
+  let pushReg = null;
+  let pushAsked = false;
+
+  function pushPrepare(data) {
+    const offered = data.view.push;
+    if (!offered || !offered.available) return;
+    const local = ui.push;
+    local.supported = !!(window.isSecureContext && navigator.serviceWorker && window.PushManager);
+    local.homeScreen = !local.supported && navigator.standalone === false;
+    if (!local.supported) return;
+    if (pushReg) {
+      pushReg.pushManager.getSubscription().then((sub) => {
+        if (!!sub !== local.subscribed) { local.subscribed = !!sub; draw(); }
+      }, () => {});
+      return;
+    }
+    if (pushAsked) return;
+    pushAsked = true;
+    (async () => {
+      try {
+        pushReg = await navigator.serviceWorker.register("/sw.js");
+        local.subscribed = !!(await pushReg.pushManager.getSubscription());
+        if (typeof Notification !== "undefined" && Notification.permission === "denied") {
+          local.blocked = true;
+        }
+      } catch (err) {
+        local.error = err && err.message ? err.message : String(err);
+      }
+      draw();
+    })();
+  }
+
+  async function pushPost(url, body) {
+    const response = await fetch(url, {
+      method: "POST", cache: "no-store", credentials: "same-origin",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    if (response.ok) return;
+    let error = "HTTP " + response.status;
+    try { error = (await response.json()).error || error; } catch (e) {}
+    throw new Error(error);
+  }
+
+  // The tap: subscribe first, while the tap still counts as the person's, so
+  // the browser asks its permission; then hand the subscription to the Mac.
+  async function pushOn() {
+    const offered = current && current.view.push;
+    if (!pushReg || !offered || !offered.key) return;
+    const local = ui.push;
+    const options = {userVisibleOnly: true, applicationServerKey: ORACLE.keyBytes(offered.key)};
+    local.busy = true;
+    local.error = "";
+    local.blocked = false;
+    draw();
+    try {
+      let sub;
+      try {
+        sub = await pushReg.pushManager.subscribe(options);
+      } catch (err) {
+        if (!err || err.name !== "InvalidStateError") throw err;
+        const old = await pushReg.pushManager.getSubscription();
+        if (old) await old.unsubscribe();
+        sub = await pushReg.pushManager.subscribe(options);
+      }
+      await pushPost("/api/push/subscribe", sub);
+      local.subscribed = true;
+    } catch (err) {
+      if (err && err.name === "NotAllowedError") local.blocked = true;
+      else local.error = err && err.message ? err.message : String(err);
+    }
+    local.busy = false;
+    draw();
+    loop.wake();
+  }
+
+  async function pushOff() {
+    const local = ui.push;
+    local.busy = true;
+    local.error = "";
+    draw();
+    try {
+      const sub = pushReg ? await pushReg.pushManager.getSubscription() : null;
+      const endpoint = sub ? sub.endpoint : null;
+      if (sub) await sub.unsubscribe();
+      await pushPost("/api/push/unsubscribe", {endpoint: endpoint});
+      local.subscribed = false;
+    } catch (err) {
+      local.error = err && err.message ? err.message : String(err);
+    }
+    local.busy = false;
+    draw();
+    loop.wake();
+  }
+
   const on = {
     open: (key) => go("detail", key, true),
     back: () => {
@@ -989,6 +1987,28 @@ if (typeof document !== "undefined") {
       if (event && event.preventDefault) event.preventDefault();
       go("leftovers", null, true);
     },
+    chain: (key) => go("chain", key, true),
+    conversation: (key) => go("conversation", key, true),
+    reply: (key) => { compose.focus = true; go("conversation", key, true); },
+    answer: (key) => go("conversation", key, true),
+    pick: pickAnswer,
+    otherOpen: openOther,
+    otherInput: (qi, value) => { if (ui.asking) ui.asking.other[qi] = value; },
+    sendOther: () => {
+      const state = ui.asking;
+      if (state && state.other[0].trim()) postAnswer([{choices: [], other: state.other[0]}]);
+    },
+    sendAnswer: sendAnswers,
+    typing: (on) => {
+      if (!ui.asking) return;
+      ui.asking.typing = on;
+      if (!on && ui.asking.stale) {
+        ui.asking.stale = false;
+        draw();
+      }
+    },
+    undo: (id) => undoSend(id),
+    toBottom: toBottom,
     toggle: (id, open) => { ui.open[id] = open; },
     more: (id) => { ui.more[id] = true; draw(); },
     confirm: (row) => openConfirm(row),
@@ -1008,10 +2028,15 @@ if (typeof document !== "undefined") {
     },
     copy: copy,
     close: closeSheet,
+    pushOn: pushOn,
+    pushOff: pushOff,
   };
 
   function render(data) {
     current = data;
+    dropped = false;
+    noteBoot(data.boot);
+    pushPrepare(data);
     draw();
     const banner = byId("banner");
     banner.textContent = data.freshness.banner || "";
@@ -1068,8 +2093,22 @@ if (typeof document !== "undefined") {
   byId("newsession").addEventListener("click", () => openStart(null));
   byId("scrim").addEventListener("click", closeSheet);
   setInterval(showAge, 1000);
+  let dropTimer = null;
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") loop.wake();
+    if (document.visibilityState === "visible") {
+      if (dropTimer !== null) clearTimeout(dropTimer);
+      dropTimer = null;
+      if (hiddenAt !== null && Date.now() - hiddenAt >= DROP_AFTER * 1000) dropText();
+      hiddenAt = null;
+      loop.wake();
+      wakeTalk();
+      return;
+    }
+    hiddenAt = Date.now();
+    dropTimer = setTimeout(() => { dropTimer = null; dropText(); }, DROP_AFTER * 1000);
+  });
+  window.addEventListener("scroll", () => {
+    if (ui.screen === "conversation" && talk.unseen && atBottom()) toBottom();
   });
   for (const name of ["online", "pageshow", "focus"]) {
     window.addEventListener(name, () => loop.wake());
@@ -1083,6 +2122,40 @@ _REFRESH_ICON = (
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
     '<path d="M21 12a9 9 0 1 1-2.6-6.4"></path><path d="M21 4v5h-5"></path></svg>'
 )
+
+
+#: Where the service worker is served: the root, so its scope is the whole page.
+WORKER_PATH = "/sw.js"
+
+#: The service worker (ADR-027 increment 4). It reads nothing and fetches
+#: nothing: a push carries the banner's own text, sealed for this browser,
+#: and the worker shows it; a tap focuses the open panel, else opens it.
+_WORKER = """// The oracle's service worker: shows a push, opens the panel on a tap.
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = (event.data && event.data.json()) || {};
+  } catch (err) {
+    data = {};
+  }
+  const body = [data.subtitle, data.message].filter((part) => part).join("\\n");
+  event.waitUntil(self.registration.showNotification(data.title || "invariant", {
+    body: body, silent: data.silent === true, icon: "/icon-192.png", data: {url: "/"}}));
+});
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(self.clients.matchAll({type: "window", includeUncontrolled: true})
+    .then((windows) => {
+      for (const client of windows) if ("focus" in client) return client.focus();
+      return self.clients.openWindow("/");
+    }));
+});
+"""
+
+
+def service_worker() -> str:
+    """The service worker's script, served at :data:`WORKER_PATH` to a paired device."""
+    return _WORKER
 
 
 #: Where the manifest and the icons are served, and each icon's size in pixels.
@@ -1230,6 +2303,7 @@ def page(nonce: str, words: Mapping[str, str], interval: float = DEFAULT_INTERVA
         '<div id="banner" class="notice" hidden></div>'
         '<div id="error" class="notice" hidden></div></header>'
         '<main id="screen"></main>'
+        '<div id="composer" hidden></div>'
         '<div id="scrim" hidden></div>'
         '<div id="sheet" role="dialog" aria-modal="true" hidden></div>'
     )
@@ -1237,6 +2311,8 @@ def page(nonce: str, words: Mapping[str, str], interval: float = DEFAULT_INTERVA
         _SCRIPT.replace("__MAX_BACKOFF__", f"{MAX_BACKOFF:g}")
         .replace("__STALE_INTERVALS__", str(STALE_INTERVALS))
         .replace("__INTERVAL__", f"{interval:g}")
+        .replace("__TALK_INTERVAL__", f"{CONVERSATION_INTERVAL:g}")
+        .replace("__DROP_AFTER__", f"{BACKGROUND_DROP:g}")
         .replace("__WORDS__", _script_json(dict(words)))
     )
     return _document(nonce, words["title"], body, script, head=_app_head(words))

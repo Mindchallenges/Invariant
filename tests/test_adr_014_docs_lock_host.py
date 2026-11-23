@@ -225,10 +225,18 @@ class TestTheRule:
         assert denied(hosts.read(hosts.widgets, HOST_A, page, tool="Write")) is None
         assert "file:docs/new-page.rst" in lease_record(hosts.store)["units"]
 
-    def test_the_store_config_and_git_dir_are_not_governed(self, hosts):
-        for path in (hosts.store / "invariant.yaml", hosts.store / ".git" / "config"):
-            assert denied(hosts.read(hosts.gadgets, HOST_B, path)) is None
+    def test_the_store_git_dir_is_not_governed(self, hosts):
+        assert denied(hosts.read(hosts.gadgets, HOST_B, hosts.store / ".git" / "config")) is None
         assert lease_record_or_empty(hosts.store)["units"] == {}
+
+    def test_the_store_config_is_its_own_unit(self, hosts):
+        # DEC_ADR_014_B143: since 4c-2 the store's invariant.yaml holds policy.
+        manifest = hosts.store / "invariant.yaml"
+        assert denied(hosts.read(hosts.widgets, HOST_A, manifest)) is None
+        assert "file:invariant.yaml" in lease_record(hosts.store)["units"]
+        reason = denied(hosts.read(hosts.gadgets, HOST_B, manifest))
+        assert reason is not None and "file:invariant.yaml" in reason
+        assert denied(hosts.read(hosts.gadgets, HOST_B, hosts.overview)) is None
 
     def test_a_call_that_resolves_to_no_session_is_ungoverned(self, hosts):
         assert denied(hosts.read(hosts.widgets, HOST_A, hosts.overview)) is None
@@ -314,7 +322,9 @@ class TestClassify:
         store = hosts.store
         assert doclock.classify(manifest, config, hosts.gadgets / "conf.py") == (doclock.OUTSIDE, None)
         assert doclock.classify(manifest, config, store / "memory" / "x.md") == (doclock.DATA, None)
-        assert doclock.classify(manifest, config, store / "invariant.yaml") == (doclock.UNGOVERNED, None)
+        assert doclock.classify(manifest, config, store / "invariant.yaml") == (
+            doclock.GOVERNED, "file:invariant.yaml"
+        )
         assert doclock.classify(manifest, config, store / ".git" / "HEAD") == (doclock.UNGOVERNED, None)
         assert doclock.classify(manifest, config, store) == (doclock.UNGOVERNED, None)
         assert doclock.classify(manifest, config, hosts.overview) == (
@@ -329,6 +339,13 @@ class TestClassify:
         )
         assert doclock.classify(manifest, config, hosts.store / "README.md") == (
             doclock.UNGOVERNED, None
+        )
+
+    def test_the_store_config_joins_an_area_that_declares_it(self, hosts):
+        manifest = Manifest.locate(hosts.gadgets)
+        config = DocsLockConfig(areas={"config": ("invariant.yaml",)})
+        assert doclock.classify(manifest, config, hosts.store / "invariant.yaml") == (
+            doclock.GOVERNED, "area:config"
         )
 
     def test_overlays_named_in_a_mapping_are_policy(self, hosts):
@@ -361,7 +378,7 @@ class TestCost:
     def test_the_rule_builds_no_lock_for_an_ungoverned_path(self, hosts, no_lock):
         manifest = Manifest.locate(hosts.gadgets)
         session = session_record(hosts.gadgets, "bbbb2222")
-        for path in (hosts.store / "memory" / "a.md", hosts.store / "invariant.yaml"):
+        for path in (hosts.store / "memory" / "a.md", hosts.store / ".git" / "config"):
             verdict = get_rule("store.docs_lock_held").fn(
                 RuleContext(
                     manifest=manifest,
@@ -437,7 +454,10 @@ class TestEvidence:
 
     def test_docs_read_lease_is_none_for_an_ungoverned_path(self, hosts):
         sessions = SessionDomain(Manifest.locate(hosts.gadgets))
-        assert sessions.docs_read_lease("bbbb2222", hosts.store / "invariant.yaml") is None
+        assert sessions.docs_read_lease("bbbb2222", hosts.store / ".git" / "config") is None
+        assert sessions.docs_read_lease("bbbb2222", hosts.store / "invariant.yaml") == {
+            "lease": None, "unit": "file:invariant.yaml"
+        }
         assert sessions.docs_read_lease("bbbb2222", hosts.overview) == {
             "lease": None, "unit": "area:architecture"
         }

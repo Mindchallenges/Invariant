@@ -674,6 +674,48 @@ def _rulings_in(node: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[tuple[s
             yield from _rulings_in(value, here)
 
 
+
+def changed_ruled(before: str, after: str) -> list[str] | None:
+    """The ``ruled`` entries ``after`` adds or changes over ``before``
+    (ADR-032 D7, increment 2), each named by where it sits.
+
+    Every ``ruled`` mapping at any depth counts: a rule's, the layer map's,
+    an exception's. A list item is keyed by its ``id``, else by its ``path``
+    and ``fingerprint``, else by its position, so reordering a list is no
+    change. A ruling removed is not one written. ``None`` when either text
+    does not read as YAML, so nothing can be told.
+    """
+    try:
+        old = yaml.safe_load(before) if before.strip() else {}
+        new = yaml.safe_load(after) if after.strip() else {}
+    except yaml.YAMLError:
+        return None
+    was = dict(_ruled_in(old))
+    return [where for where, value in _ruled_in(new) if was.get(where) != value]
+
+
+def _ruled_in(node: Any, where: str = "") -> Iterator[tuple[str, Any]]:
+    if isinstance(node, Mapping):
+        for key, value in node.items():
+            here = f"{where}.{key}" if where else str(key)
+            if key == "ruled":
+                yield here, value
+            else:
+                yield from _ruled_in(value, here)
+    elif isinstance(node, list):
+        for position, item in enumerate(node):
+            yield from _ruled_in(item, f"{where}[{_item_key(item, position)}]")
+
+
+def _item_key(item: Any, position: int) -> str:
+    if isinstance(item, Mapping):
+        if item.get("id") is not None:
+            return str(item["id"])
+        if item.get("path") is not None:
+            fingerprint = item.get("fingerprint")
+            return str(item["path"]) + (f"#{fingerprint}" if fingerprint else "")
+    return str(position)
+
 # -- editing a level in place --------------------------------------------------------
 
 

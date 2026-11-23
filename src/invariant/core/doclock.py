@@ -66,8 +66,9 @@ HEARTBEAT_SECONDS = 60
 DOCS_LOCK_KEYS = ("areas", "lease_minutes")
 
 #: Records that are data, not policy: outside the lock (ruling 20 for
-#: memory; D5's recommendation for the backlog, reports and sweeps).
-DATA_RECORDS = ("backlog", "memory", "reports", "sweeps")
+#: memory; D5's recommendation for the backlog, reports and sweeps; the
+#: queue is data too, ADR-027 D10).
+DATA_RECORDS = ("backlog", "memory", "reports", "sweeps", "queue")
 #: Records that are policy: what an agent designs against, so a read or a
 #: write of one is held to the lock (D5, "What the lock covers").
 POLICY_RECORDS = ("docs", "guidelines")
@@ -282,8 +283,25 @@ def store_of(manifest) -> Path:
 
 
 def data_paths(manifest) -> list[tuple[str, str]]:
-    """``(record, store-relative path)`` for each data record kept in the store."""
-    return _record_paths(manifest, DATA_RECORDS)
+    """``(record, store-relative path)`` for each data record kept in the store.
+
+    The queue's plan page is the queue's (ADR-032 increment 6): where the
+    queue and the docs are both kept in the store, the page is written beside
+    the queue at any time, as the queue file is, so it is a data path too.
+    """
+    found = _record_paths(manifest, DATA_RECORDS)
+    if (manifest.get("records") or {}).get("queue") != "store":
+        return found
+    from .queue import plan_page  # local: the queue's page, read only here
+
+    page, _why = plan_page(manifest)
+    if page is not None:
+        try:
+            found.append(("queue", page.resolve().relative_to(store_of(manifest).resolve())
+                          .as_posix()))
+        except ValueError:
+            pass
+    return found
 
 
 def policy_paths(manifest) -> list[tuple[str, str]]:
@@ -324,13 +342,17 @@ def classify(manifest, config: DocsLockConfig, path: Path | str) -> tuple[str, s
     """Where a path a tool call names stands with the lock, and its unit.
 
     ``(OUTSIDE, None)`` outside the store; ``(DATA, None)`` under memory, the
-    backlog, reports or sweeps kept there, which are written at any time
-    (ruling 20); ``(UNGOVERNED, None)`` in the store under no policy record
-    and no declared area (the store's own ``invariant.yaml``, its git
-    directory); else ``(GOVERNED, unit)``. A policy path is one under a policy
-    record kept in the store (the docs, the guidelines) or matched by a
-    declared area, so an area may reach files no record names.
+    backlog, reports, sweeps or the queue kept there, which are written at any
+    time (ruling 20); ``(UNGOVERNED, None)`` in the store under no policy record
+    and no declared area (its git directory, the store root itself); else
+    ``(GOVERNED, unit)``. A policy path is one under a policy record kept in
+    the store (the docs, the guidelines), the store's own ``invariant.yaml``,
+    which holds the guidelines' policy keys since increment 4c-2
+    (DEC_ADR_014_B143), or one matched by a declared area, so an area may
+    reach files no record names.
     """
+    from .stores import STORE_MANIFEST  # local: stores imports this module
+
     root = store_of(manifest).resolve()
     try:
         rel_path = Path(path).resolve().relative_to(root)
@@ -339,6 +361,8 @@ def classify(manifest, config: DocsLockConfig, path: Path | str) -> tuple[str, s
     rel = rel_path.as_posix()
     if rel in ("", ".") or rel_path.parts[0] == ".git":
         return UNGOVERNED, None
+    if rel == STORE_MANIFEST:
+        return GOVERNED, unit_of(rel, config)
     if any(_under(rel, base) for _, base in data_paths(manifest)):
         return DATA, None
     in_area = any(_matches(rel, p) for patterns in config.areas.values() for p in patterns)

@@ -670,6 +670,11 @@ Decisions
    :part_of: DEC_ADR_018
    :affects: COMP_CORE_RULES, COMP_CMD_ITEMS
 
+   *Amended 2026-11-22 by* :need:`DEC_ADR_032_D8` *(ADR-032, ruling: user; not
+   yet built).* The starter writes the whole default set (layers, the five
+   SOLID rules, the pattern and docs-first rules) and the pattern catalogue,
+   through the ``guidelines adopt`` writer.
+
    - **The starter** (ADR-016's Markdown ``overview.md`` is retired):
      ``conf.py`` (sphinx-needs and sphinxcontrib-mermaid; the seven baseline
      types; dang's link set; ``needs_id_required``, ``needs_id_regex``,

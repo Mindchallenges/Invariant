@@ -74,6 +74,7 @@ from ..adapters.sphinx import conf_facts, diagnostics
 from ..core import git, mdconvert
 from ..core import guidelines as guidelines_reader
 from ..core import needs as needs_reader
+from ..core import queue as queue_reader
 from ..core.docformat import (
     Link,
     Reader,
@@ -542,16 +543,21 @@ class Starter:
     files: tuple[tuple[str, str], ...]
     settings: dict[str, Any]
     #: The guidelines ruleset the starter writes, ``(path relative to base,
-    #: text)``, carrying the mandate's two judgement rules (ADR-018 D8, D9);
-    #: ``None`` where the project has a ruleset, which is never rewritten.
+    #: text)``, carrying the default set (ADR-032) and the mandate's two
+    #: judgement rules (ADR-018 D8, D9); ``None`` where the project has a
+    #: ruleset, which is never rewritten.
     ruleset: tuple[str, str] | None = None
     #: Why no ruleset is written, with what to add by hand, or ``None``.
     note: str | None = None
+    #: The pattern catalogue copied beside the ruleset (ADR-032 D5),
+    #: ``(path relative to base, text)``; ``None`` with no ruleset written.
+    catalogue: tuple[str, str] | None = None
 
     def paths(self) -> list[Path]:
         written = [self.srcdir / rel for rel, _text in self.files]
-        if self.ruleset is not None:
-            written.append(self.base / self.ruleset[0])
+        for extra in (self.ruleset, self.catalogue):
+            if extra is not None:
+                written.append(self.base / extra[0])
         return written
 
 
@@ -669,7 +675,9 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
     element = needs_reader.type_of_role(types, "element")
     rule = needs_reader.type_of_role(types, "rule")
     backlog = f"{spelled}/{_BACKLOG}"
-    ruleset, parsed, note = _starter_ruleset(manifest, Path(base), spelled, backlog)
+    ruleset, parsed, note, catalogue = _starter_ruleset(
+        manifest, Path(base), spelled, backlog
+    )
     source = None if ruleset is None else ruleset[0]
     areas, _gaps = _assessed_areas(manifest, manifest.get("docs.assess")["areas"])
     fill = {
@@ -702,7 +710,15 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
             ),
         ),
         ("checklist.rst", guidelines_reader.render_checklist(parsed, "sphinx", source=source)),
+        (
+            guidelines_reader.PATTERNS_PAGE,
+            guidelines_reader.render_patterns(
+                None if parsed is None else parsed.catalogue,
+                source=None if catalogue is None else catalogue[0],
+            ),
+        ),
         (_BACKLOG, _template("backlog.rst", fill)),
+        (queue_reader.PLAN_PAGE, _starter_plan(manifest)),
     ]
     there = [name for name, _text in files if (srcdir / name).exists()]
     if there:
@@ -725,17 +741,82 @@ def plan_starter(manifest: Manifest, *, project: str, base: Path, docs: str) -> 
         settings=settings,
         ruleset=ruleset,
         note=note,
+        catalogue=catalogue,
+    )
+
+
+def _starter_plan(manifest: Manifest) -> str:
+    """The plan page from the empty queue a new project has (ADR-032 D11,
+    increment 6), with no session part: the toctree names it before anything
+    is queued, and the first queue edit renders it again."""
+    configured = manifest.get("paths.queue") or queue_reader.DEFAULT_PATH
+    source = PurePosixPath(configured).name if Path(configured).is_absolute() else configured
+    return queue_reader.render_page(
+        queue_reader.Queue(), source=source, needs=frozenset(), is_item=lambda _ref: False
     )
 
 
 #: The mandate's two judgement rules (ADR-018 D8, D9), as the starter writes them.
 MANDATE_GUIDELINES = ("docs.items-carry-no-design", "docs.decisions-are-declared")
 
+#: The catalogue the starter copies beside its ruleset (ADR-032 D5).
+STARTER_CATALOGUE = "patterns.yaml"
+
+
+def default_source_globs(ecosystems: Sequence[str]) -> tuple[str, ...]:
+    """What the default rules apply to (ADR-032 D4): each configured
+    ecosystem's adapter's source globs, in order and once each, or ``**``
+    where none of them knows a suffix."""
+    globs = [glob for ecosystem in ecosystems for glob in get_adapter(ecosystem).source_globs()]
+    return tuple(dict.fromkeys(globs)) or ("**",)
+
+
+def default_catalogue() -> str:
+    """The shipped pattern catalogue's text (ADR-032 D5), the one copy the
+    starter and ``guidelines adopt`` copy beside a ruleset."""
+    return (DATA_DIR / "scaffold" / "guidelines" / STARTER_CATALOGUE).read_text(encoding="utf-8")
+
+
+def default_ruleset(manifest: Manifest, backlog: str) -> str:
+    """The default set's text (ADR-032 D8): the shipped template filled with
+    the configured ecosystems' source globs and the backlog page's path, its
+    ``origin`` digests not yet stamped.
+
+    The one fill: the starter writes from it, and it is the text the
+    defaults merge is handed (``domains/guidelines``' ``merge_defaults``,
+    DEC_ADR_032_I1B).
+    """
+    sources = "\n".join(
+        f"      - {json.dumps(glob)}" for glob in default_source_globs(manifest.ecosystems)
+    )
+    return _template(
+        "../guidelines/ruleset.yaml", {"items": f"      - {backlog}", "sources": sources}
+    )
+
+
+def _mandate_rules(text: str) -> str:
+    """The mandate's two rules as the template writes them, for adding by
+    hand to a ruleset the project keeps: no ``origin``, which only a
+    version-2 ruleset reads and only a copy the engine made carries."""
+    body = text.split("\nrules:\n", 1)[1]
+    chunks = re.split(r"(?m)^(?=  - id: )", body)
+    kept = [
+        chunk for chunk in chunks
+        if any(chunk.startswith(f"  - id: {rule_id}\n") for rule_id in MANDATE_GUIDELINES)
+    ]
+    return "".join(
+        line
+        for chunk in kept
+        for line in chunk.splitlines(keepends=True)
+        if not line.lstrip().startswith("origin:")
+    )
+
 
 def _starter_ruleset(
     manifest: Manifest, base: Path, srcdir: str, backlog: str
-) -> tuple[tuple[str, str] | None, Any, str | None]:
-    """The ruleset the starter writes, its parse, and a note where it writes none.
+) -> tuple[tuple[str, str] | None, Any, str | None, tuple[str, str] | None]:
+    """The ruleset the starter writes, its parse, a note where it writes
+    none, and the catalogue copied beside it.
 
     Written inside the docs project it starts, ``<srcdir>/guidelines/
     ruleset.yaml`` (ADR-020 D10; ``docs/guidelines/ruleset.yaml``, ADR-012
@@ -748,39 +829,45 @@ def _starter_ruleset(
     resolves, and the starter's caller keeps the guidelines records there
     too (ADR-014 D9, increment 4c-2; ADR-020 D10).
     """
-    from ..core.rules import all_rules  # local: core/rules imports this domain
-
-    text = _template("../guidelines/ruleset.yaml", {"items": f"      - {backlog}"})
+    text = default_ruleset(manifest, backlog)
     configured = manifest.get("guidelines.ruleset")
     by_hand = (
         "\n  add the docs mandate's two judgement rules to it by hand (ADR-018 "
         "D8, D9), with a `docs` section:\n"
-        + "\n".join(
-            f"    {line}" for line in text.split("rules:\n", 1)[1].splitlines()
-        )
+        + "\n".join(f"    {line}" for line in _mandate_rules(text).splitlines())
     )
     if configured is not None:
         path = manifest.root / str(configured)
         held = path.read_text(encoding="utf-8") if path.is_file() else ""
         if all(rule_id in held for rule_id in MANDATE_GUIDELINES):
-            return None, None, None
-        return None, None, f"The guidelines ruleset {configured} is the project's own" + by_hand
+            return None, None, None, None
+        note = f"The guidelines ruleset {configured} is the project's own" + by_hand
+        return None, None, note, None
     location = guidelines_reader.ruleset_location(srcdir)
     if (base / location).exists():
         return None, None, (
             f"{location} exists and guidelines.ruleset is not set, so no "
             f"ruleset was written; set guidelines.ruleset to it" + by_hand
-        )
-    parsed = guidelines_reader.parse(text, registered=[r.id for r in all_rules()])
-    return (location, text), parsed, None
+        ), None
+    # The adopt writer's text (ADR-032 D8, ``DOCSD --> GDOM``), imported at
+    # call time: this domain imports no other at load.
+    from .guidelines import fresh_defaults
+
+    fresh = fresh_defaults(text, default_catalogue(), location=location)
+    catalogue = (
+        None if fresh.catalogue_rel is None
+        else (fresh.catalogue_rel, str(fresh.catalogue_text))
+    )
+    return (location, fresh.text), fresh.parsed, None, catalogue
 
 
 def write_starter(starter: Starter) -> list[Path]:
     """Write the starter's files; the paths written."""
     written = []
     entries = [(starter.srcdir / rel, text) for rel, text in starter.files]
-    if starter.ruleset is not None:
-        entries.append((starter.base / starter.ruleset[0], starter.ruleset[1]))
+    for extra in (starter.ruleset, starter.catalogue):
+        if extra is not None:
+            entries.append((starter.base / extra[0], extra[1]))
     for path, text in entries:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")

@@ -11,7 +11,8 @@ ADR-024 — A host declares its own commit attribution trailer, which privacy.cl
    - **Status:** Accepted (2026-11-16). BUG_127 left where the allowance
      lives to ``feature-architect`` (the host adapter, the default allow list,
      or a commit-message reader that knows about trailers); this record is
-     that choice, built in the same change.
+     that choice, built in the same change. Amended 2026-11-17 by D5, which
+     carries D1 and D2 to a commit made in a store (BUG_133).
    - **Date:** 2026-11-16
    - **Supersedes:** nothing. Extends ``core/privacy`` (``docs/architecture/overview.rst``,
      ``core/privacy``) and the commit-message half of ``privacy.clean``
@@ -106,9 +107,8 @@ trailer it is.
      after the session id is still a ``links`` finding, and so is a forged
      link under the host's token. Documents, memories, reports, staged files
      and ``invariant privacy scan`` read the same text as before, wherever it
-     sits in them. A commit made in a store is screened by the store's block
-     and its ``commit-msg`` hook, which this change leaves as they were:
-     BUG_133.
+     sits in them. A commit made in a store was screened by the store's block
+     and its hooks without the declarations, until D5 (BUG_133).
 
 .. dec:: BUG_043's direction 4 is no longer blocked by privacy, and stays unchosen
    :id: DEC_ADR_024_D3
@@ -192,3 +192,51 @@ trailer it is.
      verdict would vouch for text the editor replaces); scanning both sides
      of a combination git refuses (no commit follows, so the scan answers a
      question nobody asked).
+
+.. dec:: A store commit's message is read as a repository commit's, with the host the store's own level names
+   :id: DEC_ADR_024_D5
+   :status: accepted
+   :part_of: DEC_ADR_024
+   :affects: COMP_CORE_STORESCAN, COMP_CORE_RULES, COMP_CORE_STORESYNC, COMP_CLI_MAIN
+
+   - **Context.** BUG_133: D1 and D2 let the host's trailer through on the
+     repository's commit route only. A commit made in a store is read by
+     ``privacy.clean``'s store route, the store's ``commit-msg`` hook and,
+     once committed, by every push (``store push``, push after landing and
+     the ``pre-push`` hook). Each read the trailer as a ``links`` finding, so
+     an agent appending it to a store commit was refused, and a commit made
+     past the hooks could never be published. Settled 2026-11-17.
+   - **The readers.** ``StoreScreen.scan_message`` reads a message as
+     ``PrivacyScanner.scan_message`` does and takes the declarations as an
+     argument, as D1 has ``core/privacy`` take them; ``storescan.scan_message``,
+     ``scan_commits``, ``pre_push`` and ``storesync.push`` pass them through.
+     Nothing in ``core/`` names a host. D2 holds unchanged on every one of
+     them: the token spelled exactly, the trailer block only, a ``--trailer``
+     value never admitted, and documents, memories and every store file read
+     as before, with the store's own ``allow`` and nothing more.
+   - **Git's lines.** The ``commit-msg`` hook reads the message file as bytes,
+     and the comment lines git strips are dropped at a newline alone, every
+     other character kept; so a lone carriage return reaches the scan, which
+     then admits nothing (D2). A message holding a comment line admits nothing
+     either: git keeps the line when it opens no editor, so in the history
+     the trailer could stand before more text. That the hook leaves such a
+     line unread at all is BUG_154, outside this decision.
+   - **Where the declarations come from.** On ``privacy.clean``'s store route,
+     from the rule context, as on the repository's route: the host the
+     project resolves. A git hook runs with no project, and a store serves
+     every repository it registers, so the hooks and the push take the host
+     the store's own level names in ``host.kind``, over the user level and the
+     defaults, as ``store push`` run in the store reads ``sync``: the CLI
+     resolves the kind and asks the adapter for its declarations
+     (``store_attribution_trailers``). A repository block in the store, or a
+     pointer, naming another host is not read there, and a store level that
+     does not load declares none: where the two answers differ, a commit must
+     pass both, and the narrower one decides.
+   - **Weighed against:** writing the declarations into the hooks at ``store
+     hook`` install (the hook body would carry one vendor's pattern, go stale
+     when ``host.kind`` changes, and differ with whichever project last
+     installed it; ``store clone`` installs with no project at all); finding a
+     project from the hook (the store has many, and a hook has no session to
+     name one); the union of every registered repository's host (it admits
+     what no level of the store itself declares); leaving the push without
+     them (a commit the hooks passed could never be published).

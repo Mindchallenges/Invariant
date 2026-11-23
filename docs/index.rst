@@ -39,6 +39,7 @@ was checked against the mission and when.
 
    rules
    checklist
+   patterns
 
 .. toctree::
    :maxdepth: 1
@@ -48,7 +49,14 @@ was checked against the mission and when.
 
 .. toctree::
    :maxdepth: 1
+   :caption: Plan
+
+   plan
+
+.. toctree::
+   :maxdepth: 1
    :caption: Audits
 
    audits/mission-audit-2026-08
    audits/authority-audit-2026-08
+   audits/default-guidelines-gap-2026-11

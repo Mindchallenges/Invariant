@@ -11,6 +11,45 @@ code, and update it when a structural relationship changes.
 Layers
 ------
 
+invariant's packages fall into the four clean-architecture layers, innermost
+first (ADR-032 ruling 11, :need:`DEC_ADR_032_D12`). An inner layer never
+imports an outer one.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 35 40
+
+   * - Layer
+     - Packages
+     - Holds
+   * - Entities
+     - ``src/invariant/core/``
+     - the host-agnostic engine: models, schemas, rules and their pure
+       functions
+   * - Use Cases
+     - ``src/invariant/domains/``
+     - the state domains, each owning one lifecycle or set of effects
+   * - Interface Adapters
+     - ``src/invariant/adapters/``, ``src/invariant/hosts/``
+     - ecosystem knowledge and agent-host bindings
+   * - Frameworks & Drivers
+     - ``src/invariant/oracle/``, ``src/invariant/cli/``
+     - the entry point and composition root, and the machine-wide oracle
+       (all of ``oracle/``, chain included)
+
+The guidelines ruleset (``docs/guidelines/ruleset.yaml``) holds the same map
+in its ``layers`` block. From it the engine derives one direction rule per
+inner layer, ``layers.<id>-depends-inward``, checked on the ``imports``
+engine by ``guidelines.mechanical_clean``. The inward-pointing imports that
+existed when the map was adopted are recorded in the ratchet baseline
+(``docs/guidelines/baseline.txt``, :need:`DEC_ADR_032_I1B`), so they pass
+and a new one blocks. They are paid down by the Boy-Scout rule, chiefly by
+moving the adapter seam inward behind an injected interface. The ruleset's
+two oracle bans stay rules of their own beside the derived ones.
+``src/invariant/data/`` holds data files rather than code, and the
+package's root modules (``__init__``, ``__main__``) sit in no layer. The
+diagram below draws the components package by package.
+
 .. mermaid::
 
    graph TD
@@ -20,6 +59,8 @@ Layers
            CCLAUNCH[claude_code_launch]
            CCWIRE["claude_code_wiring: wiring_plan, receipt (ADR-014 D11)"]
            CCASSETS["assets: the managed-asset format and its one classifier"]
+           CCUSAGE["claude_code_usage: the status line's plan_usage, its install (ADR-027 ruling 10)"]
+           CCTALK["claude_code_talk: SessionTalk, a window's conversation read fail closed, tool lines (ADR-029 inc 1, 2)"]
        end
 
        subgraph cli["cli/ — entrypoint"]
@@ -46,11 +87,18 @@ Layers
            OTUI["tui (Textual)"]
            OWEB["web (ADR-008)"]
            OPAGE[webpage]
+           OPANEL["panel (IDEA_027): groups, words, the chain's cards and screen"]
            OWACT[webactions]
            OWSVC[webservice]
            OTLS["tls (IDEA_026)"]
            ODEV[devices]
            OCLOSE["closehost (IDEA_027 inc 6)"]
+           OCHAIN["chain: decide, what runs next (ADR-027 D3, D12)"]
+           OCHAINSTEP["chainstep: follow, decide, start (ADR-027 inc 2, ruling 9); the usage hold, stalls, release (inc 2b); a landed window asked and closed on consent (ruling 21)"]
+           OUSAGE["usage: the plan_usage fact, its file, the hold (ADR-027 ruling 10)"]
+           OCHAINVIEW["chainview: the chain as the phone reads it, its offers and steps (ADR-027 inc 3)"]
+           OPUSH["push: web push, its key, subscriptions and notifier (ADR-027 inc 4)"]
+           OTALK["talk: the SessionTalk seam, last_message, turns (ADR-029 inc 1, 2)"]
        end
 
        subgraph core["core/ — host-agnostic engine"]
@@ -84,9 +132,10 @@ Layers
            CQUEST["questionnaire (ADR-017 D1, D2)"]
            CSTEPS["steps (ADR-021 D1 to D4): declarations, the record"]
            CRULINGS["rulings (ADR-021 D6 to D8): loosenings, the in-place write"]
+           CQUEUE["queue (ADR-027 D2, D10): the record, its edits"]
        end
 
-       subgraph domains["domains/ — the nine state domains"]
+       subgraph domains["domains/ — the ten state domains"]
            SESSION[session]
            PIPELINE[pipeline]
            WORKITEM[workitem]
@@ -96,6 +145,7 @@ Layers
            GDOM["guidelines (ADR-012 D12)"]
            DOCSD["docs (ADR-016 D1, D2; ADR-018 D4, D5)"]
            STEPSD["steps (ADR-021 D3, D4): run, record, debts"]
+           QUEUED["queue (ADR-027 D2, D10): what may go on it"]
        end
 
        subgraph adapters["adapters/ — ecosystem knowledge"]
@@ -218,6 +268,67 @@ Layers
        OSCAN --> MANIFEST
        OSCAN --> FSM
        OSCAN --> GIT
+       CLI -- "queue add, list, remove, move" --> QUEUED
+       QUEUED -- "read_queue, editing: the record under its lock" --> CQUEUE
+       QUEUED -- "get, machine: a work-item ref names an open item" --> WORKITEM
+       QUEUED -- "vet_line: the ref and the brief, as a handoff note" --> SESSION
+       CQUEUE -- "lock, write: the state root's lock, an atomic replace" --> STORE
+       CQUEUE -- "main_checkout, toplevel: one queue per project" --> GIT
+       CLI -- "oracle next: QUEUED, the count it prints" --> CQUEUE
+       CLI -- "oracle next, chain start: decide, read_inputs, by_hand" --> OCHAIN
+       OCHAIN -- "read_queue, queue_path: read only" --> CQUEUE
+       OCHAIN -- "ROW_SESSION: the session rows of a scan" --> OSCAN
+       OCHAIN -- "ready items, read only" --> WORKITEM
+       OCHAIN -- "session_end: an ended session's record, inert store" --> SESSION
+       OCHAIN -- "the oracle.chain settings and the default prompts" --> MANIFEST
+       OWATCH -- "the chain step, after the alerts" --> OCHAINSTEP
+       OCHAINSTEP -- "decide, follow's answers, render_prompt, on_failure" --> OCHAIN
+       OCHAINSTEP -- "HomeStore: oracle/chain.json under locks/chain.lock" --> OINDEX
+       OCHAINSTEP -- "chain notices" --> ONOTIFY
+       CLI -- "fans the notifier out to the Mac and push; revoke drops a device's subscriptions" --> OPUSH
+       CLI -. "injects the POST (urllib_post) into" .-> OPUSH
+       OPUSH -- "a notifier behind the seam" --> ONOTIFY
+       OPUSH -- "a send skips an unpaired device" --> ODEV
+       OWEB -- "subscribe, unsubscribe, the key for the view" --> OPUSH
+       CLI -- "oracle chain status, pause, resume, start; watch --no-chain" --> OCHAINSTEP
+       CLI -. "injects ChainHands: start-session's launch, domains/queue's begin, mark, fail" .-> OCHAINSTEP
+       CLI -- "chain hands: begin, mark, fail, requeue, mirror, reproduced (inc 5)" --> QUEUED
+       CLI -- "queue link, queue mirror (inc 5)" --> QUEUED
+       QUEUED -- "mirror: every item, the mirror states, read in the main checkout (inc 5)" --> WORKITEM
+       QUEUED -- "mirror: live sessions naming an item, through an inert store (inc 5)" --> SESSION
+       OCHAIN -- "rank_key, BACKLOG, the reproduction's outcome words (inc 5)" --> CQUEUE
+       OPANEL -- "BLIND_RUNS: the reproduction's words (inc 5)" --> CQUEUE
+       CLI -- "queue render; session merge's re-render of the plan page (ADR-032 inc 6)" --> QUEUED
+       QUEUED -- "render_page, plan_page, PageRefused: the plan page, written under the queue's lock (ADR-032 inc 6)" --> CQUEUE
+       QUEUED -- "rst_directives: the need ids the docs project declares (ADR-032 inc 6)" --> CDOCFMT
+       QUEUED -- "types_of: the need directives (ADR-032 inc 6)" --> CNEEDS
+       QUEUED -- "PrivacyScanner: the page's text (ADR-032 inc 6)" --> PRIVACY
+       CQUEUE -- "digest_of, managed_text, managed_state: the rules page's marker (ADR-032 inc 6)" --> CGUIDE
+       CQUEUE -- "srcdir_of: the docs project in the main checkout (ADR-032 inc 6)" --> CNEEDS
+       CQUEUE -- "render_lines: each open session's plan (ADR-032 inc 6)" --> PLAN
+       RULES -- "docs.plan_current: plan_page, read_queue, page_standing (ADR-032 inc 6)" --> CQUEUE
+       CDOCLOCK -. "plan_page: the queue's data paths, imported at call time (ADR-032 inc 6)" .-> CQUEUE
+       DOCSD -- "render_page, PLAN_PAGE: the starter's plan page (ADR-032 inc 6)" --> CQUEUE
+       CLI -- "hook statusline: reading_from_statusline, statusline_text; hooks statusline: install_statusline" --> CCUSAGE
+       CLI -- "hook statusline: record_usage; the read_usage seam; weekly_max" --> OUSAGE
+       OUSAGE -- "HomeStore: oracle/usage.json" --> OINDEX
+       OCHAINSTEP -- "hold, spent: the weekly-usage hold" --> OUSAGE
+       OCHAINSTEP -- "turn_state's idle: a landed window's quiet (ruling 21)" --> OSIG
+       CLI -. "injects the plan_usage reader, the Terminal typer (nudge) and close-host's close into ChainHands" .-> OCHAINSTEP
+       CLI -- "oracle chain greenlight, continue, retry, close; consent, close-window, leave-open (ruling 21)" --> OCHAINSTEP
+       CLI -. "injects TerminalTyper from" .-> CCLAUNCH
+       CLI -. "injects ChainReader: the plan_usage reader and chain.weekly_usage_max" .-> OWACT
+       OWACT -- "read, derive: the chain's offers and the argv an action runs" --> OCHAINVIEW
+       OWEB -- "view: the panel's groups, cards and screens" --> OPANEL
+       OWACT -- "confirm and result words" --> OPANEL
+       OPANEL -- "the action names: the chain's cards, line and screen words" --> OCHAINVIEW
+       OWEB -- "excerpts: each live window's last message, read for the view (ADR-029 inc 1); /api/session: read_turns, cursor, offered (inc 2)" --> OTALK
+       CLI -. "injects SessionTalk (_oracle_talk: ClaudeCodeTalk) from" .-> CCTALK
+       CCTALK -- "scan_tail, parse_timestamp: the tail reader" --> CCTEL
+       OCHAINVIEW -- "read_ledger: oracle/chain.json, without its lock" --> OCHAINSTEP
+       OCHAINVIEW -- "read_queue, queue_path: read only" --> CQUEUE
+       OCHAINVIEW -- "hold, spent: the weekly-usage hold" --> OUSAGE
+       OCHAINVIEW -- "a backlog proposal's title, read only" --> WORKITEM
 
        SESSION --> FSM
        PIPELINE --> FSM
@@ -225,7 +336,7 @@ Layers
        SESSION --> STORE
        PIPELINE --> STORE
        SESSION --> RULES
-       PIPELINE -- evaluate, grant_outcomes, the family gate records kept at the landing --> RULES
+       PIPELINE -- "evaluate, grant_outcomes, the family gate records kept at the landing; design_snapshot at the advance out of design (ADR-032 inc 3)" --> RULES
        WORKITEM --> ITEMS
        MEMDOMAIN --> MEMORY
        STATSDOMAIN --> STATS
@@ -269,14 +380,15 @@ Layers
        CSTORES -- "repo_identity, ensure the local ID" --> CIDENT
        CSTORES -- "init_repository: a new store" --> GIT
        CLI -- "store init, link, status; docs adopt's settings: write_repo_settings, write_store_settings; store clone: register_repos" --> CSTORES
-       CLI -- "session start, resume, docs lock, store pull: pull, settings; store clone: clone_name, declared; store push and session merge's push after landing: push, settings_of" --> CSYNC
+       CLI -- "session start, resume, docs lock, store pull: pull, settings; store clone: clone_name, declared; store push and session merge's push after landing: push, with the store host's attribution trailers, settings_of" --> CSYNC
        CLI -- "store clone: clone, a WRITE" --> GIT
        CSYNC -- "fetch, fast_forward, rebase, push (WRITES); ahead_behind, diff_names, diff_text, dirty_paths, merge_base" --> GIT
-       CLI -- "store hook: scan_staged, scan_message, pre_push, relaxation; install_hooks at store init, link, clone, push and session start; doctor's store privacy row: hooks_state, relaxation" --> CSCAN
-       CSYNC -- "push: outgoing, scan_commits, relaxation" --> CSCAN
-       RULES -- "privacy.clean: a store path's screen, screen_now, screen_staged, scan_staged, relaxation" --> CSCAN
+       CLI -- "store hook: scan_staged, scan_message, pre_push, relaxation, with the store host's attribution trailers (ADR-024 D5); install_hooks at store init, link, clone, push and session start; doctor's store privacy row: hooks_state, relaxation" --> CSCAN
+       CSYNC -- "push: outgoing, scan_commits with the trailers handed in, relaxation" --> CSCAN
+       CSYNC -- "AttributionTrailer, the type of what push is handed (ADR-024 D5)" --> PRIVACY
+       RULES -- "privacy.clean: a store path's screen, screen_now, screen_staged, scan_staged, relaxation; a store commit's message, with the rule context's attribution trailers" --> CSCAN
        RULES -. "store_root_of: the store a path lies in, imported at call time" .-> CSTORES
-       CSCAN -- "PrivacyScanner, parse_allow" --> PRIVACY
+       CSCAN -- "PrivacyScanner, scan_message with the trailers handed in, parse_allow; AttributionTrailer" --> PRIVACY
        CSCAN -- "commits_to_publish, commit_paths, commit_message, exists_at, blob_at, staged_files, staged_blob, remotes, common_dir, local_config_value; set_local_config (a WRITE)" --> GIT
        CSCAN -- "STORE_MANIFEST" --> CSTORES
        MANIFEST -. "check_store_key: privacy.store at load, imported at call time" .-> CSCAN
@@ -306,17 +418,20 @@ Layers
        RULES -- load, the render plan, the ruleset and drift gates, parse_baseline, definition_of; phases_for, select, and the TurnIndex, EditAdvisory and EditGuidelines it answers; ruleset_location, for the paths its fixes offer --> CGUIDE
        CC -- render_turn_index, render_edit: the pure renderers it only wraps --> CGUIDE
        CGUIDE -- project_relative, glob_matches --> MANIFEST
-       RULES -- evaluate, with the bytes, masks, references and the change's history as callables; ratchet, growth; na_answer, for the verdict plan --> CFIND
+       RULES -- evaluate, with the bytes, masks, references, the change's history and the fitness runs as callables; ratchet, growth; na_answer, for the verdict plan; fitness_answer over test_runs (ADR-032 inc 5) --> CFIND
        CFIND -- Guideline and NaCondition, the ruleset model it evaluates; BaselineEntry; matches, meets, path_exception --> CGUIDE
        CFIND -- project_relative --> MANIFEST
        CLI --> GDOM
        CLI -. injects INSTRUCTION_FILES and agent_copies into the rule context, PIPELINE and OGATES from .-> CC
-       CLI -. "injects ATTRIBUTION_TRAILERS into the rule context (ADR-024 D1) from" .-> CC
+       CLI -. "injects ATTRIBUTION_TRAILERS into the rule context (ADR-024 D1), and into the store's screen for the host its own level names (D5), from" .-> CC
        GDOM -- render_checklist, split_managed, for show; ROLE_PHASES, phases_for, select, render_selected, for show --phase --> CGUIDE
        GDOM -- plan_render, plan_baseline, ruleset_or_refuse, touched_paths, policy_relpath --> RULES
        CLI -. "hands SessionDomain.docs_write in as GDOM's admit (ADR-014 D5, inc 4c-2)" .-> GDOM
        GDOM -- plan_verdicts, read_standings --> RULES
        GDOM -- record_verdicts --> PIPELINE
+       GDOM -- "add_exception, lower_severity, replace_default, fill_defaults, default_standings: except, loosen and adopt (ADR-032 inc 2)" --> CGUIDE
+       DOCSD -- "fresh_defaults: the starter's ruleset and catalogue, the adopt writer's (ADR-032 D1, inc 2)" --> GDOM
+       RULES -- "guidelines.user_rules_ruled: unruled_changes against the base's copy (ADR-032 inc 2)" --> CGUIDE
        RULES -- plan_verdicts asks parse_submission and check_all, read_standings asks standings and unowed, every read handed in as Facts --> CVERD
        CVERD -- NaAnswer --> CFIND
        CVERD -- Guideline, Ruleset, digest_of, meets --> CGUIDE
@@ -328,7 +443,7 @@ Layers
        RULES -- "docs.builds_strict, docs.needs_traceable: srcdir_of, tree_digest, read_record, load_needs_json, check, by_setting, sample, advise" --> CNEEDS
        CLI -- "init: srcdir_of, resolve_srcdir: the docs project the adapters skip" --> CNEEDS
        PIPELINE -- "srcdir_of: the docs project a run's adapter skips" --> CNEEDS
-       PIPELINE -- "tree_signature: the tree a coverage run measured, the gate receipt (ADR-026)" --> GIT
+       PIPELINE -- "tree_signature: the tree a coverage run measured, the gate receipt (ADR-026); the tree every test run ran over (ADR-032 inc 5)" --> GIT
        SWEEPD -- "srcdir_of: the docs project the sweep's adapter skips" --> CNEEDS
        MANIFEST -. "type_problems, link_rule_problems, resolve_srcdir: the docs.needs load check, imported at call time" .-> CNEEDS
        CNEEDS -. "project_relative, DEFAULTS, imported at call time" .-> MANIFEST
@@ -341,8 +456,9 @@ Layers
        DOCSD -- "convert_adr, convert_prose: pandoc's tree rewritten, pandoc handed in" --> CMDCONV
        WORKITEM -- "item migrate: srcdir_of, ITEMS_PAGE" --> CNEEDS
        WORKITEM -- "item migrate's bodies: item_body_converter, unconverted_in (ruling 20)" --> DOCSD
-       DOCSD -. "all_rules: the starter ruleset's parse, imported at call time" .-> RULES
        RULES -- "docs.design_home, items.decisions_linked, docs.decisions_recorded: prefixes_of, cited_ids, latest_record" --> CNEEDS
+       RULES -- "design_snapshot, docs.ahead_of_code: types_of, directives_of, the decision role's directives (ADR-032 inc 3)" --> CNEEDS
+       RULES -- "design_snapshot: rst_directives, whether a page holds a decision need (ADR-032 inc 3)" --> CDOCFMT
        RULES -. "docs_folder: the guidelines gates' fixes name the docs project's guidelines folder, imported at call time" .-> CNEEDS
        SESSION -- "decisions_add: types_of, prefixes_of" --> CNEEDS
        SESSION -- "docs_lock, docs_unlock, docs_take_over, release_docs_lock: DocsLock, resolve_unit; docs_access, docs_read_lease, docs_heartbeat, docs_notice: read_config, classify, then grant_free, touch (inc 4b)" --> CDOCLOCK
@@ -418,7 +534,7 @@ Layers
        CRULINGS -- "Level, _load_profile, profile_names, location, configured" --> MANIFEST
        CRULINGS -- "user_config_path" --> CHOME
        CRULINGS -- "STORE_MANIFEST, _write_atomic" --> CSTORES
-       RULES -- "config.rulings_by_user: is_config_file, changed_rulings" --> CRULINGS
+       RULES -- "config.rulings_by_user: is_config_file, changed_rulings; changed_ruled over the ruleset and catalogue (ADR-032 inc 2)" --> CRULINGS
        CLI -- "rules loosen, rules carry-over, rules list, doctor's rulings row" --> CRULINGS
 
 **Built (:need:`ADR-021 <DEC_ADR_021>` increment 1,
@@ -461,7 +577,10 @@ time; ``core/machines`` is not drawn here. ``RULES --> CRULINGS`` is
 ``config.rulings_by_user``, the ``pre-tool-use``
 rule that refuses an agent's edit adding or changing a ruling. The host
 evaluates it as it evaluates every ``pre-tool-use`` rule, so no arrow
-leaves ``hosts/`` for it.
+leaves ``hosts/`` for it. ADR-032 increment 2 (:need:`DEC_ADR_032_I2`)
+widens its reach to the configured guidelines ruleset and its catalogue:
+the same arrow gains ``changed_ruled``, every ``ruled`` mapping an edit
+adds or changes, and the host is unchanged.
 
 ``MANIFEST --> CHOME`` is the user level of the configuration (ADR-014 D3,
 increment 2): ``core/home`` reads ``~/.invariant/config.yaml``, and the manifest
@@ -564,7 +683,13 @@ the commit hook and ``invariant check`` evaluate (``CLI -. injects
 ATTRIBUTION_TRAILERS into the rule context .-> CC``). ``PipelineDomain`` and the
 oracle's gate cache are not handed them: a transition gives ``privacy.clean`` no
 commit message. A ``host.kind`` with no adapter declares none, and then every
-line of a message is read alike.
+line of a message is read alike. Since BUG_133 (ADR-024 D5) a store commit's
+message is read the same way: ``privacy.clean``'s store route hands the rule
+context's declarations to ``StoreScreen.scan_message``, and the store's own
+screen, which a git hook runs with no project, is handed by the CLI the
+declarations of the host the store's own level names
+(``store_attribution_trailers``): the ``commit-msg`` and ``pre-push`` hooks
+directly, the push through ``storesync.push``.
 
 A6 increment 4 adds the drift rule, ``agents.rendered_current`` (ADR-012 D8,
 the A6 ruling 10). Its answer has to be the install plan, so "current" means
@@ -669,11 +794,22 @@ run nothing, so ``pipeline gates`` and the oracle's gate cache can ask them.
 The docs starter (ADR-018 D11, increment 4) is the domain's third write.
 ``CLI --> DOCSD`` gains ``init``'s ``plan_starter``, ``write_starter`` and
 ``sync_venv``: ``plan_starter`` reads the configuration being written for its
-need types, its assessment sections and the source areas (``DOCSD --> adapters``), fills the templates (``DOCSD --> SCAFFOLD``), renders the two
-generated guidelines pages from no ruleset through ``core/guidelines``' pure
+need types, its assessment sections and the source areas (``DOCSD --> adapters``), fills the templates (``DOCSD --> SCAFFOLD``), renders the three
+generated guidelines pages (the checklist, the rules and the pattern
+catalogue) from the starter's ruleset through ``core/guidelines``' pure
 renderers (``DOCSD --> CGUIDE``), and refuses, writing nothing, where the
 source directory would be the root, already holds a ``conf.py``, or holds a file
-the starter would write. The assessment's ``areas`` check reads, in a
+the starter would write. The starter's ruleset is ADR-032's default set
+(increment 1a): the four layers with empty ``paths``, the five ``solid.*``
+rules, ``patterns.named-or-declined``, ``docs.design-before-code`` and the
+mandate's two rules, each stamped with its ``origin`` (``origin_digest``), and
+the catalogue copied beside it. Since ADR-032 increment 2 the starter takes
+both from ``domains/guidelines``' ``fresh_defaults``, the writer ``guidelines
+adopt`` uses for a project with no ruleset (``DOCSD --> GDOM``), so ``init``
+and ``adopt`` write one text; ``domains/guidelines`` imports no other domain,
+so the arrow makes no cycle. The rules' ``applies_to`` is the configured
+ecosystems' adapters' ``source_globs`` (``**`` where none answers).
+The assessment's ``areas`` check reads, in a
 sphinx-needs project, only the title and content of each ``element`` need,
 found by ``core/docformat``'s ``rst_directives``.
 The default of ``docs.needs.srcdir``, the increment-2 rule, is
@@ -710,7 +846,9 @@ link rules wrapped around ``core/mdconvert.convert_prose``, and for
 staged store. The docs domain owns "Markdown into the docs project", so the
 work-item domain borrows it rather than holding a second converter, as the
 sweep borrows ``workitem`` and ``pipeline`` (``SWEEPD --> WORKITEM``). The import
-is made at load: ``domains/docs`` imports no domain, so there is no cycle.
+is made at load: ``domains/docs`` imports no domain at load (its one
+arrow to a domain, ``DOCSD --> GDOM``, is imported at call time), so there
+is no cycle.
 
 **Built (ADR-014 D12, increment 7a; :need:`DEC_ADR_014_I7A`).** ``CMIGRATE``
 is ``cli/migrate``, ``store migrate --to store``'s sequence, in the CLI layer
@@ -993,6 +1131,20 @@ the audit log and the paired devices, created private (ADR-008 D9–D14). The
 action reaches the runner and the terminal launcher through the ``Actions`` the
 CLI builds, so still no ``oracle → hosts`` arrow appears.
 
+``OTALK`` is the host-neutral half of the page talking to running sessions
+(ADR-029 D4); increment 1 is the read of a live window's last message
+(ADR-009 D17). ``OWEB --> OTALK`` is ``SessionTalk`` and ``last_message``:
+on a paired device's state read, the web server reads each live window the
+panel names (``panel.excerpt_hosts``) and hands the panel the texts, never
+the ``assess`` document. ``CCTALK`` is Claude Code's side, the transcript read
+that stops at the first shape it does not know, built on
+``CCTALK --> CCTEL``'s tail reader. ``CLI -. injects SessionTalk … .-> CCTALK``
+is ``_oracle_talk``, the probe's shape again, so no ``oracle → hosts`` arrow.
+Increment 2 adds the Conversation screen over the same arrow: ``GET
+/api/session`` reads one row's live window through ``SessionTalk`` and serves
+``talk.turns``, the newest 40 with Claude's tool calls as one line each
+(:need:`DEC_ADR_029_D19`); the seam grows no method.
+
 ``OWSVC`` is the loop the web page's LaunchAgent runs (``oracle web --wait``,
 ADR-008 D15–D18): it waits for the tailnet, binds it through ``OWEB``, follows
 it, and reports in ``oracle/web.json``; ``OWSVC --> ODEV``, ``OWACT`` and ``OINDEX``
@@ -1047,7 +1199,9 @@ two functions for the path each guidelines gate's fix offers
 schema (version 1), the model (``Ruleset``, ``Guideline``, ``Check``) and the
 validation, which collects every problem and refuses the ruleset whole, and
 the content hash a pipeline pins at ``start``. All five check kinds are validated:
-``engine``, ``pattern``, ``boundary`` (``forbid`` or ``only``, never both),
+``engine``, ``pattern``, ``boundary`` (``forbid`` or ``only``, never both,
+on the ``imports`` engine; or, in version 2, ``test`` on the ``fitness``
+engine, :need:`DEC_ADR_032_I5`),
 ``cochange`` (``pair`` or ``registry``) and ``judgement`` (ADR-012's check-kind
 amendment). A ``registry`` cochange names a registry file of invariant's own
 format, which is read and refused with the ruleset, so a missing or invalid
@@ -1075,15 +1229,62 @@ load. ``core/machines`` injects it at the landing state's entry only when a
 ruleset is configured, so a project that has not opted in sees no change, and
 ``doctor`` prints the same verdict as a row.
 
+Schema version 2 (ADR-032 increment 1a, :need:`DEC_ADR_032_D2`,
+:need:`DEC_ADR_032_I1A`) is read beside version 1, which loads unchanged; a
+version this build does not read is refused by its version alone, naming
+the versions it reads, before any key is judged. Version 2 adds three things,
+each parsed and validated here:
+
+- **The layer map**, an optional top-level ``layers`` block: ``map``, the
+  layers innermost first, each ``{id, title, paths, exclude, exceptions}``,
+  and the block's ``severity`` (default ``blocker``), ``phases`` (default
+  design, review and landing), ``evidence`` (``imports`` by default,
+  ``judgement``, or ``fitness`` with the block's ``test`` selector, ADR-032
+  increment 5), ``owner``, ``ruled`` and ``origin``. At load
+  ``core/guidelines`` derives one rule per layer that maps files and has an
+  outer layer that maps files: ``layers.<id>-depends-inward`` in section
+  ``layers`` (declared for it when the ruleset does not), applying to the
+  layer's ``paths`` minus its ``exclude``, ``check: {kind: boundary, engine:
+  imports, forbid: <every outer layer's paths>}``, ``{kind: boundary, engine:
+  fitness, test: <the block's test>}`` with ``evidence: fitness``, or a cited
+  judgement with ``evidence: judgement``, its statement and fix written from
+  the titles. A
+  derived rule is a ``Guideline`` like any other (``layer`` names the layer it
+  came from, ``layer_map`` the map), so the findings, the selection, the
+  baseline and both rendered pages read it unchanged, and the pages add a
+  "derived from the layer map" line. A layer with no ``paths`` derives
+  nothing and the load carries the note "layer <title> maps no files", which
+  ``guidelines.ruleset_valid`` prints in its detail without failing.
+  ``covers`` is the one reading of "under ``applies_to`` and outside
+  ``exclude``" that ``meets``, ``core/findings`` and ``core/rules``' file
+  scans ask.
+- **Three rule keys:** ``owner`` (``project`` or ``user``, default
+  ``project``), ``ruled`` (``{by, date, reason}``, also on an exception) and
+  ``origin`` (``{set, version, digest}``, twelve hex). An ``owner: user``
+  rule, or the map when it is ``owner: user``, refuses at load an exception
+  without ``ruled`` and a claim-form ``not_applicable_when``
+  (:need:`DEC_ADR_032_D7`'s two load-time refusals); the commands, gates and
+  submission refusals that enforce the rest of D7 are increment 2's.
+  ``origin_digest`` is the digest a default rule's ``origin`` holds: over the
+  rule as written into the project, its ``origin`` left out, keys sorted.
+- **The pattern catalogue**, a top-level ``catalogue`` naming a file beside
+  the ruleset (resolved from the ruleset's own folder, read through the same
+  ``root`` or ``read`` a registry is). Its schema is invariant's (version 1:
+  ``patterns``, each ``{id, name, family, intent, use_when, avoid_when}``, the
+  family one of creational, structural, behavioural, enterprise or domain),
+  validated and refused with the ruleset as a registry is (DN-A9), a
+  duplicate id included. No ``catalogue`` key, no catalogue.
+
 ``CFIND`` is ``core/findings``, the evaluators of the mechanical guidelines
 (IDEA_031 A3 increments 3 and 4, ADR-012 D4, D5 and the A3 rulings DN-2 to
 DN-4 and DN-13). It holds ``Finding``, the ``fingerprint`` every pattern and
 boundary finding and every exception is named by (the first twelve hex digits
 of SHA-256 over the rule id and a kind-specific key, never a line number), and
 the ``pattern``, ``boundary`` and ``cochange`` evaluators. It is pure: the file
-bytes, the adapters' lexical mask, their references and what git knows about
-the change (``History``) arrive as callables, and it makes no file read and no
-``git`` call. ``RULES --> CFIND`` is the one caller, ``guidelines.mechanical_clean``,
+bytes, the adapters' lexical mask, their references, what git knows about
+the change (``History``) and, for a ``fitness`` rule, the answer of its test's
+recorded runs (``Fitness``) arrive as callables, and it makes no file read and
+no ``git`` call. ``RULES --> CFIND`` is the one caller, ``guidelines.mechanical_clean``,
 which does every read from the tree in hand, over the changed files alone
 (``_changed_set``). ``CFIND --> CGUIDE`` is the ruleset model it evaluates, and
 ``CFIND --> MANIFEST`` is the one spelling of a declared path (``project_relative``).
@@ -1091,7 +1292,16 @@ Its globs are matched through ``core/guidelines``' ``matches``, over the one glo
 matcher (``glob_matches``, lifted out of ``core/rules``' ``_first_matching_glob``),
 so a guideline's globs match exactly as every other declared glob does. A pattern matches each line of the masked text, one
 finding per matching line. A boundary checks each reference a changed file
-under ``applies_to`` makes against its ``forbid`` or ``only`` list. A cochange
+under ``applies_to`` makes against its ``forbid`` or ``only`` list; a
+``fitness`` boundary (ADR-032 D3, :need:`DEC_ADR_032_I5`) asks instead for the
+latest recorded run of its ``test`` selector over the tree in hand
+(``fitness_answer``, pure over the ``test_runs`` records and the tree's
+signature that ``core/rules`` hands in): passed is clean for every file the
+rule covers, failed is one finding naming the test, with no fingerprint, so
+no baseline holds it, and no such run is unanswerable, its fix the
+``invariant pipeline test --selector`` line that records one. Only
+``guidelines.mechanical_clean`` hands the runs in; the edit-time advisory and
+the baseline scans do not, and leave a fitness rule unevaluated. A cochange
 ``pair`` triggers on a changed file under ``applies_to`` (``any``, ``added`` on the
 branch, or an ``executable`` change through the adapters' ``executable_text``,
 optionally narrowed by an added line matching ``when.match`` through the mask
@@ -1182,7 +1392,9 @@ these calls, from the tree in hand, and hands the answers to ``core/findings``
 as ``History``. A3 increment 5 adds one more, ``tracked_files``, every file the
 index tracks, which ``guidelines baseline --record`` scans, and A3 increment 6
 another, ``renamed_files``, every rename git detects from the merge base to the
-working tree (old path to new), which ``baseline_only_shrinks`` and ``guidelines baseline --prune`` follow an entry through.
+working tree (old path to new), which ``baseline_only_shrinks`` and ``guidelines baseline --prune`` follow an entry through. ADR-032 increment 5 adds ``tree_signature`` of the tree in hand, asked once
+and only when a ``fitness`` rule is evaluated, so its test's recorded runs
+are read against the tree they ran over.
 
 ``GDOM`` is ``domains/guidelines``, the effects the ruleset has on the tree
 (IDEA_031 A2 increment 3, ADR-012 D12). It is not an FSM, like ``stats`` and
@@ -1209,7 +1421,12 @@ in the tree) the plan has a third output (ADR-018 D12, increment 4):
 ``<srcdir>/rules.rst``, the rules as needs of the ``rule`` role's type
 (``render_rule_needs``), with the managed marker, checked, scanned and named
 current, stale or edited exactly as the checklist is, and read by
-``guidelines.generated_current`` with it. Under the mandate a null
+``guidelines.generated_current`` with it. Where the ruleset names a
+catalogue, a fourth output sits beside it (ADR-032 D5, increment 1a):
+``<srcdir>/patterns.rst``, the catalogue rendered by ``render_patterns``
+(``PATTERNS_PAGE``), one section per family and one label per pattern id, with
+the managed marker, checked, scanned and named exactly as the rules page is.
+Under the mandate a null
 ``guidelines.checklist`` is ``<srcdir>/checklist.rst``, beside it, where the
 starter's toctree names both. ``CGUIDE --> CNEEDS`` is the need id a rule is
 rendered as (``id_stem``) and whether a link is a need id (``is_need_id``).
@@ -1288,17 +1505,23 @@ that answer, and the pipeline starts either way (ruling DN-D). A pipeline that
 pinned one keeps the ``guidelines.*`` landing gates whatever the manifest says
 later (``load_pipeline_machine``'s ``guidelines`` flag). The gate that compares
 the pinned digest with the current one is ``guidelines.verdicts_complete``, for
-verdicts (A4 increment 3, below): a verdict submission refuses a tree whose
-digest differs, and the gate reads every recorded verdict as stale while it
-differs. See the state model, "Domain: pipeline".
+verdicts (A4 increment 3, below). The pin governs every rule it holds: with the
+tree moved off it, a verdict on a rule the change edited is refused and read as
+stale, a rule the pin holds unchanged is judged against the pin, and a rule the
+pin lacks against the tree (:need:`DEC_ADR_012_B115`). ``_verdict_facts`` reads
+the pinned rules through ``_pinned_rules``: the pin's path at the base
+``_base_trees`` names, through ``_base_rules`` with the pinned digest, so only
+the pinned bytes count. See the state model, "Domain: pipeline".
 
 ``CVERD`` is ``core/verdicts``, the judgement verdict (IDEA_031 A4 increment 1,
 ADR-012 D5 and the A4 rulings DN-1 to DN-12). A judgement guideline is
 answered by a cited verdict submitted through ``invariant guidelines verdict``
 or, in bulk, ``invariant guidelines verdicts submit``. ``core/verdicts`` holds the
 record (``VerdictRecord``), the parsing of a submission and one pure check per
-D5 predicate. P1: the rule is a judgement guideline, the tree's ruleset is the
-pinned one (DN-6), the change meets its ``applies_to`` through a changed file
+D5 predicate. P1: the rule is a judgement guideline, it can be judged against
+the pin (DN-6; ``judged_against``, :need:`DEC_ADR_012_B115`: a rule the pin
+lacks is judged against the tree, a pinned rule the change edited is refused),
+the change meets its ``applies_to`` through a changed file
 present in the tree and not path-excepted (DN-3), and the state is a
 review-role state owing the rule (DN-2). P2: the evidence kinds the rule
 allows. P3: each citation is a real range of a touched UTF-8 file, meeting an
@@ -1342,7 +1565,8 @@ gate is over applicable rules, and named in the detail. Every other owed rule
 is answered by its latest record, read back as the submission it was
 (``resubmitted``) and put through ``check`` again with every predicate but the
 review-role one, which is submission's (DN-2). A cited file whose blob
-changed, a ruleset that is not the pin (DN-6), a test whose latest run is not
+changed, a recorded ruleset that is not the one the rule is judged against now
+or a rule the change edited (DN-6), a test whose latest run is not
 green (DN-8), a mechanical N/A no longer true, or a record that no longer
 parses makes it stale, and stale is missing (D5, "Staleness"). An earlier
 record is never brought back over a stale latest one. The gate fails on a
@@ -1881,7 +2105,14 @@ Component responsibilities
    the profile, levels and provenance as configured, before the
    environment's escapes (``configured``, ADR-021 D6, increment 3), the
    loosenings that carry no ruling (``unruled``), and the refusal of a
-   ruling on a floored rule, asked of ``core/rulings`` at load
+   ruling on a floored rule, asked of ``core/rulings`` at load; the ``queue``
+   record and ``paths.queue``, ``records.queue`` taking ``records.backlog``'s
+   value when no level sets it (``RECORD_FOLLOWS``, :need:`DEC_ADR_027_D10`);
+   the ``oracle.chain`` keys and their refusals (:need:`DEC_ADR_027_D12`;
+   ``daily_cap``, ``prompt`` and ``triage_prompt`` with the shipped default
+   prompts, :need:`DEC_ADR_027_D19`); ``host.window_model`` and
+   ``host.forbidden_models`` and their refusals, each null for the host
+   adapter's default (:need:`DEC_ADR_030_D2`)
 
    **Never does:** Read state; run commands; interpret a ``host.tier_map``
    value, or hold a list of model names
@@ -1928,7 +2159,17 @@ Component responsibilities
    ``_changed_set``; the library agents' currency (``agents_currency``,
    ``AgentCopy``, ADR-012 A6.4), the one judgement ``agents.rendered_current``
    and the host's ``library agents current`` row give, over a host install plan
-   handed in as a callable (``RuleContext.host_agent_plan``); the store's docs
+   handed in as a callable (``RuleContext.host_agent_plan``); the
+   forbidden-model check (:need:`DEC_ADR_030_D3`, :need:`DEC_ADR_030_D4`):
+   ``forbidden_entry``, the one case-insensitive substring comparison of a
+   model against configured text, and ``RuleContext.forbidden_agents``,
+   derived from the audit record before ``_without_audit`` removes it,
+   against ``RuleContext.forbidden_models``, the list the CLI hands in; the
+   role gates and ``test.new_test_fails`` fail on it, and ``evaluate``
+   delivers that failure at ``block`` whatever the gate's configured level,
+   through the verdict's ``floor`` (``_delivered_level``,
+   :need:`DEC_ADR_030_D5`);
+   the store's docs
    lock at a tool call (ADR-014 D5, increment 4b): ``store.docs_lock_held``,
    which refuses a Read or an edit of a store policy path whose unit the
    session does not hold, and ``docs.read_architecture`` counting, for docs
@@ -1948,7 +2189,15 @@ Component responsibilities
    ``config.rulings_by_user`` (ADR-021 D7, increment 3), the ``pre-tool-use``
    rule refusing an edit tool call whose result adds or changes an
    ``enforcement.rulings`` entry in a file a config level is read from,
-   asked of ``core/rulings``;
+   asked of ``core/rulings``, and, since ADR-032 increment 2, a ``ruled``
+   entry in the configured guidelines ruleset or the catalogue it names
+   (``changed_ruled``); ``guidelines.user_rules_ruled``, the ruleset
+   compared with the base branch's copy read where the shrink gate reads
+   the baseline's, asking ``core/guidelines.unruled_changes``; and
+   ``guidelines.blocking_verdicts``, ``read_standings``' blocker standings
+   judged at block (``blocking_verdict``); whether a guideline is
+   ``owner: user`` for ``invariant override`` (``user_owned_guideline``),
+   :need:`DEC_ADR_032_I2`;
    the guidelines' two trees (ADR-014 D9, increment 4c-2,
    :need:`DEC_ADR_014_I4C2`): the policy tree a ruleset, baseline, checklist
    and registry are read from and rendered into (``guidelines_tree``,
@@ -1967,7 +2216,21 @@ Component responsibilities
    message (``_extract_commit_message``): every source git writes it from,
    each ``-m`` joined as git joins them, read, or the commit refused where
    the message cannot be read or git itself refuses the combination
-   (:need:`DEC_ADR_024_D4`)
+   (:need:`DEC_ADR_024_D4`); docs-first ahead of the code
+   (:need:`DEC_ADR_032_I3`): ``_structural_change``, the one reading of a
+   structural change that ``docs.updated``, ``docs.area_documented`` and
+   ``docs.ahead_of_code`` share; ``_store_docs_counted``, which store docs
+   ``docs.updated`` counts, shared with the snapshot; ``design_snapshot``,
+   the design documents differing from the merge base (paths and digests,
+   the store leg in a store project) and whether structural source does,
+   read for ``domains/pipeline`` to record; ``design_snapshot_notice``, the
+   lines the advance out of design prints; and ``docs.ahead_of_code``,
+   judging a structural change against the recorded snapshots;
+   ``docs.plan_current`` (:need:`DEC_ADR_032_I6`), the plan page's queue
+   part judged against the queue record's digest through
+   ``core/queue.page_standing``, bound to no event and injected into no
+   pipeline, reached through ``doctor``'s ``plan page`` row
+   (``DOCTOR_ROW_RULES``)
 
    **Never does:** Decide policy — levels come from the manifest; write a
    generated file (``domains/guidelines`` does); evaluate a guideline itself
@@ -2091,8 +2354,10 @@ Component responsibilities
    **Owns:** The user's home for invariant, ``$INVARIANT_HOME`` else ``~/.invariant``
    (``invariant_home``, which the oracle's ``oracle_home`` asks); the user
    level of the configuration, ``config.yaml`` (``load_user_config``,
-   ``UserConfig``): its ``defaults``, its ``repos`` map and its
-   ``store_naming``, each shape refused naming the file; a path spelled for a
+   ``UserConfig``): its ``defaults``, its ``repos`` map, its
+   ``store_naming`` and its ``chain`` block (``machine_cap``, the machine's
+   own chain limit, :need:`DEC_ADR_027_D16`), each shape refused naming the
+   file; a path spelled for a
    provenance label (``display_path``) (ADR-014 D3); writing the user level's
    ``defaults:`` (``write_user_defaults``, ADR-017 D5), merged, a key removed
    with its emptied parents, every other key kept, and never rewriting a file
@@ -2182,7 +2447,9 @@ Component responsibilities
    (``check_store_key``); the scans: each commit's content in scope and its
    message (``scan_commits``), the staged content (``scan_staged``), a
    message about to be written (``scan_message``), and what they found
-   (``Screened``), an unreadable answer always a refusal; the commits a push
+   (``Screened``), an unreadable answer always a refusal, each message read
+   with the host's attribution trailers it is handed, as ``core/privacy``'s
+   ``scan_message`` reads them (ADR-024 D5); the commits a push
    publishes (``outgoing``), and the ``pre-push`` hook's reading of its refs
    (``pre_push``); the relaxation of ruling 10, honoured only while the store
    has no remote (``relaxation``, ``Relaxation``); the git hooks, their body,
@@ -2192,7 +2459,8 @@ Component responsibilities
    **Never does:** Reach a network or push (``storesync`` pushes); decide what
    a finding means for a command (its caller refuses); overwrite a local
    ``core.hooksPath`` naming somewhere else; read the repository's privacy
-   block for a store path
+   block for a store path; know any host's trailer, which reaches it only as
+   an argument
 
 .. comp:: ``core/storemigrate``
    :id: COMP_CORE_STOREMIGRATE
@@ -2258,10 +2526,14 @@ Component responsibilities
    Increment 4b: where a path a tool call names stands (``classify``:
    outside the store, a data record, ungoverned, or a policy path with its
    unit; ``policy_paths``, the docs and guidelines records kept in the
-   store); one session's standing on one unit (``standing``); the on-access
+   store; the store's own ``invariant.yaml`` is a policy path, its own
+   ``file:invariant.yaml`` unless an area declares it, :need:`DEC_ADR_014_B143`); one session's standing on one unit (``standing``); the on-access
    grant of a free unit that never breaks the global order (``grant_free``).
    Increment 5b: the held units a release would release, refused for a dirty
    one, read before the release's fetch (``releasable``).
+   Since ADR-032 increment 6 the queue record's data paths include its
+   plan page (``core/queue.plan_page``, imported at call time) where both
+   are kept in the store (:need:`DEC_ADR_032_I6`).
    Hooks reach the lock on every tool call, so it costs no subprocess: the
    store's git directory is read from disk (``identity.common_dir_of``), and
    the rule and the session domain classify a path against ``read_config``
@@ -2303,6 +2575,40 @@ Component responsibilities
    **Never does:** Change one; know where the list is stored, or that a session
    is what holds it
 
+.. comp:: ``core/queue``
+   :id: COMP_CORE_QUEUE
+
+   **Owns:** The queue record (:need:`ADR-027 <DEC_ADR_027>` D2,
+   :need:`DEC_ADR_027_D10`): its JSON format, read in full or refused naming
+   what is wrong, an unknown key kept on the document and on each entry
+   (BUG_061); the pure edits (``add`` with an id minted from ``next`` and
+   never reused, ``remove``, ``move``, positions counted from 1) and the
+   questions (``head``, the first queued entry; ``holding``, the open entry
+   for a ``ref``); where a project's queue is (``queue_path``: a store
+   record's joined path, else the repository's main checkout at the
+   project's place); the edit under the state root's ``locks/queue.lock``
+   with an atomic replace (``editing``); since increment 2, an entry's
+   ``mode`` (``propose``), ``triage_of`` and ``retry_of``, and ``mark``
+   (:need:`DEC_ADR_027_D20`); since increment 5, an entry's ``serves`` and
+   ``blind``, the document's ``mirrored``, ``serving``, ``BACKLOG``, the
+   backlog's rank (``rank_key``, ``natural``) and the reproduction's outcome
+   words (:need:`DEC_ADR_027_D46` to :need:`DEC_ADR_027_D48`,
+   :need:`DEC_ADR_027_D51`); since ADR-032 increment 6 the plan page
+   (:need:`DEC_ADR_032_I6`): the record's digest (``queue_digest``, canonical
+   JSON), where the page lives (``plan_page``: ``plan.rst`` in the docs
+   project read against the main checkout, or no page and why), the page's
+   text (``render_page``: the managed marker through ``core/guidelines``, the
+   queue's digest, the entries with each linked item a ``:need:`` reference
+   or plain text, then the open sessions' plans through
+   ``core/plan.render_lines`` as of a date it is handed; ``SessionPlan``),
+   the digest a page names (``page_digest``), and how a page stands against
+   the record (``page_standing``)
+
+   **Never does:** Decide which ``ref`` may go on it or vet a ``brief``
+   (``domains/queue`` does); write a clock time; decide what runs next;
+   write the plan page, read the docs project's needs or a session
+   (``domains/queue`` does)
+
 .. comp:: ``core/conformance``
    :id: COMP_CORE_CONFORMANCE
 
@@ -2325,15 +2631,49 @@ Component responsibilities
 .. comp:: ``core/guidelines``
    :id: COMP_CORE_GUIDELINES
 
-   **Owns:** The project's guidelines ruleset (ADR-012 D3): schema version 1, the model
+   **Owns:** The project's guidelines ruleset (ADR-012 D3): schema versions 1 and 2
+   (ADR-032 D2, increment 1a), the model
    (``Ruleset``, ``Section``, ``Guideline``, ``Check``, exceptions and
-   amendments), the validation that collects every problem and refuses the
+   amendments; in version 2 ``LayerMap`` and ``Layer``, ``Ruling``, ``Origin``,
+   ``Catalogue`` and ``Pattern``), the layer map's validation and the direction
+   rules derived from it (``layers.<id>-depends-inward``), the load notes
+   (``Ruleset.notes``: a layer that maps no files), the ``owner``, ``ruled``
+   and ``origin`` keys with D7's two load-time refusals, ``origin_digest`` and
+   ``stamp_origins`` (a default rule's ``origin`` digest), the defaults
+   merge (``merge_defaults``, ``DefaultsMerged``, ADR-032 increment 1b):
+   a project's ruleset text with the default set's absent sections, rules,
+   layer block (its ``paths`` filled from a given map) and ``catalogue``
+   key appended and its version raised, every byte the project wrote kept,
+   the added origins stamped, and the result refused unless it reads back
+   as exactly the project's ruleset plus those additions; ADR-032
+   increment 2's ruleset edits, each a line edit that keeps every other
+   byte and is refused unless it reads back as the ruleset meant
+   (``add_exception`` on a rule or a layer, ``lower_severity`` with its
+   ``ruled``, to ``warn`` or ``off``, ``retire_rule`` into ``retired``,
+   ``replace_default`` of an updatable copy, ``RulesetEdit``); ADR-032 ruling
+   13's paused rules (``severity: off``, held in ``Ruleset.paused``, which
+   ``by_id`` skips and ``any_rule`` finds) and retired ones
+   (``Ruleset.retired``, ``Retired``), a retired id held by the merge so it
+   is never added back,
+   the default set filled for a project with no ruleset (``fill_defaults``),
+   each default's standing against the project's copy (``default_standings``,
+   ``DefaultStanding``: current, updatable, diverged), and the changes to an
+   ``owner: user`` rule or map no new ruling covers (``unruled_changes``),
+   :need:`DEC_ADR_032_I2`; the pattern
+   catalogue's schema and validation and its page (``render_patterns``,
+   ``PATTERNS_PAGE``), and ``covers`` (under ``applies_to``, outside
+   ``exclude``); the validation that collects every problem and refuses the
    ruleset whole, the sub-schemas of all five check kinds and which engines
-   this build accepts, reading and validating the registry files a ``cochange``
+   this build accepts (``imports``, which needs an adapter, and ``fitness``,
+   which needs none, with the layer map's ``evidence: fitness`` and its
+   ``test``, ADR-032 increment 5), reading and validating the registry files a ``cochange``
    rule names (``Registry``), and the content hash (``digest_of``, twelve hex);
    the generated checklist's text in each ``docs.format``
    (``render_checklist``), its managed marker and reading one back
-   (``split_managed``); the rules as needs (ADR-018 D12, increment 4:
+   (``split_managed``), a text under that marker for another page's renderer
+   (``managed_text``) and how a file on disk stands against a fresh
+   rendering (``managed_state``: new, current, stale, edited or unmanaged;
+   the plan page's, ADR-032 increment 6); the rules as needs (ADR-018 D12, increment 4:
    ``render_rule_needs``, ``rule_need_id``, ``RULES_PAGE``), each rule one need
    of a given directive and prefix, its need-id links and amendments as
    ``decided_by``, both pages rendered from no ruleset too, as the docs starter
@@ -2343,7 +2683,9 @@ Component responsibilities
    (``find_blocks``, ``BlockError``), the three-way state (``block_state``),
    and rewriting or appending one (``replace_block``, ``append_block``); the
    ratchet baseline's format (``BaselineEntry``, ``parse_baseline``,
-   ``render_baseline``, and ``baseline_rule_problems`` against a ruleset),
+   ``render_baseline``, and ``baseline_rule_problems`` against a ruleset,
+   through ``baselined``: a pattern or ``imports`` boundary rule, never a
+   ``fitness`` one, whose test keeps its own ratchet),
    refused whole by line (``BaselineError``); what a rule's findings depend on,
    compared structurally between two copies of it (``definition_of``, DN-6);
    ``parse`` takes a ``read`` callable for a ruleset read as a revision held
@@ -2375,7 +2717,10 @@ Component responsibilities
    ``Finding``, its record in D5's shape, ``fingerprint`` (twelve hex of
    SHA-256 over the rule id and a kind-specific key, shared with the ruleset's
    exceptions), the ``pattern``, ``boundary`` and ``cochange`` evaluators over
-   the changed files, an ``each`` template's derived path (``derive``), with
+   the changed files, a ``fitness`` boundary answered from its test's latest
+   run over the tree in hand (``fitness_answer``, ``FitnessAnswer``, the
+   ``Fitness`` callable, ADR-032 increment 5), an ``each`` template's derived
+   path (``derive``), with
    path and fingerprint exceptions named and unanswerable files counted as
    findings; the ratchet's arithmetic (``ratchet``, ``Stale``, ``counted``, A3
    increment 5) over the entries ``core/rules`` read; the only-shrinks
@@ -2383,7 +2728,11 @@ Component responsibilities
    branch's entries and the change's, through the change's renames; a judgement
    rule's mechanical N/A conditions (``na_answer``, ``NaAnswer``, A4 increment
    2), ``no_added_match`` and ``no_executable_change`` over the rule's files,
-   read through ``core/guidelines``' ``meets`` (A4's DN-3)
+   read through ``core/guidelines``' ``meets`` (A4's DN-3); for a rule derived
+   from the layer map (ADR-032 D2), a reference crosses when its target lies
+   in an outer layer (its ``paths`` minus its ``exclude``), and a file the map
+   places in two layers is one unanswerable finding naming both, whose fix is
+   an ``exclude``
 
    **Never does:** Read a file, call ``git``, or ask an adapter directly: the
    bytes, the mask, the references and the change's history (``History``)
@@ -2406,7 +2755,9 @@ Component responsibilities
    (A4 increment 2); ``check`` over one entry and ``check_all`` over a
    submission, one rule answered twice refused; each refused line as a
    ``Refusal`` naming its predicate, entry and rule apart from the prose, and
-   ``PREDICATES``, every name a refusal gives (A4 increment 7); for
+   ``PREDICATES``, every name a refusal gives (A4 increment 7); P5's
+   refusal of any ``na`` on an ``owner: user`` rule (ADR-032 D7, increment
+   2); for
    ``guidelines.verdicts_complete`` (A4 increment 3), the owed rules (``owed``,
    over ``not_owed``, the one reading of why a rule is or is not owed), a
    record read back as a submission (``resubmitted``) and each owed rule's
@@ -2502,7 +2853,9 @@ Component responsibilities
    (``latest_record``, increment 5); for D8 and D9 (increment 5), the default
    refused homes (``DEFAULT_REFUSED_PATHS``), the prefixes of a set of roles'
    types (``prefixes_of``) and the need ids a text cites with one, whole tokens
-   only (``cited_ids``)
+   only (``cited_ids``); the directives of a set of roles' types
+   (``directives_of``, ADR-032 increment 3), by which a page holding a
+   decision need is told
 
    **Never does:** Run a build or any command; parse rST; write the record
    (``domains/docs`` does)
@@ -2575,7 +2928,9 @@ Component responsibilities
    **Owns:** locating and assembling the state machines: the shipped ones under
    ``data/machines`` and a project's own (``methodology.extra_machines``), a
    project machine shadowing a shipped one of the same id; the docs-first gates
-   injected on every pipeline machine (``DOCS_FIRST_GATES``, ADR-018 D5),
+   injected on every pipeline machine (``DOCS_FIRST_GATES``, ADR-018 D5;
+   ``docs.ahead_of_code`` on the entry of every ``review``-role state,
+   ADR-032 increment 3), the ``design`` role's name (``DESIGN_ROLE``),
    ``sweep.fresh`` beside each gate a sweep cadence moves, and, in a store
    project only, ``store.docs_lock_released`` on the exit of every state with
    the ``design`` role (``STORE_LOCK_GATES``, ADR-014 D5, increment 4c-1), so
@@ -2641,7 +2996,9 @@ Component responsibilities
    that puts the file back when the configuration would not load
    (``write``); which files a config level is read from
    (``is_config_file``), and which rulings an edit adds or changes
-   (``changed_rulings``)
+   (``changed_rulings``); which ``ruled`` entries an edit of any YAML file
+   adds or changes, each keyed by where it sits (``changed_ruled``, ADR-032
+   increment 2)
 
    **Never does:** ask for the confirmation (the CLI does, at a terminal);
    decide that an edit is refused (``core/rules`` does, from its answer)
@@ -2762,6 +3119,12 @@ advance it. They are the only place where "what a session is" is encoded.
    (``run_after_merge``, which ``session merge`` calls after the
    fast-forward); their rules ride ``torn_down`` as the hold, judged and
    never run there.
+   ADR-027 increment 1 (:need:`DEC_ADR_027_D1`, :need:`DEC_ADR_027_D11`):
+   ``record_report``, how a session ended (``done``, ``blocked``,
+   ``needs-user``), an event like a handoff, on the record's ``reports`` and
+   as a standstill row, in any state; and ``vet_line``, the one check a
+   handoff note, a report note and a queue entry's ``ref`` and ``brief`` go
+   through.
 
 .. comp:: ``domains/pipeline``
    :id: COMP_DOMAINS_PIPELINE
@@ -2786,6 +3149,19 @@ advance it. They are the only place where "what a session is" is encoded.
    measured before and after the run (``core/git.tree_signature``) into
    ``coverage_run.tree``, and ``gate_receipt`` reads that record against the
    tree now, the run's suite and ``coverage.meets_floor``, writing nothing.
+   Every ``test_runs`` record is signed the same way (``tree``, ADR-032
+   increment 5, :need:`DEC_ADR_032_I5`), so the ``fitness`` engine can tell a
+   run over the tree in hand from one before the last edit.
+   The forbidden-model list the CLI injects (``forbidden_models``), handed to
+   every gate on the rule context, and ``unchecked_agents``, the agents that
+   ran with no model known, which ``pipeline status`` names
+   (:need:`DEC_ADR_030_D3`, :need:`DEC_ADR_030_D4`). The design snapshot
+   (:need:`DEC_ADR_032_I3`): ``advance``, on an edge from a ``design``-role
+   state into one with neither the ``design`` nor the ``abandon`` role, asks
+   ``core/rules.design_snapshot`` outside the lock and appends it to
+   ``evidence["design_snapshots"]`` with the history row;
+   ``design_snapshot_taken`` is the one the last advance took, which the CLI
+   prints.
 
 .. comp:: ``domains/steps``
    :id: COMP_DOMAINS_STEPS
@@ -2844,6 +3220,35 @@ advance it. They are the only place where "what a session is" is encoded.
    construct left unconverted is named by ``unconverted_in``'s line. rST to
    Markdown is refused for any item carrying a body.
 
+.. comp:: ``domains/queue``
+   :id: COMP_DOMAINS_QUEUE
+
+   the queue's operations (:need:`ADR-027 <DEC_ADR_027>` D2,
+   :need:`DEC_ADR_027_D10`). Not an FSM. A ``ref`` and a ``brief`` are vetted
+   by the handoff note's own check (``domains/session.vet_line``); a ``ref``
+   shaped like one of the project's work-item ids must name an item
+   ``domains/workitem`` finds in no terminal state; a ``ref`` an open entry
+   already holds is refused. Each edit goes through ``core/queue.editing``.
+   The CLI writes through it; the oracle reads the record and never this.
+   Increment 2 adds an entry's ``propose`` mode and the chain's writes the
+   CLI makes for the watcher: ``begin``, ``mark`` and ``fail``, which marks a
+   failed start and queues ruling 9's triage and one retry at the head in one
+   locked edit (:need:`DEC_ADR_027_D18`, :need:`DEC_ADR_027_D20`).
+   Increment 5 adds the backlog mirror (``mirror``: one idempotent
+   reconcile over the main checkout's backlog, by rank), ``link`` and
+   ``add --serves``, and ``after_reproduce``, which routes a reproduce-first
+   session's verdict (:need:`DEC_ADR_027_D44` to :need:`DEC_ADR_027_D51`).
+   ADR-032 increment 6 adds the plan page's write (``render``,
+   ``PageRendered``, :need:`DEC_ADR_032_I6`): under the queue's lock it
+   reads the record, the need ids the docs project declares
+   (``core/docformat.rst_directives`` over its ``.rst`` files, the types
+   from ``core/needs``) and the live sessions' plans (through an inert
+   store, as the mirror reads them), asks ``core/queue.render_page``,
+   scans the text for privacy, and writes ``plan.rst`` unless a file
+   without the marker is there. Every write above renders the page again in
+   the same lock, after the record; a refusal never fails the edit and is
+   kept in ``notes`` for the CLI to print.
+
 .. comp:: ``domains/guidelines``
    :id: COMP_DOMAINS_GUIDELINES
 
@@ -2884,7 +3289,32 @@ advance it. They are the only place where "what a session is" is encoded.
    directory and, with ``--touched``, ``core/rules``' ``touched_paths``, then asks
    ``core/guidelines``' ``select`` and ``render_selected``. It writes nothing, and
    refuses an unknown phase, ``--touched`` with no session and a named file
-   outside the project (``SelectionRefused``).
+   outside the project (``SelectionRefused``). And it merges the default
+   set into the configured ruleset (``merge_defaults``, ADR-032 increment
+   1b, :need:`DEC_ADR_032_I1B`), the seed of increment 2's adopt writer: it
+   is handed the defaults' text and the catalogue's (``domains/docs``'
+   ``default_ruleset``, read by its caller, so it imports no other domain),
+   asks ``core/guidelines``' ``merge_defaults``, validates the result
+   against the rule registry, admits the ruleset and the catalogue, then
+   writes the ruleset and copies the catalogue beside it where none is
+   there. It never rewrites a rule or a catalogue the project has, and
+   refuses (``DefaultsRefused``) with nothing written where no ruleset is
+   configured or the file is missing, or where the merge or its validation
+   fails. ADR-032 increment 2 (:need:`DEC_ADR_032_I2`) adds the user's
+   writes: ``plan_except``, ``plan_loosen`` and ``plan_retire`` plan a ruled
+   exception, a ruled lowering (to ``warn``, or ``off`` to pause the rule)
+   and a rule moved into ``retired`` (ADR-032 ruling 13) through
+   ``core/guidelines``' edits, validated against the
+   registry (``RulingEdit``, ``EditRefused``), and ``write_edit`` writes one
+   only while the file is still the one planned, admitted first; the CLI
+   confirms each at a terminal. ``plan_adopt`` is ``guidelines adopt``'s
+   plan (``Adoption``): with no ruleset, ``fresh_defaults``, the default
+   set's files as a project with no ruleset gets them, which the docs
+   starter writes too; with one, ``merge_defaults``' merge and each
+   default's standing, ``--update`` applied through ``replace_default``.
+   ``write_adoption`` writes the ruleset and the catalogue; the settings,
+   the baseline and the render that follow are the CLI's sequence over
+   this domain's ``baseline`` and ``render``.
 
 .. comp:: ``domains/memorystore``
    :id: COMP_DOMAINS_MEMORYSTORE
@@ -2925,12 +3355,20 @@ advance it. They are the only place where "what a session is" is encoded.
    same converter for item bodies, ``item_body_converter``, nested inside a
    directive, a link to an item's own file mapped to its need, and reads back
    where each construct left unconverted stands (``unconverted_in``); the
-   work-item domain writes. The starter (D11) also writes the
+   work-item domain writes. The starter (D11) also writes the plan page
+   from the empty queue (``core/queue.render_page``, ADR-032 increment 6),
+   which its index's toctree names, and the
    guidelines ruleset with the mandate's two judgement rules where the
-   project has none, parsing it against the rule registry through ``core/rules``,
-   imported at call time. It writes it inside the docs project it starts,
+   project has none, taking its text and its parse from ``domains/guidelines``'
+   ``fresh_defaults``, the adopt writer's (``DOCSD --> GDOM``, ADR-032
+   increment 2), imported at call time. It writes it inside the docs project it starts,
    ``ruleset_location(<srcdir>)`` (ADR-020 D10), and names it in the
-   starter's settings as ``guidelines.ruleset``. Over a ``conf.py`` already
+   starter's settings as ``guidelines.ruleset``. The default set's text,
+   the shipped template filled with the configured ecosystems' source globs
+   and the backlog's path and not yet stamped, is ``default_ruleset``: the
+   one fill the starter writes from and the defaults merge
+   (``domains/guidelines``' ``merge_defaults``) is handed
+   (:need:`DEC_ADR_032_I1B`). Over a ``conf.py`` already
    there it writes nothing, and where that ``conf.py`` loads
    ``sphinx_needs`` its refusal is the adoption note of a hand-built docs
    project (BUG_128, :need:`DEC_ADR_018_B128`): adopted as it stands with
@@ -2992,7 +3430,9 @@ over Tailscale (IDEA_023) is shipping in increments; see
 
    **Owns:** ``<state_root>/attention/<host-id>.json`` — what one host session is waiting
    on, how its turn ended, its pid, the background work its turn left running
-   (BUG_094); the write and clear rules per event
+   (BUG_094), the person's prompts it counted and when the last began
+   (``prompts``, ``prompted``, ADR-027 ruling 21); the write and clear rules
+   per event
 
    **Never does:** Decide what a hook event means (the host adapter does);
    lock; raise into a hook (the CLI guards every call)
@@ -3011,7 +3451,8 @@ over Tailscale (IDEA_023) is shipping in increments; see
    (``lease_host_alive``, which the CLI hands the session domain too); the
    project's open step debts on each live session row (``step_debts``,
    ADR-021 D4, increment 1), left out of a row's document when there are
-   none
+   none; the session's latest report on its row (``report``,
+   :need:`DEC_ADR_027_D11`), left out when it has made none
 
    **Never does:** Write anything; name a state; import ``hosts/`` (host facts
    arrive through the injected ``HostProbe``)
@@ -3044,10 +3485,12 @@ over Tailscale (IDEA_023) is shipping in increments; see
 
    **Owns:** The tick: scan, assess, the atomic ``oracle/snapshot.json``, and the
    rising-edge de-dup ledger ``oracle/alerts.json`` that decides what notifies;
-   the loop that survives a failed tick
+   the loop that survives a failed tick; running the chain step it was given
+   after the alerts (``TickResult.chain``, ADR-027 increment 2)
 
    **Never does:** Decide what a signal means (``signals`` does); know how a
-   notification is delivered; write under a project's state root
+   notification is delivered; write under a project's state root itself (the
+   chain step's queue writes are the CLI's ``ChainHands``)
 
 .. comp:: ``oracle/gates``
    :id: COMP_ORACLE_GATES
@@ -3055,7 +3498,10 @@ over Tailscale (IDEA_023) is shipping in increments; see
    **Owns:** ``GateCache``: what each idle session's pipeline owes (idle by
    ``signals.turn_state``), evaluated by the domain over an inert store, off
    the tick, once per fingerprint, at most two at a time, with a timeout that
-   keeps the last answer; ``GateReport``, the data ``recommend`` reads
+   keeps the last answer; ``GateReport``, the data ``recommend`` reads;
+   ``evaluate_row`` takes the forbidden-model list in force from the CLI
+   (``forbidden_for``), as it takes the instruction files
+   (:need:`DEC_ADR_030_D4`)
 
    **Never does:** Write anything; evaluate while a turn runs; persist an
    answer; raise an alert
@@ -3064,16 +3510,38 @@ over Tailscale (IDEA_023) is shipping in increments; see
    :id: COMP_ORACLE_NOTIFY
 
    **Owns:** The ``Notifier`` protocol and ``Notification``; ``OsascriptNotifier``, with
-   the quoting injected; ``RecordingNotifier`` for tests
+   the quoting injected; ``FanOutNotifier``, every channel in order, each on its
+   own, delivered once one delivered, with each channel's ``Outcome``
+   (:need:`DEC_ADR_027_D38`); ``NobodyToNotify``; ``RecordingNotifier`` for tests
 
    **Never does:** Import ``hosts/``; decide what deserves a notification
+
+.. comp:: ``oracle/push``
+   :id: COMP_ORACLE_PUSH
+
+   **Owns:** web push (:need:`ADR-027 <DEC_ADR_027>` increment 4, ruling 17,
+   :need:`DEC_ADR_027_D38` to :need:`DEC_ADR_027_D43`): ``PushBook``, the
+   owner-only ``<oracle home>/web/push.json`` (the VAPID key pair and each
+   paired device's subscriptions); ``check_subscription``, which keeps only an
+   endpoint of a known push service; ``payload``, the banner's own text;
+   ``encrypt`` (RFC 8291 ``aes128gcm``) and ``vapid_authorization`` (RFC 8292
+   ES256); ``PushNotifier``, one more notifier behind the seam, with its
+   timeout, its rest after a failure and the pruning of a gone subscription;
+   ``urllib_post``, the real POST the CLI injects.
+
+   **Never does:** import ``hosts/``; reach the network except through the
+   injected POST; send to a device that is no longer paired; send anything but
+   the banner's title, subtitle and message; keep the key anywhere but its
+   owner-only file.
 
 .. comp:: ``oracle/launchd``
    :id: COMP_ORACLE_LAUNCHD
 
    **Owns:** The LaunchAgent: ``plist_for`` (absolute interpreter, explicit ``PATH``, log
-   under the home), ``LaunchdInstaller`` (install, reinstall, uninstall,
-   status, the interpreter check ``doctor`` runs), ``RecordingLaunchctl`` for
+   under the home), ``search_path`` (each agent's ``PATH`` from where its
+   programs are found, a well-known fallback, and the programs found nowhere,
+   ADR-028), ``LaunchdInstaller`` (install, reinstall, uninstall, status, the
+   interpreter and programs checks ``doctor`` runs), ``RecordingLaunchctl`` for
    tests
 
    **Never does:** Run ``launchctl`` except through its injected runner; import
@@ -3115,10 +3583,33 @@ over Tailscale (IDEA_023) is shipping in increments; see
    ``Origin`` rules) and ``WebServer`` (the stdlib server, one per address,
    with a socket timeout and caps on headers and connections; over HTTPS, TLS
    per connection with the certificate ``tls`` keeps, and only a redirect for
-   plain HTTP)
+   plain HTTP). Since ADR-027 increment 4, the service worker's route and a
+   device's push subscribe and unsubscribe, through ``push``'s book
+   (:need:`DEC_ADR_027_D41`). Since ADR-029 increment 1, each live window's
+   last message, read through the injected ``SessionTalk`` on a paired
+   device's state read and handed to the panel (:need:`DEC_ADR_009_D17`).
+   Since increment 2, ``GET /api/session``: one row's live window read on
+   demand, ``unchanged`` on the same cursor, at most 512 KiB
+   (:need:`DEC_ADR_029_D21`)
 
    **Never does:** Bind the wildcard; answer an unpaired device with anything
-   but "not paired"; decide what may run
+   but "not paired"; decide what may run; offer push over plain HTTP; read a
+   transcript before the token verifies, or put its text in the document
+
+.. comp:: ``oracle/talk``
+   :id: COMP_ORACLE_TALK
+
+   **Owns:** The host-neutral half of the page talking to running sessions
+   (:need:`DEC_ADR_029_D4`). Increment 1: the ``SessionTalk`` protocol with
+   ``conversation`` only, ``TalkHost``, the shapes of a conversation it
+   reads, and ``last_message``, Claude's newest text and the prompt it
+   answers (:need:`DEC_ADR_029_D14`). Increment 2: ``turns``, the newest 40
+   entries served to the Conversation screen, capped again, a stop among them
+   said; ``read_turns``, ``cursor`` and ``offered`` (:need:`DEC_ADR_029_D21`,
+   :need:`DEC_ADR_029_D22`)
+
+   **Never does:** Import ``hosts/``; write a session's text anywhere; put it
+   in the ``assess`` document
 
 .. comp:: ``oracle/webactions``
    :id: COMP_ORACLE_WEBACTIONS
@@ -3126,7 +3617,9 @@ over Tailscale (IDEA_023) is shipping in increments; see
    **Owns:** The page's confirm-first actions over ``actions``: the confirm view, the
    single-use nonce bound to device and row, the action re-derived from a fresh
    scan, one at a time per row, its polled result, and the audit log
-   ``web/actions.log``
+   ``web/actions.log``. Since ADR-027 increment 3, a chain action on the same
+   path: named by its chain key, derived by ``chainview`` from a fresh read
+   through the injected ``ChainReader``, one per project at a time
 
    **Never does:** Run an ``argv``, ``cwd`` or environment a client sent; add a
    refusal of its own; answer a prompt
@@ -3135,10 +3628,15 @@ over Tailscale (IDEA_023) is shipping in increments; see
    :id: COMP_ORACLE_WEBPAGE
 
    **Owns:** The page's HTML, inline CSS and script, with its self-refreshing loop, and
-   the small "not paired" and pairing pages
+   the small "not paired" and pairing pages; since ADR-027 increment 4 the
+   service worker and the Notifications row's opt-in (:need:`DEC_ADR_027_D42`);
+   since ADR-029 increment 1, a session's last message drawn as text and its
+   "Show all" (:need:`DEC_ADR_009_D17`); since increment 2, the Conversation
+   screen, its 2-second read, and the drop of every session text after 60
+   seconds in the background (:need:`DEC_ADR_029_D24`)
 
-   **Never does:** Load anything from another origin; turn a row's text into
-   markup
+   **Never does:** Load anything from another origin; turn a row's text, or a
+   session's, into markup
 
 .. comp:: ``oracle/devices``
    :id: COMP_ORACLE_DEVICES
@@ -3199,10 +3697,18 @@ over Tailscale (IDEA_023) is shipping in increments; see
    ``oracle/recommend``'s ``assess`` document alone, so it is pure and tested
    without a browser. The screens it draws are the ``ui`` needs of
    :doc:`oracle-panel`. A session's "Technical details" name each step its
-   project owes (ADR-021 D4, increment 1).
+   project owes (ADR-021 D4, increment 1). Given the chain's read
+   (``chainview``), the chain's Needs-you cards, each project's chain line and
+   its Chain screen, and the chain actions' confirm words (ADR-027
+   increment 3). Since ADR-029 increment 1, which live window each row's
+   last message is read from (``excerpt_hosts``), and the excerpt on a card,
+   a leftover window's row and the detail's "Last message", folded past 1200
+   characters (:need:`DEC_ADR_029_D18`); since increment 2, a detail's "Open
+   conversation" and the Conversation screen's head (``conversation_head``,
+   :need:`DEC_ADR_029_D23`).
 
-   **Never does:** read a project, run a step, or render HTML
-   (``oracle/webpage`` does).
+   **Never does:** read a project, run a step, read a transcript, or render
+   HTML (``oracle/webpage`` does).
 
 .. comp:: ``oracle/startsession``
    :id: COMP_ORACLE_STARTSESSION
@@ -3210,10 +3716,97 @@ over Tailscale (IDEA_023) is shipping in increments; see
    **Owns:** what ``invariant oracle start-session`` decides before it launches
    (IDEA_030, ADR-009 D16): the name, the facts shown and the refusals, kept
    apart from the launch so the panel's confirm sheet and the dashboard show
-   the same facts from the same functions.
+   the same facts from the same functions. The ``Starter`` carries the
+   person's model text to ``prepare`` and the prepared answer's ``model``
+   back to ``again``, and names no model itself (:need:`DEC_ADR_030_D6`).
 
    **Never does:** launch a host; the CLI injects the launcher from
    ``hosts/claude_code_launch``.
+
+.. comp:: ``oracle/chain``
+   :id: COMP_ORACLE_CHAIN
+
+   **Owns:** what runs next in a project (:need:`ADR-027 <DEC_ADR_027>` D3,
+   :need:`DEC_ADR_027_D12`): ``decide``, pure over the queue, the ready
+   backlog items, ``oracle.chain``, the live sessions and windows, a pause and
+   a clock, returning ``start`` (``auto`` or ``propose``), ``wait``,
+   ``paused`` or ``idle`` with every reason; ``rank`` (tier, priority,
+   natural id); ``in_hours``; and the read-only gatherers ``ready_items`` (the
+   item machines' ``ready`` states) and ``live_sessions`` (the session rows
+   of one project of the ``assess`` document).
+
+   Increment 2 (:need:`DEC_ADR_027_D15` to :need:`DEC_ADR_027_D20`):
+   ``decide`` also takes the resume time, the day's starts and the machine's
+   live chains against the caps, and carries the queue's ``propose`` entries
+   as ``proposals``; ``read_inputs`` reads one project's queue, ready items
+   and settings for ``oracle next``, ``oracle chain start`` and the step
+   alike; ``session_end`` reads an ended session's record through an inert
+   store; ``render_prompt``, ``label_for``, ``by_hand`` and ``on_failure``
+   (ruling 9: triage and one retry, a failed triage pauses).
+
+   **Never does:** start anything, write the queue or the backlog, or import
+   ``hosts/``; ``oracle/chainstep`` acts on its verdict.
+
+.. comp:: ``oracle/chainstep``
+   :id: COMP_ORACLE_CHAINSTEP
+
+   **Owns:** the watcher's chain step (:need:`ADR-027 <DEC_ADR_027>`
+   increment 2, ruling 9, :need:`DEC_ADR_027_D13` to :need:`DEC_ADR_027_D23`):
+   following each project's chained start to its end, the report pause,
+   deciding and reserving under ``locks/chain.lock``, the launch outside the
+   lock, a failure's triage and its one retry, the proposal, cap and pause
+   notices and their delivery; the chain ledger ``oracle/chain.json``
+   (``pause``, ``resume``, ``status``, ``limits``); ``ChainHands``, the shape
+   of what the CLI injects; ``start_now``, a user's start.
+
+   Increment 2b (rulings 10 to 13, :need:`DEC_ADR_027_D24` to
+   :need:`DEC_ADR_027_D30`): the weekly-usage hold judged once a tick through
+   the injected ``usage`` reader, said once per hold, and ``greenlight``; a
+   chained session's stall on ``current.stall``, its one nudge typed outside
+   the lock through ``ChainHands.nudge``, the "still stalled" notice, and
+   ``stall_action`` (Continue, Retry, Close); the ledger's ``released``
+   sessions, which no longer hold their project.
+
+   Ruling 21 (IDEA_062, :need:`DEC_ADR_027_D53` to :need:`DEC_ADR_027_D61`):
+   the landed window of a start that ended done, on ``landed``: asked through
+   ``ChainHands.nudge`` once quiet (``chain.ask_line``), its answer recorded
+   by ``consent``, closed through ``ChainHands.close`` on consent and
+   released, else one notice; ``landed_action`` (Close, Leave open); a window
+   the user typed in since the teardown, told from the attention record's
+   ``prompts``, is never asked or closed; ended ones in ``landings``.
+
+   **Never does:** write a project's record (the CLI's ``ChainHands`` do,
+   through ``domains/queue``); open a window itself; type into or close one
+   itself (the hands do); import ``hosts/``; replace a ledger it cannot read.
+
+.. comp:: ``oracle/chainview``
+   :id: COMP_ORACLE_CHAINVIEW
+
+   **Owns:** the chain as the phone reads it (:need:`ADR-027 <DEC_ADR_027>`
+   increment 3, rulings 14 to 16, :need:`DEC_ADR_027_D31` to
+   :need:`DEC_ADR_027_D37`): ``ChainReader``, one read of the chain ledger
+   (``chainstep.read_ledger``, without its lock), each registered project's
+   queue (its path found again once a minute) and the weekly-usage hold
+   through the injected ``usage`` reader; each project's status and the
+   actions it offers now; the action keys
+   (``<project>|chain:<action>[:<entry or item>]``) and ``derive``, the
+   ``invariant`` argv, folder and facts an offered action runs with.
+
+   **Never does:** write anything; run or launch anything; import ``hosts/``;
+   offer an action D29's or D25's verbs would refuse.
+
+.. comp:: ``oracle/usage``
+   :id: COMP_ORACLE_USAGE
+
+   **Owns:** the plan's usage as a host-neutral fact (:need:`ADR-027
+   <DEC_ADR_027>` ruling 10, :need:`DEC_ADR_027_D24`, :need:`DEC_ADR_027_D25`):
+   ``PlanUsage``, its file ``<oracle home>/oracle/usage.json``
+   (``record_usage``, ``read_usage``), ``weekly_max`` from the user config,
+   and the pure ``hold``: missing, stale or without a weekly figure holds as
+   ``unknown`` until a greenlight, at or over the cap as ``over``.
+
+   **Never does:** parse a host's output (``hosts/claude_code_usage`` does,
+   the CLI joins them), start or hold anything itself.
 
 
 ``adapters/``
@@ -3295,9 +3888,13 @@ again: the first adapter with an answer wins (``core/rules._references``, which
 
 ``guideline_engines`` is what an adapter offers the guidelines domain, a subset
 of ``mask`` and ``imports``. ``guidelines.ruleset_valid`` refuses a pattern rule
-reading anything but ``any`` unless a configured adapter offers ``mask``, and a
-``boundary`` rule unless one offers ``imports`` (DN-A14), so a ruleset cannot ask
-for a reading the project's adapters cannot give.
+reading anything but ``any`` unless a configured adapter offers ``mask``, and an
+``imports`` ``boundary`` rule unless one offers ``imports`` (DN-A14), so a ruleset
+cannot ask for a reading the project's adapters cannot give. The refusal names
+the alternatives: judgement, or the ``fitness`` boundary engine (ADR-032 D3,
+:need:`DEC_ADR_032_I5`), which no adapter answers: it reads the pipeline's
+recorded test runs, so any ecosystem, Swift included, can name its own
+layering test as a rule's evidence.
 
 Which adapters mask and read imports, and how:
 
@@ -3343,17 +3940,61 @@ Which adapters mask and read imports, and how:
 |                 |                       | interpolation are read as   |                          |
 |                 |                       | ordinary quotes.            |                          |
 +-----------------+-----------------------+-----------------------------+--------------------------+
-| ``node``,       | none                  | ``None``. A node lexer is   | ``None`` (DN-9).         |
-| ``generic``,    |                       | IDEA_038; ``sphinx`` reads  |                          |
+| ``node``        | ``imports``           | ``None``. A node mask is    | Through                  |
+|                 |                       | IDEA_038's other half.      | ``adapters/node_imports``|
+|                 |                       |                             | for ``.ts``, ``.tsx``,   |
+|                 |                       |                             | ``.js``, ``.jsx``: one   |
+|                 |                       |                             | lexer (comments, quotes, |
+|                 |                       |                             | templates, regular       |
+|                 |                       |                             | expressions, JSX), then  |
+|                 |                       |                             | every static ``import``, |
+|                 |                       |                             | ``export ... from``,     |
+|                 |                       |                             | ``require`` and          |
+|                 |                       |                             | ``import()`` of a string |
+|                 |                       |                             | literal. Relative        |
+|                 |                       |                             | specifiers resolve from  |
+|                 |                       |                             | the file, others through |
+|                 |                       |                             | the nearest              |
+|                 |                       |                             | ``tsconfig.json``'s      |
+|                 |                       |                             | ``paths`` and            |
+|                 |                       |                             | ``baseUrl``, with        |
+|                 |                       |                             | TypeScript's extension   |
+|                 |                       |                             | and ``index`` rules. A   |
+|                 |                       |                             | bare specifier nothing   |
+|                 |                       |                             | resolves is outside the  |
+|                 |                       |                             | project; a relative one  |
+|                 |                       |                             | or an alias that         |
+|                 |                       |                             | resolves nowhere, and a  |
+|                 |                       |                             | file the lexer cannot    |
+|                 |                       |                             | finish, make the file    |
+|                 |                       |                             | unanswerable             |
+|                 |                       |                             | (:need:`DEC_ADR_032_I5`).|
++-----------------+-----------------------+-----------------------------+--------------------------+
+| ``generic``,    | none                  | ``None``. ``sphinx`` reads  | ``None``.                |
 | ``sphinx``      |                       | ``conf.py`` only for its    |                          |
 |                 |                       | own settings.               |                          |
 +-----------------+-----------------------+-----------------------------+--------------------------+
-| ``dart``,       | none                  | ``None``. A Dart lexer is   | ``None`` (IDEA_047).     |
-| ``flutter``     |                       | IDEA_047. The adapter's     |                          |
-|                 |                       | only Dart reader is the     |                          |
-|                 |                       | declaration reader behind   |                          |
-|                 |                       | ``carries_executable_code`` |                          |
-|                 |                       | (ADR-019 D6).               |                          |
+| ``dart``,       | ``imports``           | ``None``. A Dart mask is    | Through                  |
+| ``flutter``     |                       | IDEA_047's other half. The  | ``adapters/dart_imports``|
+|                 |                       | adapter's other Dart reader | for ``.dart``: the       |
+|                 |                       | is the declaration reader   | ``import``, ``export``   |
+|                 |                       | behind                      | and ``part`` directives  |
+|                 |                       | ``carries_executable_code`` | before the first         |
+|                 |                       | (ADR-019 D6).               | declaration, every URI   |
+|                 |                       |                             | of a conditional import  |
+|                 |                       |                             | included. ``package:``   |
+|                 |                       |                             | names a project package  |
+|                 |                       |                             | by its ``pubspec.yaml``  |
+|                 |                       |                             | name and resolves into   |
+|                 |                       |                             | its ``lib/``; relative   |
+|                 |                       |                             | URIs from the file.      |
+|                 |                       |                             | ``dart:`` and other      |
+|                 |                       |                             | packages are outside the |
+|                 |                       |                             | project; a project       |
+|                 |                       |                             | target that is no file   |
+|                 |                       |                             | makes the file           |
+|                 |                       |                             | unanswerable             |
+|                 |                       |                             | (:need:`DEC_ADR_032_I5`).|
 +-----------------+-----------------------+-----------------------------+--------------------------+
 
 Both questions take text, and text is what decodes as UTF-8. A file that does
@@ -3404,7 +4045,10 @@ Elements
    **Owns:** the adapter interface every ecosystem implements (detection,
    default commands, ``read_run``, ``parse_coverage``, ``hazards``,
    ``source_areas``, ``mask``, ``references``, ``claims``, ``annotate``,
-   ``init_settings``), and ``generic``, the always-present fallback that
+   ``init_settings``; ``source_suffixes``, the one list a source file is told
+   by, which ``source_files`` filters on and ``source_globs`` spells as the
+   globs the starter's default rules apply to, ADR-032 D4), and ``generic``,
+   the always-present fallback that
    executes the manifest's literal commands and parses nothing.
 
    **Never does:** gate a transition; a hazard annotates a result, and a rule
@@ -3433,9 +4077,15 @@ Elements
    :id: COMP_ADAPTERS_NODE
 
    **Owns:** Node and TypeScript's commands and run readings, a secondary
-   ecosystem's block (``commands.node.*``, ADR-013).
+   ecosystem's block (``commands.node.*``, ADR-013), and the ``imports``
+   engine for ``.ts``, ``.tsx``, ``.js`` and ``.jsx`` (ADR-032 increment 5,
+   :need:`DEC_ADR_032_I5`): ``adapters/node_imports`` lexes a file, reads its
+   ``import``, ``export ... from``, ``require`` and ``import()`` specifiers,
+   and resolves them through relative paths and the nearest
+   ``tsconfig.json``'s ``paths`` and ``baseUrl``.
 
-   **Never does:** mask or read imports (IDEA_038).
+   **Never does:** mask (IDEA_038); read ``node_modules`` or a package's
+   ``exports``: a specifier that resolves only there is outside the project.
 
 .. comp:: ``adapters/sphinx``
    :id: COMP_ADAPTERS_SPHINX
@@ -3462,9 +4112,15 @@ Elements
 
    **Owns:** the ``dart`` and ``flutter`` ecosystems (ADR-019): detection from
    ``pubspec.yaml``, the two runners' default commands, the ``package:test``
-   reporter's counts and lcov coverage.
+   reporter's counts and lcov coverage, and the ``imports`` engine for
+   ``.dart`` (ADR-032 increment 5, :need:`DEC_ADR_032_I5`):
+   ``adapters/dart_imports`` reads the ``import``, ``export`` and ``part``
+   directives and resolves ``package:`` URIs through the project's own
+   ``pubspec.yaml`` names into their ``lib/``, and relative URIs from the
+   file.
 
-   **Never does:** mask or read imports (IDEA_047).
+   **Never does:** mask (IDEA_047); read ``.dart_tool/package_config.json`` or
+   the pub cache: a package the project does not hold is outside it.
 
 
 ``hosts/``
@@ -3838,6 +4494,11 @@ Elements
    Where a subagent's call did its work, for an actor row
    (``_actor_places``): the path it names, else for a shell call the
    directories ``core/shell`` reads its commands running in (ADR-025 D1).
+   The host's model defaults, ``WINDOW_MODEL`` and ``FORBIDDEN_MODELS``, and
+   their resolution over ``host.window_model`` and ``host.forbidden_models``
+   (``window_model``, ``forbidden_models``, :need:`DEC_ADR_030_D2`); the
+   refusal, at ``PreToolUse`` and before the rules, of a dispatch whose asked
+   model the list forbids (``_forbidden_dispatch``, :need:`DEC_ADR_030_D7`).
 
    **Never does:** decide a rule, or grant a unit; it asks the engine through
    the CLI and its helpers.
@@ -3849,7 +4510,47 @@ Elements
    (ADR-002), as a ``SampleSource`` for ``core/stats``, and the subagent model
    the audit reads.
 
+   Increment 2b of ADR-027 (:need:`DEC_ADR_027_D27`): how a host's last turn
+   ended, when it ended on a failed request (``turn_end``, ``turn_ends``): the
+   ``error`` code, and for a usage limit its ``quotaLimits`` window and reset,
+   read from the same remembered tail as the activity.
+
+   ``scan_tail`` and ``parse_timestamp`` are public since ADR-029 increment 1:
+   ``claude_code_talk`` reads a window's conversation on the same tail rules
+   (:need:`DEC_ADR_029_D16`).
+
    **Never does:** drive the host or parse a hook payload.
+
+.. comp:: ``hosts/claude_code_talk``
+   :id: COMP_HOSTS_CLAUDE_CODE_TALK
+   :part_of: COMP_HOSTS_CLAUDE_CODE
+
+   **Owns:** ``SessionTalk`` for Claude Code (:need:`DEC_ADR_029_D4`).
+   Increment 1: ``ClaudeCodeTalk.conversation``, a live window's recent
+   turns with text, read backwards from its transcript through
+   ``claude_code_telemetry``'s tail reader, capped as ADR-009 D17 says, and
+   stopped at the first shape it does not know (:need:`DEC_ADR_029_D16`);
+   which ``user`` entries are Claude Code's own (:need:`DEC_ADR_029_D15`); the
+   transcript found by host id and kept in memory against its size and time
+   (:need:`DEC_ADR_029_D17`). Increment 2: each tool call as one line
+   (``tool_line``, :need:`DEC_ADR_029_D20`), and the read that goes on to
+   Claude's newest text (:need:`DEC_ADR_029_D19`).
+
+   **Never does:** import the oracle; write anything; read a shape it does
+   not know as anything but ``Unreadable``.
+
+.. comp:: ``hosts/claude_code_usage``
+   :id: COMP_HOSTS_CLAUDE_CODE_USAGE
+   :part_of: COMP_HOSTS_CLAUDE_CODE
+
+   **Owns:** Claude Code's status line as the source of the plan's usage
+   (:need:`ADR-027 <DEC_ADR_027>` ruling 10, :need:`DEC_ADR_027_D24`):
+   ``reading_from_statusline`` (``rate_limits.seven_day`` and ``five_hour``
+   into the host-neutral fact), ``statusline_text`` (``week 41% · 5h 12%``)
+   and ``install_statusline``, the opt-in, which never replaces an existing
+   ``statusLine``.
+
+   **Never does:** import the oracle or write the reading; the CLI records it.
 
 .. comp:: ``hosts/claude_code_wiring``
    :id: COMP_HOSTS_CLAUDE_CODE_WIRING
@@ -3873,7 +4574,12 @@ Elements
    spawns a host (ADR-005): the launch file, which enters the main checkout
    itself (ADR-005 D8), the claim token, the Terminal window, the successor
    watch, which counts a successor only in the main checkout, and the probe
-   and seams the CLI injects into the oracle.
+   and seams the CLI injects into the oracle; since ADR-027 increment 2b the
+   ``TerminalTyper`` that types a stalled chained session's one "continue"
+   into its tab, never into a tab where only a shell runs. Every plan's
+   ``--model`` and the refusal of a model ``claude`` would misread or the
+   forbidden list holds (``require_allowed_model``, :need:`DEC_ADR_030_D6`);
+   the CLI resolves which model (``_window_model``).
 
    **Never does:** decide whether a session may hand off; ``domains/session``
    does.
@@ -3988,6 +4694,36 @@ The state machines under ``data/machines`` are the elements of :doc:`state_model
    ``compliance-reviewer``, ``backlog-curator``, ``bug-reproducer``) that
    ``core/agents`` parses and a host renders.
 
+   ``feature-architect`` and ``compliance-reviewer`` record every run of a
+   change scoped to its affected tests, each passed as a ``--selector``: the
+   touched files' tests and the tests of the modules that import a touched
+   module, with or without a sweep cadence. The whole suite runs on a
+   schedule outside working hours, through ``invariant sweep run`` on the
+   cadence. A change owes a full run, once on the final tree, only when a
+   touched path is under ``methodology.gates.schedule.held_paths``
+   (:need:`ADR-010 <DEC_ADR_010_D8>` D8 and :need:`D10 <DEC_ADR_010_D10>`;
+   :doc:`manifest`, "A sweep cadence"). Where ``cadence_days`` is null, the
+   agents still run scoped only, and their report recommends a cadence so an
+   evening sweep holds the gates. The text reads the manifest's keys, never
+   one project's values.
+
+   The same two name the default guidelines in their steps
+   (:need:`ADR-032 <DEC_ADR_032_D10>` D10, :need:`I4 <DEC_ADR_032_I4>`):
+   ``feature-architect``'s design gives each affected component its layer
+   and shows each new or changed arrow pointing inward, writes a SOLID block
+   naming the five principles one by one, names each new abstraction's
+   catalogue pattern or why none fits, and edits the design documents before
+   leaving the design state (``docs.ahead_of_code``); its Boy-Scout pass
+   applies the five principles to every touched file.
+   ``compliance-reviewer``'s review carries a cited verdict on each
+   ``solid.*`` rule by name, the derived layer rules' findings, the pattern
+   rule, ``docs.design-before-code`` and ``docs.ahead_of_code``'s result.
+   Neither waives, answers N/A or downgrades a finding on an ``owner: user``
+   rule: each proposes the exception with the exact ``invariant guidelines
+   except`` line for the user to run. Both read the ruleset's names and
+   degrade to "unmapped", "no catalogue configured" or the checklist where a
+   project has none.
+
    **Never does:** compute or write the gate receipt
    (:need:`ADR-026 <DEC_ADR_026>` D3). ``feature-architect`` makes its recorded
    coverage run its last act on the tree and ``compliance-reviewer``'s fast
@@ -3997,8 +4733,15 @@ The state machines under ``data/machines`` are the elements of :doc:`state_model
 .. comp:: ``data/scaffold``
    :id: COMP_DATA_SCAFFOLD
 
-   **Owns:** the docs starter's templates (ADR-018 D11) and the starter ruleset
-   with the mandate's two judgement rules.
+   **Owns:** the docs starter's templates (ADR-018 D11) and the one copy of the
+   default guidelines (ADR-032 D1, increment 1a): the starter ruleset
+   (``guidelines/ruleset.yaml``, version 2: the four layers with empty
+   ``paths``, the five ``solid.*`` rules at ``blocker``, ``owner: user``,
+   ``patterns.named-or-declined``, ``docs.design-before-code`` and the
+   mandate's two judgement rules, each with its ``origin``) and the pattern
+   catalogue (``guidelines/patterns.yaml``, version 1, 32 entries written for
+   it). The index template's toctree names the generated plan page
+   (``plan``, ADR-032 increment 6).
 
 .. comp:: ``data/conformance``
    :id: COMP_DATA_CONFORMANCE
@@ -4020,8 +4763,10 @@ This project's canonical checklist is the engine's guidelines ruleset,
 ``docs/guidelines/ruleset.yaml``, which the manifest names as
 ``guidelines.ruleset``. ``invariant guidelines render`` writes it out twice, as
 the checklist (:doc:`/checklist`) and as one ``rule`` need per rule
-(:doc:`/rules`, ADR-018 D12). Both pages are generated, so a rule changes in
-the ruleset and is never copied here.
+(:doc:`/rules`, ADR-018 D12), and writes the pattern catalogue beside the
+ruleset (``docs/guidelines/patterns.yaml``) as :doc:`/patterns` (ADR-032 D5).
+The pages are generated, so a rule changes in the ruleset and is never
+copied here.
 
 Reviewers take the rules from the engine rather than from this page.
 ``invariant guidelines show --phase review --touched`` prints the rules a
@@ -4196,9 +4941,13 @@ Where things live at rest
        backlog.rst             items.path under sphinx_needs: every work item
                                an idea or bug need
        rules.rst, checklist.rst  generated by `guidelines render` (D12)
+       patterns.rst            generated by `guidelines render` from the
+                               ruleset's catalogue (ADR-032 D5)
        guidelines/ruleset.yaml guidelines.ruleset, named explicitly: the
                                project's coding guidelines (ADR-012 D3), in
                                the docs project (ADR-020 D10)
+       guidelines/patterns.yaml the pattern catalogue the ruleset's
+                               `catalogue` names, copied by `init` (ADR-032 D5)
        agents/<name>.yaml      by convention, an agent overlay agents.overlays
                                names (ADR-012 D8); never read unless named, and
                                never exempt from isolation

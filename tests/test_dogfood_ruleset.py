@@ -19,18 +19,29 @@ The ruleset's first `always` rule came later (2026-11-08):
 `conduct.interview-when-input-is-needed`, a warn-severity judgement rule over
 the agent and instruction files, carried by the `guidelines/index` block in
 `CLAUDE.md` (ADR-012, the A5 ruling D11 revisited).
+
+ADR-032 increment 1b (DEC_ADR_032_D12, DEC_ADR_032_I1B) merged the default
+set in: version 2, the four-layer map by package and the three direction
+rules derived from it, the five SOLID rules, the pattern rule,
+`docs.design-before-code` and the catalogue. The inward imports the map found
+are baselined, so the tree passes and a new one, such as a `core` module
+importing `cli`, is a finding.
 """
 
 from __future__ import annotations
 
+import copy as deep
 from pathlib import Path
 
 import pytest
+import yaml
 from test_guidelines_domain import write
 
+from invariant.core import guidelines
 from invariant.core.manifest import Manifest
 from invariant.core.rules import RuleContext, load_ruleset
 from invariant.core.rules import evaluate as evaluate_rules
+from invariant.domains import docs as docs_domain
 
 REPO = Path(__file__).resolve().parent.parent
 RULESET_REL = "docs/guidelines/ruleset.yaml"
@@ -42,6 +53,22 @@ CONDUCT_RULE = "conduct.interview-when-input-is-needed"
 #: The docs mandate's two judgement rules (ADR-018 D8, D9), which the
 #: migration wrote into this ruleset (increment 7).
 DOCS_RULES = ("docs.items-carry-no-design", "docs.decisions-are-declared")
+#: The default set's rules the merge added (ADR-032 increment 1b).
+SOLID = (
+    "solid.single-responsibility", "solid.open-closed", "solid.liskov-substitution",
+    "solid.interface-segregation", "solid.dependency-inversion",
+)
+COPIED = (*SOLID, "patterns.named-or-declined", "docs.design-before-code")
+#: The direction rules the layer map derives (ADR-032 D2).
+ENTITIES_RULE = "layers.entities-depends-inward"
+USE_CASES_RULE = "layers.use-cases-depends-inward"
+DERIVED = (ENTITIES_RULE, USE_CASES_RULE, "layers.interface-adapters-depends-inward")
+CATALOGUE_REL = "docs/guidelines/patterns.yaml"
+BASELINE_REL = "docs/guidelines/baseline.txt"
+SHIPPED_CATALOGUE = (
+    Path(guidelines.__file__).resolve().parent.parent / "data" / "scaffold" / "guidelines"
+    / "patterns.yaml"
+)
 
 
 def repo_context(files=None) -> RuleContext:
@@ -71,11 +98,11 @@ class TestThisRepositorysRuleset:
         ruleset, failure = load_ruleset(repo_context())
         assert failure is None
         ids = [rule.id for rule in ruleset.rules]
-        assert ids == [ORACLE_RULE, HOSTS_RULE, CONDUCT_RULE, *DOCS_RULES]
+        assert ids == [ORACLE_RULE, HOSTS_RULE, CONDUCT_RULE, *DOCS_RULES, *COPIED, *DERIVED]
 
     def test_the_layering_rules_are_blocking_import_boundaries(self):
         ruleset, _ = load_ruleset(repo_context())
-        layering = [rule for rule in ruleset.rules if rule.section == "layers"]
+        layering = [rule for rule in ruleset.rules if rule.section == "layers" and not rule.layer]
         assert [rule.id for rule in layering] == [ORACLE_RULE, HOSTS_RULE]
         for rule in layering:
             assert rule.severity == "blocker"
@@ -115,17 +142,103 @@ class TestThisRepositorysRuleset:
         assert "<!-- invariant:begin guidelines/index" in text
         assert f"`{CONDUCT_RULE}` (always)" in text
 
-    def test_no_boundary_glob_uses_a_double_star(self):
-        """`**/` needs a directory, so it would miss each layer's top-level modules."""
+    def test_no_hand_written_boundary_glob_uses_a_double_star(self):
+        """`**/` needs a directory, so it would miss each layer's top-level
+        modules. The layer map's `<package>/**` globs are the derived rules',
+        which reach top-level modules (`TestASeededImportIsFound`)."""
         ruleset, _ = load_ruleset(repo_context())
         for rule in ruleset.rules:
-            if rule.check.kind != "boundary":
+            if rule.check.kind != "boundary" or rule.layer:
                 continue
             assert not any("**" in glob for glob in (*rule.applies_to, *rule.check.forbid))
 
-    def test_no_baseline_is_configured(self):
-        """No finding exists to record, so every finding is new (DN-1)."""
-        assert Manifest.locate(REPO).get("guidelines.baseline") is None
+    def test_the_baseline_holds_only_derived_layer_findings(self):
+        """The inward imports the map found when it was adopted (DEC_ADR_032_I1B);
+        the hand-written bans had none, and still have none."""
+        assert Manifest.locate(REPO).get("guidelines.baseline") == BASELINE_REL
+        entries = guidelines.parse_baseline((REPO / BASELINE_REL).read_text(encoding="utf-8"))
+        assert entries
+        assert {entry.rule for entry in entries} <= set(DERIVED)
+
+
+class TestTheDefaultSet:
+    """ADR-032 increment 1b: the default set, merged into this ruleset."""
+
+    def test_it_is_version_2_and_names_the_catalogue(self):
+        ruleset, _ = load_ruleset(repo_context())
+        raw = yaml.safe_load((REPO / RULESET_REL).read_text(encoding="utf-8"))
+        assert (raw["version"], raw["catalogue"]) == (2, "patterns.yaml")
+        assert ruleset.catalogue.path == CATALOGUE_REL
+        assert len(ruleset.catalogue.patterns) == 32
+        assert (REPO / CATALOGUE_REL).read_bytes() == SHIPPED_CATALOGUE.read_bytes()
+
+    def test_the_solid_rules_are_user_owned_blockers(self):
+        ruleset, _ = load_ruleset(repo_context())
+        for rule_id in SOLID:
+            rule = ruleset.by_id(rule_id)
+            assert (rule.section, rule.severity, rule.owner) == ("solid", "blocker", "user")
+        for rule_id in ("patterns.named-or-declined", "docs.design-before-code"):
+            assert (ruleset.by_id(rule_id).severity, ruleset.by_id(rule_id).owner) == (
+                "warn", "user",
+            )
+
+    def test_each_copy_is_the_shipped_rule_with_its_origin(self, make_manifest):
+        manifest = make_manifest({"version": 1, "project": {"name": "d", "ecosystems": ["python"]}})
+        shipped = {
+            rule["id"]: rule
+            for rule in yaml.safe_load(docs_domain.default_ruleset(manifest, "x.rst"))["rules"]
+        }
+        ours = {
+            rule["id"]: rule
+            for rule in yaml.safe_load((REPO / RULESET_REL).read_text(encoding="utf-8"))["rules"]
+        }
+        for rule_id in COPIED:
+            copied = deep.deepcopy(ours[rule_id])
+            origin = copied.pop("origin")
+            assert origin == {
+                "set": "defaults", "version": 1,
+                "digest": guidelines.origin_digest(ours[rule_id]),
+            }
+            shipped[rule_id].pop("origin")
+            assert copied == shipped[rule_id], rule_id
+
+    def test_the_layer_map_is_by_package(self):
+        ruleset, _ = load_ruleset(repo_context())
+        assert [(layer.title, layer.paths) for layer in ruleset.layers.layers] == [
+            ("Entities", ("src/invariant/core/**",)),
+            ("Use Cases", ("src/invariant/domains/**",)),
+            ("Interface Adapters", ("src/invariant/adapters/**", "src/invariant/hosts/**")),
+            ("Frameworks & Drivers", ("src/invariant/oracle/**", "src/invariant/cli/**")),
+        ]
+        assert ruleset.layers.owner == "user"
+
+    def test_each_inner_layer_forbids_every_outer_one(self):
+        ruleset, _ = load_ruleset(repo_context())
+        assert {rule.id: rule.check.forbid for rule in ruleset.rules if rule.layer} == {
+            ENTITIES_RULE: (
+                "src/invariant/domains/**", "src/invariant/adapters/**",
+                "src/invariant/hosts/**", "src/invariant/oracle/**", "src/invariant/cli/**",
+            ),
+            USE_CASES_RULE: (
+                "src/invariant/adapters/**", "src/invariant/hosts/**",
+                "src/invariant/oracle/**", "src/invariant/cli/**",
+            ),
+            "layers.interface-adapters-depends-inward": (
+                "src/invariant/oracle/**", "src/invariant/cli/**",
+            ),
+        }
+
+    def test_the_review_phase_prints_the_five_solid_rules_by_name(self):
+        ruleset, _ = load_ruleset(repo_context())
+        chosen = guidelines.select(ruleset, ("review",), ())
+        text = guidelines.render_selected(
+            ruleset, chosen, source=RULESET_REL, phases=guidelines.phases_for(("review",)),
+            files=(),
+        )
+        for name in ("Single responsibility", "Open/closed", "Liskov substitution",
+                     "Interface segregation", "Dependency inversion"):
+            assert name in text
+        assert all(f"### {rule_id}:" in text for rule_id in SOLID)
 
 
 class TestTheTreeIsClean:
@@ -133,8 +246,7 @@ class TestTheTreeIsClean:
         files = every_source_file()
         verdict = verdict_of("guidelines.mechanical_clean", repo_context(files))
         assert verdict.ok and not verdict.skipped, verdict.message
-        assert verdict.findings == ()
-        assert "2 mechanical guideline(s)" in verdict.message
+        assert "5 mechanical guideline(s)" in verdict.message
 
 
 # -- a fixture copy with a seeded import --------------------------------------
@@ -146,6 +258,7 @@ def copy(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
     write(root, RULESET_REL, (REPO / RULESET_REL).read_text(encoding="utf-8"))
+    write(root, CATALOGUE_REL, (REPO / CATALOGUE_REL).read_text(encoding="utf-8"))
     write(root, "src/invariant/__init__.py", "")
     for package in (*LAYERS, "oracle", "cli", "core/nested"):
         write(root, f"src/invariant/{package}/__init__.py", "")
@@ -193,3 +306,27 @@ class TestASeededImportIsFound:
         write(copy, rel, "from invariant.oracle import scan\n")
         verdict = verdict_of("guidelines.mechanical_clean", copy_context(make_manifest, copy, [rel]))
         assert verdict.ok and verdict.findings == ()
+
+    def test_a_core_module_importing_the_cli_is_a_new_finding(self, make_manifest, copy):
+        """The increment's deliverable: Entities depends inward."""
+        write(copy, "src/invariant/cli/main.py", "X = 1\n")
+        rel = "src/invariant/core/m.py"
+        write(copy, rel, "from invariant.cli import main\n")
+        verdict = verdict_of("guidelines.mechanical_clean", copy_context(make_manifest, copy, [rel]))
+        assert not verdict.ok
+        assert f"{ENTITIES_RULE} {rel}:1 -> src/invariant/cli/main.py" in verdict.message
+
+    def test_a_domain_importing_an_adapter_is_a_new_finding(self, make_manifest, copy):
+        write(copy, "src/invariant/adapters/python.py", "X = 1\n")
+        rel = "src/invariant/domains/m.py"
+        write(copy, rel, "from invariant.adapters import python\n")
+        verdict = verdict_of("guidelines.mechanical_clean", copy_context(make_manifest, copy, [rel]))
+        assert not verdict.ok
+        assert f"{USE_CASES_RULE} {rel}:1 -> src/invariant/adapters/python.py" in verdict.message
+
+    def test_a_core_module_importing_core_is_no_finding(self, make_manifest, copy):
+        write(copy, "src/invariant/core/other.py", "X = 1\n")
+        rel = "src/invariant/core/m.py"
+        write(copy, rel, "from invariant.core import other\n")
+        verdict = verdict_of("guidelines.mechanical_clean", copy_context(make_manifest, copy, [rel]))
+        assert verdict.ok and verdict.findings == (), verdict.message

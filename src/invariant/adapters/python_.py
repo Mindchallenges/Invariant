@@ -35,8 +35,7 @@ class PythonAdapter(Adapter):
 
     guideline_engines: ClassVar[frozenset[str]] = frozenset({"mask", "imports"})
 
-    def source_files(self, changed: list[Path]) -> list[Path]:
-        return [p for p in changed if p.suffix == ".py"]
+    source_suffixes: ClassVar[frozenset[str]] = frozenset({".py"})
 
     def lexical_mask(self, relative: Path, text: str, keep: str) -> str | None:
         """Through ``tokenize``, so the regions are Python's own.

@@ -19,6 +19,12 @@ The relaxation (ruling 10): ``privacy.store.scan: false`` turns the
 commit-time screens off only while the store has no remote. A push always
 scans, and while the key is present it scans the whole history it pushes.
 
+A message is read as ``PrivacyScanner.scan_message`` reads a repository
+commit's (ADR-024 D5): a line of its trailer block that one of the host's
+declared attribution trailers admits is not a finding. The declarations reach
+the screen only as an argument, from the CLI, which knows the host; nothing
+here knows any host's trailer.
+
 Nothing here reaches a network, pushes or decides what a finding means for a
 command: a caller refuses on a finding, and on every question git cannot
 answer.
@@ -37,7 +43,7 @@ import yaml
 
 from . import git
 from .errors import ManifestError
-from .privacy import Finding, PrivacyScanner, parse_allow
+from .privacy import AttributionTrailer, Finding, PrivacyScanner, parse_allow
 from .stores import STORE_MANIFEST
 
 #: The git hooks the screen installs in a store.
@@ -107,8 +113,12 @@ class StoreScreen:
     def scan(self, rel: str, text: str) -> list[Finding]:
         return self.scanner.scan_text(text, path=Path(rel))
 
-    def scan_message(self, text: str) -> list[Finding]:
-        return self.scanner.scan_text(text)
+    def scan_message(
+        self, text: str, trailers: Iterable[AttributionTrailer] = ()
+    ) -> list[Finding]:
+        """A commit message, path-less, with the trailer-block lines one of
+        ``trailers`` admits skipped (ADR-024 D2, D5)."""
+        return self.scanner.scan_message(text, trailers)
 
 
 def screen_from(root: Path, text: str | bytes | None, where: str) -> StoreScreen:
@@ -268,7 +278,9 @@ def _text(blob: bytes) -> str:
         return ""
 
 
-def scan_commits(root: Path, shas: Sequence[str]) -> Screened:
+def scan_commits(
+    root: Path, shas: Sequence[str], trailers: Sequence[AttributionTrailer] = ()
+) -> Screened:
     """Every commit in ``shas``: its content in scope, and its message, each
     read with the store's privacy block as that commit holds it."""
     root = Path(root)
@@ -298,7 +310,9 @@ def scan_commits(root: Path, shas: Sequence[str]) -> Screened:
             out.problem = f"the message of commit {short} cannot be read"
             return out
         out.scanned.append(f"{short} message")
-        out.findings += [(f"{short} message", f) for f in screen.scan_message(message)]
+        out.findings += [
+            (f"{short} message", f) for f in screen.scan_message(message, trailers)
+        ]
     return out
 
 
@@ -328,18 +342,35 @@ def scan_staged(root: Path, screen: StoreScreen | None = None) -> Screened:
     return out
 
 
-def scan_message(root: Path, text: str, screen: StoreScreen | None = None) -> Screened:
+def scan_message(
+    root: Path,
+    text: str,
+    screen: StoreScreen | None = None,
+    trailers: Sequence[AttributionTrailer] = (),
+) -> Screened:
     """A commit message about to be written in the store. Lines git strips
-    as comments are not part of it."""
+    as comments are not read.
+
+    ``text`` is cut at a newline alone, as git cuts it, and every other
+    character is kept, a lone carriage return included: the scan then admits
+    nothing in a message git would cut into other lines (ADR-024 D2, D5). A
+    message holding a comment line admits nothing either: git keeps the line
+    when it opens no editor (``-m``, ``-F``), so the trailer the hook would
+    read as the last paragraph could stand before more text in the history.
+    """
     out = Screened()
     try:
         screen = screen or screen_staged(Path(root))
     except ManifestError as exc:
         out.problem = str(exc)
         return out
-    kept = "\n".join(line for line in text.splitlines() if not line.startswith("#"))
+    lines = text.split("\n")
+    kept = [line for line in lines if not line.startswith("#")]
+    admitted = trailers if len(kept) == len(lines) else ()
     out.scanned.append("commit message")
-    out.findings += [("commit message", f) for f in screen.scan_message(kept)]
+    out.findings += [
+        ("commit message", f) for f in screen.scan_message("\n".join(kept), admitted)
+    ]
     return out
 
 
@@ -368,7 +399,9 @@ def outgoing(
     return git.commits_to_publish(Path(root), tip, exclude, remote)
 
 
-def pre_push(root: Path, remote: str, lines: str) -> tuple[list[str], Screened]:
+def pre_push(
+    root: Path, remote: str, lines: str, trailers: Sequence[AttributionTrailer] = ()
+) -> tuple[list[str], Screened]:
     """The ``pre-push`` hook: every commit each pushed ref would publish.
 
     ``lines`` is what git hands the hook on stdin, ``<local ref> <local sha>
@@ -390,7 +423,7 @@ def pre_push(root: Path, remote: str, lines: str) -> tuple[list[str], Screened]:
         if found is None:
             return commits, Screened(problem=f"git cannot list what {parts[0]} would publish")
         commits += [sha for sha in found if sha not in commits]
-    return commits, scan_commits(root, commits)
+    return commits, scan_commits(root, commits, trailers)
 
 
 # -- the relaxation (ruling 10) ------------------------------------------------------

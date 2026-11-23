@@ -8,9 +8,12 @@ starts, and launchd shapes it in three ways (ADR-007 D17):
 * **launchd's environment is minimal.** Its ``PATH`` finds neither a
   Homebrew git nor anything a shell profile adds. So the plist names an
   absolute interpreter, runs ``-m invariant`` rather than a console script,
-  and carries an explicit ``PATH`` built from where ``git`` and ``osascript``
-  are found now, then the system directories. ``INVARIANT_HOME`` is pinned
-  only when it was set, so an unset one keeps meaning ``~/.invariant``.
+  and carries an explicit ``PATH`` built from where the agent's programs are
+  found now, then the system directories. A program the installing process
+  cannot find is looked for in a few well-known directories, and one found
+  nowhere is reported, never dropped in silence (BUG_155). ``INVARIANT_HOME``
+  is pinned only when it was set, so an unset one keeps meaning
+  ``~/.invariant``.
 * **The interpreter is the one running now, unresolved.** A virtual
   environment's ``python`` is a symlink, and the environment is found from the
   symlink's own path; resolving it would lose the environment. An editable
@@ -61,16 +64,36 @@ REMEDIES = {LABEL: "invariant oracle install", WEB_LABEL: "invariant oracle inst
 #: Absolute, because the installing shell's PATH is not what matters.
 LAUNCHCTL = "/bin/launchctl"
 
-#: The tail of the agent's PATH, after the directories git and osascript are in.
+#: The tail of the agent's PATH, after the directories its programs are in.
 SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
-#: The programs the watcher needs on its PATH.
-NEEDED_PROGRAMS = ("git", "osascript")
+#: The programs the watcher needs on its PATH: a scan runs git, a notification
+#: osascript, and the chain step opens ``claude`` (ADR-027, BUG_155).
+NEEDED_PROGRAMS = ("git", "osascript", "claude")
 
 #: The programs the web page needs: an action runs ``invariant``, a scan runs
 #: git, a terminal step osascript, discovery asks ``tailscale``, and a resume
 #: or a new session started from the page opens ``claude`` (IDEA_030).
 WEB_PROGRAMS = ("invariant", "claude", "git", "osascript", "tailscale")
+
+#: What each agent needs on its PATH, by label: what ``oracle status`` checks.
+AGENT_PROGRAMS = {LABEL: NEEDED_PROGRAMS, WEB_LABEL: WEB_PROGRAMS}
+
+
+def well_known_dirs(home: Path | None = None) -> tuple[str, ...]:
+    """Where a program the installing process cannot find is looked for next.
+
+    Homebrew on Apple silicon and on Intel, then the per-user directories
+    Claude Code's own installers use. An install run from a process with a
+    thin ``PATH`` (a daemon running a remedy) still finds them (BUG_155).
+    """
+    home = Path.home() if home is None else home
+    return ("/opt/homebrew/bin", "/usr/local/bin",
+            str(home / ".local" / "bin"), str(home / ".claude" / "local"))
+
+
+def _well_known(program: str) -> str | None:
+    return shutil.which(program, path=os.pathsep.join(well_known_dirs()))
 
 #: How long ``launchctl`` may take to answer one call.
 LAUNCHCTL_TIMEOUT_SECONDS = 30
@@ -95,20 +118,52 @@ def agents_dir() -> Path:
     return Path.home() / "Library" / "LaunchAgents"
 
 
+@dataclass(frozen=True)
+class AgentPath:
+    """The ``PATH`` an agent gets, and what it could not find on the installer's own.
+
+    ``fallback`` maps a program to where it was found only in a well-known
+    directory; ``missing`` names the programs found nowhere, which the agent
+    cannot run until they are installed and the agent is installed again.
+    """
+
+    path: str
+    fallback: dict[str, str] = field(default_factory=dict)
+    missing: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"path": self.path, "fallback": dict(self.fallback),
+                "missing": list(self.missing)}
+
+
 def search_path(
     which: Callable[[str], str | None] = shutil.which,
     programs: tuple[str, ...] = NEEDED_PROGRAMS,
     extra: tuple[str, ...] = (),
-) -> str:
-    """A ``PATH`` that finds ``programs``, then ``extra``, then the system directories."""
+    fallback: Callable[[str], str | None] = _well_known,
+) -> AgentPath:
+    """A ``PATH`` that finds ``programs``, then ``extra``, then the system directories.
+
+    A program ``which`` cannot find is asked of ``fallback``, the well-known
+    directories; one neither finds is named in ``missing``, never dropped
+    without a word (BUG_155).
+    """
     dirs: list[str] = []
+    fell_back: dict[str, str] = {}
+    missing: list[str] = []
     for program in programs:
         found = which(program)
+        if not found:
+            found = fallback(program)
+            if found:
+                fell_back[program] = found
         if found:
             dirs.append(str(Path(found).parent))
+        else:
+            missing.append(program)
     dirs.extend(extra)
     dirs.extend(SYSTEM_PATH)
-    return ":".join(dict.fromkeys(dirs))
+    return AgentPath(":".join(dict.fromkeys(dirs)), fell_back, tuple(missing))
 
 
 def _interval_text(interval: float) -> str:
@@ -219,6 +274,8 @@ class AgentStatus:
     error: str | None = None
     label: str = LABEL
     port: int | None = None
+    #: The needed programs the plist's own ``PATH`` cannot find (BUG_155).
+    missing_programs: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         body = asdict(self)
@@ -316,6 +373,7 @@ class LaunchdInstaller:
             return status
         try:
             arguments = self._arguments()
+            status.missing_programs = self._missing_programs()
         except LaunchdError as exc:
             status.error = str(exc)
             return status
@@ -347,15 +405,43 @@ class LaunchdInstaller:
             f"run '{self.remedy}' to point the agent at this one"
         )
 
+    def programs_check(self) -> tuple[bool, str] | None:
+        """``doctor``'s row: whether the plist's PATH finds the agent's programs.
+
+        ``None`` with no plist, or one that cannot be read: the interpreter
+        row already reports that. Reads the file only; launchd is not asked.
+        """
+        if not self.plist_path.exists():
+            return None
+        try:
+            missing = self._missing_programs()
+        except LaunchdError:
+            return None
+        if not missing:
+            return True, ", ".join(AGENT_PROGRAMS.get(self.label, NEEDED_PROGRAMS))
+        return False, missing_text(missing, self.remedy)
+
     # -- internals ------------------------------------------------------
 
-    def _arguments(self) -> list[Any]:
+    def _plist(self) -> dict[str, Any]:
         try:
             plist = plistlib.loads(self.plist_path.read_bytes())
         except (OSError, plistlib.InvalidFileException, ValueError) as exc:
             raise LaunchdError(f"cannot read {self.plist_path}: {exc}") from exc
-        arguments = plist.get("ProgramArguments") if isinstance(plist, dict) else None
+        return plist if isinstance(plist, dict) else {}
+
+    def _arguments(self) -> list[Any]:
+        arguments = self._plist().get("ProgramArguments")
         return list(arguments) if isinstance(arguments, list) else []
+
+    def _missing_programs(self) -> list[str]:
+        """The agent's programs its plist's ``PATH`` cannot find, as the agent would look."""
+        environment = self._plist().get("EnvironmentVariables")
+        path = environment.get("PATH") if isinstance(environment, dict) else None
+        if not isinstance(path, str) or not path:
+            path = os.pathsep.join(SYSTEM_PATH)
+        return [program for program in AGENT_PROGRAMS.get(self.label, NEEDED_PROGRAMS)
+                if shutil.which(program, path=path) is None]
 
     def _write(self, plist: dict[str, Any]) -> None:
         self.agents_dir.mkdir(parents=True, exist_ok=True)
@@ -380,6 +466,13 @@ class LaunchdInstaller:
             f"{self.service} is still loaded {SETTLE_SECONDS:g}s after bootout; "
             f"try again, or run 'launchctl bootout {self.service}' yourself"
         )
+
+
+def missing_text(missing: list[str] | tuple[str, ...], remedy: str) -> str:
+    """What to say about programs an agent's PATH cannot find, and how to fix it."""
+    names = ", ".join(missing)
+    return (f"its PATH cannot find {names}; install {'it' if len(missing) == 1 else 'them'}, "
+            f"then run '{remedy}'")
 
 
 def _flag_value(arguments: list[Any], flag: str, kind: Callable[[Any], Any]) -> Any:

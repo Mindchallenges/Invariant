@@ -1,9 +1,19 @@
-"""How the oracle tells a person something: one seam, one real channel.
+"""How the oracle tells a person something: one seam, and the channels behind it.
 
-The watcher hands a :class:`Notification` to whatever :class:`Notifier` it was
-built with and knows nothing else about delivery. v1 has one channel, a macOS
-notification posted by ``osascript``; a phone push (IDEA_013) would be a
-second implementation of the same protocol, not a change to the watcher.
+The watcher and the chain step hand a :class:`Notification` to whatever
+:class:`Notifier` they were built with and know nothing else about delivery.
+The channels are a macOS notification posted by ``osascript`` and, since
+ADR-027 increment 4, web push to each phone that turned it on
+(``oracle/push``). :class:`FanOutNotifier` joins them behind the one seam, so
+both get every alert and every chain notice under the same ledgers, and
+neither channel's failure stops the other (ruling 17).
+
+**Delivered means one channel delivered** (DEC_ADR_027_D38). The ledgers
+re-send an owed notification on the next tick; one the Mac showed is not
+owed, or the Mac would show it twice. A channel that failed while another
+delivered is reported, through the fan-out's ``log`` and its :attr:`last`
+outcomes, and not retried. A channel with nobody to send to
+(:class:`NobodyToNotify`) is neither a delivery nor a failure.
 
 **The AppleScript quoting is injected.** Turning text into an AppleScript
 string literal already has an owner, ``hosts/claude_code_launch.applescript_string``,
@@ -101,3 +111,66 @@ class RecordingNotifier:
         if self.fail:
             raise NotifyError("the recording notifier was told to fail")
         self.sent.append(notification)
+
+
+
+class NobodyToNotify(NotifyError):
+    """A channel with nobody to send to: no device has turned push on."""
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What one channel did with one notification, for one target.
+
+    ``ok`` is ``None`` for a channel that had nobody to send to. ``target`` is
+    the device a push went to, empty for the Mac.
+    """
+
+    channel: str
+    target: str
+    ok: bool | None
+    detail: str
+
+
+class FanOutNotifier:
+    """Every channel, in order, each on its own: one failing does not stop the next.
+
+    ``channels`` are ``(name, notifier)`` pairs; the Mac banner goes first, so
+    a slow push service never delays it. A channel that keeps its own
+    per-target outcomes (``last``, as the push notifier does) has them carried
+    here. :meth:`notify` raises only when no channel delivered: a
+    :class:`NotifyError` naming every failure, or :class:`NobodyToNotify`
+    when no channel had anyone to send to.
+    """
+
+    def __init__(self, channels: list[tuple[str, Notifier]],
+                 log: Callable[[str], None] | None = None) -> None:
+        self.channels = list(channels)
+        self.log = log
+        #: The outcomes of the last :meth:`notify`, in channel order.
+        self.last: list[Outcome] = []
+
+    def notify(self, notification: Notification) -> None:
+        self.last = []
+        for name, channel in self.channels:
+            try:
+                channel.notify(notification)
+                own = list(getattr(channel, "last", None) or [])
+                self.last.extend(own or [Outcome(name, "", True, "sent")])
+            except NobodyToNotify as exc:
+                self.last.append(Outcome(name, "", None, str(exc)))
+            except Exception as exc:  # noqa: BLE001 - one channel must not stop the next
+                own = [o for o in getattr(channel, "last", None) or [] if o.ok is not None]
+                self.last.extend(own or [Outcome(name, "", False, str(exc))])
+        failed = [o for o in self.last if o.ok is False]
+        if self.log is not None:
+            for outcome in failed:
+                to = f" to {outcome.target}" if outcome.target else ""
+                self.log(f"{outcome.channel}{to} could not notify: {outcome.detail}")
+        if any(o.ok for o in self.last):
+            return
+        if failed:
+            raise NotifyError("; ".join(
+                f"{o.channel}{f' to {o.target}' if o.target else ''}: {o.detail}"
+                for o in failed))
+        raise NobodyToNotify("no channel had anyone to notify")

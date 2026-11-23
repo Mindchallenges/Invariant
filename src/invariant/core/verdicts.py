@@ -5,8 +5,11 @@ answered by a structured, cited verdict, which any host, a script or a person
 submits through the CLI. This module holds the record, reads a submission into
 :class:`Submitted` values, and holds the pure checks behind D5's predicates:
 
-- **P1**, the rule exists and applies: it is a judgement guideline, the
-  ruleset in the tree is the one the pipeline pinned (DN-6), the change meets
+- **P1**, the rule exists and applies: it is a judgement guideline, it is
+  judged against the ruleset the pipeline pinned (DN-6, as amended for
+  BUG_115 by DEC_ADR_012_B115: a rule the pin lacks is judged against the
+  tree's ruleset, and a rule the change edited cannot be judged; see
+  :func:`judged_against`), the change meets
   its ``applies_to`` through a changed file present in the tree, under
   ``applies_to`` and not path-excepted (DN-3), the state is a review-role
   state, and the rule's phases name review, landing or always (DN-2);
@@ -184,7 +187,8 @@ class VerdictRecord:
     tests: tuple[str, ...]
     na_condition: str | None
     note: str | None
-    #: The ruleset digest the verdict was judged against: the pin.
+    #: The ruleset digest the verdict was judged against: the pin, or the
+    #: tree's for a rule the pin lacks (:func:`judged_against`).
     ruleset: str
     #: The pipeline state it was submitted in.
     state: str
@@ -269,6 +273,13 @@ class Facts:
     #: A4.2). ``None`` when it was not read, and an ``na`` naming a
     #: mechanical condition is then refused.
     na: Callable[[Guideline, NaCondition, tuple[str, ...]], NaAnswer] | None = None
+    #: The pinned ruleset's rules by id, read where the pin's own bytes are
+    #: (DEC_ADR_012_B115). ``None`` when the tree is the pin, nothing was
+    #: pinned, or they could not be read; every rule is then judged by the
+    #: digest alone, as DN-6 first ruled.
+    pinned_rules: Mapping[str, Guideline] | None = None
+    #: Why the pinned rules could not be read, named in the refusal.
+    pinned_problem: str | None = None
 
 
 @dataclass(frozen=True)
@@ -429,20 +440,15 @@ def applies_problems(
             if rule.check.kind != "engine" else f"invariant check {rule.check.rule}",
         )]
     problems: list[Problem] = []
-    pinned = facts.pin or facts.tree_digest
-    if facts.tree_digest != pinned:
+    judged = judged_against(rule, facts)
+    if judged is None:
+        problems.append(_pin_problem(rule, facts))
+    elif sub.ruleset is not None and sub.ruleset != judged:
         problems.append(Problem(
             "P1",
-            f"the ruleset in the tree is {facts.tree_digest}, and the pipeline pinned "
-            f"{pinned}; a verdict is judged against the pin (DN-6)",
-            "restore the pinned ruleset, or finish this pipeline and start a fresh one "
-            "under the edited ruleset",
-        ))
-    if sub.ruleset is not None and sub.ruleset != facts.tree_digest:
-        problems.append(Problem(
-            "P1",
-            f"the entry names ruleset {sub.ruleset}, and the tree's is {facts.tree_digest}",
-            "leave the ruleset out; the engine records the pinned one",
+            f"the entry names ruleset {sub.ruleset}, and {rule.id} is judged against "
+            f"{judged}",
+            "leave the ruleset out; the engine records the one it judged against",
         ))
     if submitting:
         problems.extend(_role_problems(facts))
@@ -468,6 +474,55 @@ def applies_problems(
             "submit a verdict only for a guideline the change meets",
         ))
     return problems
+
+
+def judged_against(rule: Guideline, facts: Facts) -> str | None:
+    """The ruleset digest a verdict on ``rule`` is judged against, or ``None``.
+
+    DN-6, as amended for BUG_115 (DEC_ADR_012_B115). The pin governs every
+    rule it holds, and nothing repins:
+
+    - the tree is the pin (a null pin takes the tree's digest): the pin;
+    - the tree moved, and the pinned rules were read: a rule the pin lacks
+      holds no pinned obligation to dodge, so it is judged against the tree's
+      ruleset; a rule the pin holds exactly as the tree does is judged
+      against the pin; a rule the change edited is ``None``, since the pinned
+      rule it must be judged against is no longer in the tree;
+    - the tree moved, and the pinned rules could not be read: ``None``.
+    """
+    pinned = facts.pin or facts.tree_digest
+    if facts.tree_digest == pinned:
+        return pinned
+    if facts.pinned_rules is None:
+        return None
+    before = facts.pinned_rules.get(rule.id)
+    if before is None:
+        return facts.tree_digest
+    return pinned if before == rule else None
+
+
+def _pin_problem(rule: Guideline, facts: Facts) -> Problem:
+    """P1's refusal of a rule that cannot be judged against the pin (DN-6)."""
+    pinned = facts.pin or facts.tree_digest
+    fresh = "finish this pipeline and start a fresh one under the edited ruleset"
+    if facts.pinned_rules is None:
+        unread = (
+            f", whose rules cannot be read ({facts.pinned_problem})"
+            if facts.pinned_problem else ""
+        )
+        return Problem(
+            "P1",
+            f"the ruleset in the tree is {facts.tree_digest}, and the pipeline pinned "
+            f"{pinned}{unread}; a verdict is judged against the pin (DN-6)",
+            f"restore the pinned ruleset, or {fresh}",
+        )
+    return Problem(
+        "P1",
+        f"the ruleset in the tree is {facts.tree_digest}, and it edits {rule.id} as the "
+        f"pipeline pinned it in {pinned}; a verdict on a rule the pin holds is judged "
+        f"against the pin (DN-6)",
+        f"restore {rule.id} as the pinned ruleset holds it, or {fresh}",
+    )
 
 
 def _role_problems(facts: Facts) -> list[Problem]:
@@ -665,6 +720,17 @@ def na_problems(sub: Submitted, rule: Guideline, facts: Facts) -> list[Problem]:
             return [Problem("P5", f"a {sub.status} names no na condition",
                             "drop --na-condition, or answer na")]
         return []
+    if rule.owner == "user":
+        # ADR-032 D7: only the user excepts such a rule, and only the
+        # engine's mechanical conditions answer it N/A, at the gate.
+        return [Problem(
+            "P5",
+            f"{rule.id} is owner: user, so no submitted na answers it: only the user "
+            f"excepts it, and only the engine's mechanical N/A conditions answer it "
+            f"N/A, on their own (ADR-032 D7)",
+            f"answer pass or fail; to set a file aside, propose to the user: "
+            f"invariant guidelines except {rule.id} <path> --by <who> --reason <why>",
+        )]
     problems: list[Problem] = []
     if sub.citations or sub.tests:
         problems.append(Problem("P5", "an na carries no citations and no tests",
@@ -770,12 +836,13 @@ def check(
     problems += selector_problems(sub, facts.test_runs)
     problems += na_problems(sub, rule, facts)
     problems += note_problems(sub, facts)
-    if problems:
+    judged = judged_against(rule, facts)
+    if problems or judged is None:
         return Checked(index=index, rule=sub.rule, record=None, problems=tuple(problems))
     return Checked(index=index, rule=sub.rule, record=VerdictRecord(
         rule=rule.id, status=sub.status, citations=citations, tests=sub.tests,
         na_condition=sub.na_condition, note=sub.note,
-        ruleset=facts.pin or facts.tree_digest, state=facts.state, surface=facts.surface,
+        ruleset=judged, state=facts.state, surface=facts.surface,
     ))
 
 

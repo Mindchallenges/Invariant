@@ -128,7 +128,13 @@ class TestAFreshInit:
         assert code == 0, text
         actions = json.loads(text)["actions"]
         assert any(f"write {NEW_RULESET}" in action for action in actions)
-        assert not any("docs/guidelines" in action.replace(NEW_RULESET, "") for action in actions)
+        # The catalogue sits beside the ruleset (ADR-032 D5); neither is in docs/.
+        catalogue = NEW_RULESET.replace("ruleset.yaml", "patterns.yaml")
+        assert any(f"write {catalogue}" in action for action in actions)
+        assert not any(
+            "docs/guidelines" in action.replace(NEW_RULESET, "").replace(catalogue, "")
+            for action in actions
+        )
 
     def test_a_chosen_docs_folder_carries_the_ruleset(self, toy, capsys, monkeypatch):
         """The ruleset follows whatever source directory the docs step chose."""
@@ -274,7 +280,7 @@ class TestThisRepository:
         pin = ruleset_pin(RuleContext(manifest=m, cwd=REPOSITORY))
         assert pin["path"] == "docs/guidelines/ruleset.yaml"
         assert pin["error"] is None
-        assert pin["digest"] == "02ed45e4db9d"
+        assert pin["digest"] == "2c832ea55bcb"
 
     def test_its_docs_project_is_still_docs(self):
         m = Manifest.locate(REPOSITORY)

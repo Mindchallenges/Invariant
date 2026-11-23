@@ -36,6 +36,20 @@ methodology:
   gates:
     coverage_min: 85
     coverage_scope: touched
+    # The whole suite is some 10,500 tests and ran on every change, often
+    # twice (builder, then reviewer): close to an hour each time. A change now
+    # records the suites it affects with `--selector`, and `invariant sweep
+    # run` runs everything once a day (ADR-010). A sweep moves where these
+    # gates' evidence comes from, not their level, so it is no loosening.
+    schedule:
+      cadence_days: 1
+      gates: [coverage.meets_floor, test.all_pass]
+      # The suite's global inputs: fixtures every test runs under, the
+      # dependency set and pytest's own configuration. A change to one alters
+      # every test's environment, so no selection can see what it affects and
+      # it still owes a full run before merge. A source module is not held:
+      # the tests of the modules that import it are its selection.
+      held_paths: ["tests/conftest.py", "pyproject.toml", "uv.lock"]
 
 enforcement:
   # Deliberately NOT strict. This repository is the one place where a gate
@@ -102,12 +116,19 @@ commands:
   # is not on PATH here, so `pipeline test` recorded exit 127 — command-not-
   # found rendered as a red suite — and the test gates were reading noise
   # (the 2026-08 audit's AUD-40 names the stranded copy of this repair).
-  test: uv run pytest
-  test_one: uv run pytest {selector}
-  coverage: uv run pytest --cov --cov-report=term-missing
+  #
+  # Every run is spread over one pytest-xdist worker per logical CPU. The
+  # suite waits on git and other subprocesses more than on the CPU, so the
+  # hyperthreads pay: on a 16-thread Mac, tests/test_rules.py took 40-47 s on
+  # 16 workers against 54-74 s on 8. `logical`, not `auto`, because `auto`
+  # drops to physical cores the day psutil is installed. pytest-cov combines
+  # the workers' data itself, so coverage reads as before.
+  test: uv run pytest -n logical
+  test_one: uv run pytest -n logical {selector}
+  coverage: uv run pytest -n logical --cov --cov-report=term-missing
   # The scoped form (IDEA_032) arrived later and missed this repair, so
   # `pipeline coverage --selector` fell back to the bare default and exited 127.
-  coverage_one: uv run pytest --cov --cov-report=term-missing {selector}
+  coverage_one: uv run pytest -n logical --cov --cov-report=term-missing {selector}
 
 privacy:
   enabled: true
@@ -136,6 +157,9 @@ memory:
 # ADR-012 D4 names this repository as the first user of the boundary kind:
 # the layering the suite checked with hand-written import scans is a ruleset
 # (IDEA_031 A3 increment 9). The python ecosystem above offers the imports
-# engine its boundary rules need. No baseline: the tree has no finding.
+# engine its boundary rules need. The ruleset carries the default set and the
+# four-layer map (ADR-032 D12); the inward imports the map found when it was
+# adopted are the baseline's, paid down by the Boy-Scout rule (DEC_ADR_032_I1B).
 guidelines:
   ruleset: docs/guidelines/ruleset.yaml
+  baseline: docs/guidelines/baseline.txt

@@ -1,0 +1,354 @@
+# The design-pattern catalogue a ruleset names with `catalogue:` (ADR-032 D5).
+# Copied beside the ruleset by `invariant init`; the project's own from then
+# on: add, drop or reword entries, keeping each id unique. A design names the
+# pattern a new abstraction applies by its id, or says why none fits.
+# `invariant guidelines render` writes patterns.rst from this file.
+version: 1
+patterns:
+  # -- creational ---------------------------------------------------------------
+  - id: gof.abstract-factory
+    name: Abstract Factory
+    family: creational
+    intent: >
+      One interface hands out a whole set of related objects that are meant to
+      be used together, so a caller swaps the entire set by swapping one
+      factory and never names the concrete types.
+    use_when:
+      - several products must always come from the same variant
+      - the variant is chosen once, at the composition root
+    avoid_when:
+      - there is only one product, or only one variant
+      - new product kinds are added often, since every factory must grow
+  - id: gof.builder
+    name: Builder
+    family: creational
+    intent: >
+      A separate object assembles a complex value step by step and hands it
+      over only when it is complete, keeping the construction sequence apart
+      from the value it produces.
+    use_when:
+      - a value has many optional parts or must be validated as a whole
+      - the same steps produce different representations
+    avoid_when:
+      - a constructor or a literal with named arguments reads just as well
+  - id: gof.factory-method
+    name: Factory Method
+    family: creational
+    intent: >
+      A class leaves the choice of which concrete object to create to an
+      overridable method, so a subclass or a supplied function decides the
+      type while the surrounding logic stays fixed.
+    use_when:
+      - shared logic needs an object whose concrete type varies by context
+    avoid_when:
+      - a plain injected instance or a function parameter would do
+  - id: gof.prototype
+    name: Prototype
+    family: creational
+    intent: >
+      New objects are made by copying a configured example instead of
+      constructing them from scratch, so expensive or intricate set-up is done
+      once and reused.
+    use_when:
+      - building from nothing is costly and copies differ only slightly
+      - the types to create are known only at run time
+    avoid_when:
+      - objects hold resources or identities that must not be shared by a copy
+  - id: gof.singleton
+    name: Singleton
+    family: creational
+    intent: >
+      Exactly one instance of a type exists, reached through one well-known
+      place. Prefer making it one instance by composition and injecting it,
+      which keeps the guarantee without the global lookup.
+    use_when:
+      - one shared resource genuinely must have a single owner in the process
+    avoid_when:
+      - the only goal is convenient access; inject the instance instead
+      - tests need to replace or reset it
+  # -- structural ----------------------------------------------------------------
+  - id: gof.adapter
+    name: Adapter
+    family: structural
+    intent: >
+      A thin wrapper translates one interface into the one a caller expects,
+      so code written against its own port can use a library or service shaped
+      differently.
+    use_when:
+      - an outer detail must fit an interface the inner layer owns
+    avoid_when:
+      - you control both sides and can make them agree directly
+  - id: gof.bridge
+    name: Bridge
+    family: structural
+    intent: >
+      An abstraction and its implementation are split into two hierarchies
+      joined by a reference, so each can vary and grow without multiplying
+      the classes of the other.
+    use_when:
+      - two independent dimensions of variation would otherwise combine
+    avoid_when:
+      - only one dimension varies
+  - id: gof.composite
+    name: Composite
+    family: structural
+    intent: >
+      Single items and groups of items share one interface, so a tree of
+      them is handled by callers exactly as a single item is.
+    use_when:
+      - the domain is naturally a part-whole hierarchy
+    avoid_when:
+      - leaves and groups need operations that make no sense for the other
+  - id: gof.decorator
+    name: Decorator
+    family: structural
+    intent: >
+      A wrapper with the same interface adds behaviour before or after
+      delegating to the object it wraps, so responsibilities are layered on
+      at run time without subclassing.
+    use_when:
+      - optional behaviours combine freely (logging, caching, retries)
+    avoid_when:
+      - the order of wrappers matters in ways callers cannot see
+  - id: gof.facade
+    name: Facade
+    family: structural
+    intent: >
+      One simple entry point stands in front of a subsystem with many parts,
+      so callers depend on the few operations they need rather than on the
+      parts.
+    use_when:
+      - most callers use a subsystem in the same few ways
+    avoid_when:
+      - it becomes a dumping ground that every caller must change
+  - id: gof.flyweight
+    name: Flyweight
+    family: structural
+    intent: >
+      Many fine-grained objects share their unchanging state from a common
+      pool and keep only what differs, cutting memory when the counts are
+      large.
+    use_when:
+      - very many objects repeat the same intrinsic data
+    avoid_when:
+      - the objects are few, or their shared part is mutable
+  - id: gof.proxy
+    name: Proxy
+    family: structural
+    intent: >
+      A stand-in with the real object's interface controls access to it:
+      deferring its creation, checking permissions, or reaching it across a
+      boundary.
+    use_when:
+      - access needs laziness, protection or remoteness the caller should not see
+    avoid_when:
+      - the hidden cost (a network call, a lock) would surprise the caller
+  # -- behavioural ----------------------------------------------------------------
+  - id: gof.chain-of-responsibility
+    name: Chain of Responsibility
+    family: behavioural
+    intent: >
+      A request travels along a sequence of handlers until one of them deals
+      with it, so the sender does not know which handler will answer.
+    use_when:
+      - several handlers may apply and their order is configuration
+    avoid_when:
+      - a request that nobody handles must never pass silently
+  - id: gof.command
+    name: Command
+    family: behavioural
+    intent: >
+      An action and its arguments are captured as an object, so it can be
+      queued, logged, retried or undone apart from whoever asked for it.
+    use_when:
+      - actions must be recorded, scheduled or reversed
+    avoid_when:
+      - a direct call would do and nothing needs the action as data
+  - id: gof.interpreter
+    name: Interpreter
+    family: behavioural
+    intent: >
+      A small language is represented as a tree of rule objects that
+      evaluate themselves, one class per grammar rule.
+    use_when:
+      - a simple, stable grammar is evaluated often
+    avoid_when:
+      - the grammar is large or changes; use a parser instead
+  - id: gof.iterator
+    name: Iterator
+    family: behavioural
+    intent: >
+      Elements of a collection are visited one at a time through a uniform
+      interface that hides how the collection is stored.
+    use_when:
+      - callers walk a structure without needing its internals
+    avoid_when:
+      - the language's own iteration already covers it
+  - id: gof.mediator
+    name: Mediator
+    family: behavioural
+    intent: >
+      Objects talk to one coordinator instead of to each other, so their
+      interactions live in one place and each stays unaware of the rest.
+    use_when:
+      - many components interact in tangled, changing ways
+    avoid_when:
+      - the coordinator would absorb all the logic and become the problem
+  - id: gof.memento
+    name: Memento
+    family: behavioural
+    intent: >
+      An object hands out an opaque snapshot of its state that it alone can
+      restore from, so history and undo work without exposing internals.
+    use_when:
+      - state must be rolled back and encapsulation must hold
+    avoid_when:
+      - snapshots are large and taken often
+  - id: gof.observer
+    name: Observer
+    family: behavioural
+    intent: >
+      Interested parties subscribe to a subject and are told when it changes,
+      so the subject never needs to know who depends on it.
+    use_when:
+      - one change must reach a varying set of listeners
+    avoid_when:
+      - the order or the failure of notifications matters to correctness
+  - id: gof.state
+    name: State
+    family: behavioural
+    intent: >
+      An object's behaviour is delegated to a state object it swaps as it
+      moves between states, replacing scattered checks of a status field.
+    use_when:
+      - behaviour changes with a status and the transitions are explicit
+    avoid_when:
+      - there are two states and one condition reads plainly
+  - id: gof.strategy
+    name: Strategy
+    family: behavioural
+    intent: >
+      A family of interchangeable algorithms sits behind one interface, and
+      the caller is handed the one to use instead of choosing it by branching.
+    use_when:
+      - a behaviour varies and new variants arrive over time
+    avoid_when:
+      - there is one algorithm and no sign of a second
+  - id: gof.template-method
+    name: Template Method
+    family: behavioural
+    intent: >
+      A base routine fixes the order of the steps and lets subclasses or
+      supplied functions fill in particular steps.
+    use_when:
+      - several variants share a skeleton and differ in a few steps
+    avoid_when:
+      - the variants share little; prefer composing strategies
+  - id: gof.visitor
+    name: Visitor
+    family: behavioural
+    intent: >
+      Operations over a fixed set of element types live in visitor objects,
+      so a new operation is added without editing the element types.
+    use_when:
+      - the element types are stable and the operations keep growing
+    avoid_when:
+      - new element types are added often, since every visitor must change
+  # -- enterprise -----------------------------------------------------------------
+  - id: enterprise.repository
+    name: Repository
+    family: enterprise
+    intent: >
+      A collection-like interface, owned by the inner layer, gives access to
+      stored domain objects, so policy reads and writes them without knowing
+      how or where they are kept.
+    use_when:
+      - domain code needs persistence it must not depend on
+    avoid_when:
+      - it would only rename the storage library's own calls one for one
+  - id: enterprise.unit-of-work
+    name: Unit of Work
+    family: enterprise
+    intent: >
+      The changes made during one business operation are tracked together and
+      committed or rolled back as one, keeping storage consistent.
+    use_when:
+      - one operation touches several records that must change together
+    avoid_when:
+      - each operation writes a single record
+  - id: enterprise.dependency-injection
+    name: Dependency Injection
+    family: enterprise
+    intent: >
+      A unit receives the collaborators it needs from outside, through its
+      constructor or parameters, instead of creating or looking them up, and
+      one composition root wires the whole graph.
+    use_when:
+      - policy must be testable with substitutes for its details
+    avoid_when:
+      - a value has no behaviour worth replacing
+  - id: enterprise.service-layer
+    name: Service Layer
+    family: enterprise
+    intent: >
+      A set of application operations forms the boundary of the use cases,
+      coordinating domain objects and transactions so every entry point
+      behaves the same.
+    use_when:
+      - several entry points (command line, web, jobs) run the same operations
+    avoid_when:
+      - it holds business rules that belong in the domain objects
+  - id: enterprise.data-mapper
+    name: Data Mapper
+    family: enterprise
+    intent: >
+      A separate mapper moves data between domain objects and the storage
+      schema, so neither knows the shape of the other.
+    use_when:
+      - the domain model and the stored schema differ and evolve separately
+    avoid_when:
+      - the records are simple and map one to one
+  # -- domain ---------------------------------------------------------------------
+  - id: domain.specification
+    name: Specification
+    family: domain
+    intent: >
+      A business rule about whether something qualifies is a small object
+      that can be named, combined with others and reused for checking or
+      selecting.
+    use_when:
+      - the same selection or validation rule appears in several places
+    avoid_when:
+      - a single condition used once reads plainly inline
+  - id: domain.domain-event
+    name: Domain Event
+    family: domain
+    intent: >
+      Something meaningful that happened in the domain is recorded as an
+      immutable fact, so other parts react to it without the source calling
+      them.
+    use_when:
+      - several consequences follow one occurrence and must stay decoupled
+    avoid_when:
+      - the caller needs the consequence's result immediately
+  - id: domain.value-object
+    name: Value Object
+    family: domain
+    intent: >
+      A small immutable type is defined by its values rather than an
+      identity, carrying its own validation and operations (an amount, a
+      range, a path).
+    use_when:
+      - a primitive keeps being passed around with rules attached to it
+    avoid_when:
+      - the thing has an identity that persists while its values change
+  - id: domain.null-object
+    name: Null Object
+    family: domain
+    intent: >
+      A do-nothing implementation of an interface stands in for an absent
+      collaborator, so callers need no checks for its absence.
+    use_when:
+      - absence has a sensible neutral behaviour
+    avoid_when:
+      - absence is an error that must be noticed

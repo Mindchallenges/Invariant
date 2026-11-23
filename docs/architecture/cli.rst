@@ -473,11 +473,16 @@ Setup
        by default, any further `docs.assess.sections` heading, and one `element`
        need per source area, its id the element prefix and the area name as a
        need id, the path where two names collide), `requirements.rst`,
-       `decisions/index.rst`, `ui.rst`, the generated `rules.rst` and
-       `checklist.rst` (rendered from no ruleset, with the managed marker, so
-       `guidelines render` takes them over), `guidelines/ruleset.yaml` (the
-       mandate's two judgement rules, where the project configures no
-       ruleset; ADR-020 D10) and `backlog.rst` (the items store). The
+       `decisions/index.rst`, `ui.rst`, the generated `rules.rst`,
+       `checklist.rst` and `patterns.rst` (rendered from the starter's
+       ruleset, or from none where the project configures its own, with the
+       managed marker, so `guidelines render` takes them over),
+       `guidelines/ruleset.yaml` (ADR-032's default set, version 2: the four
+       layers with empty paths, the five `solid.*` rules, the pattern rule,
+       `docs.design-before-code` and the mandate's two judgement rules, each
+       with its `origin`, where the project configures no ruleset; ADR-020
+       D10), `guidelines/patterns.yaml` (the 32-entry pattern catalogue the
+       ruleset's `catalogue` names) and `backlog.rst` (the items store). The
        manifest gains `docs.format: sphinx`, `docs.needs.state:
        enforced`, `docs.needs.srcdir` and `items.backend: sphinx_needs` with
        `items.path` the backlog page (a store project: in its block, with
@@ -614,6 +619,13 @@ Setup
        `by` and `date`. It never fails; a configuration the refusal stops
        fails `manifest valid` instead.
 
+       Built (ADR-032 D8, increment 2). The `guidelines defaults` row, shown
+       only when the configured ruleset holds a copied default (one with an
+       origin) and the shipped default set's origin.version is newer than the
+       newest origin.version there, warns "N default
+       rule(s) updatable", naming each and `invariant guidelines adopt
+       --update <id>`. It never fails.
+
        `repo identity` (ADR-014 D4), in a store project only, names the
        identity, the store and the level that named it. It warns when the
        repository was linked by its local ID and has since gained an origin,
@@ -706,6 +718,14 @@ Setup
        every check off it says so and passes. The architecture-docs row above
        it is unchanged.
 
+       `plan page` (ADR-032 increment 6, DEC_ADR_032_I6) asks the rule
+       `docs.plan_current` the same way: `warn` in every profile, so a stale,
+       missing or hand-edited plan page prints `warn` with `invariant queue
+       render` as the fix; `block` (or `ask`) fails the row; `off` removes
+       it. Where the project has no plan page to judge (no Sphinx docs
+       project, the docs and the queue in two homes, or neither a queue nor a
+       page) there is no row.
+
        `docs adoption` (ADR-016 D8, ruling 3, increment 4) is present only
        under `docs.adopt.mode: copy`. It reads the receipt the copy wrote and
        names every original file changed, added or removed since, or says the
@@ -785,7 +805,8 @@ Setup
        many always rules there are, the instruction files it looked in and the
        fix, `invariant guidelines render --insert guidelines/index`; with no
        instruction file configured (guidelines.instruction_files null and a
-       host kind with no default) the fix names that key first. It never
+       host kind with no default) the fix names that key first. With the key
+       an explicit empty list there is no row: the project chose no block. It never
        fails: the turn index still lists the always rules on every turn. With
        no ruleset, no always rules, a block present in any instruction file
        (whatever its state) or a render plan that is refused, there is no row.
@@ -842,7 +863,10 @@ Setup
        an editable install can move, and the agent would then fail at every
        login without a word. The remedy is `invariant oracle install`. The row
        reads the plist only and asks launchd nothing; with no plist there is no
-       row. Beside it, while a fresh snapshot shows a watcher running, `oracle
+       row. `oracle agent programs` (and `oracle web programs` for the page's
+       plist) reads the plist's PATH and warns, never fails, naming each program
+       the agent needs that it cannot find, claude among them (BUG_155,
+       ADR-028). Beside it, while a fresh snapshot shows a watcher running, `oracle
        watcher build` fails when that watcher runs an older invariant than the
        installed one: its stamp differs, it wrote none, or it reports a skew
        itself (BUG_089). It restarts itself once it notices; `invariant oracle
@@ -1125,7 +1149,9 @@ Setup
        commit. The push runs with no prompt and `sync.timeout_seconds`, and
        the store's `pre-push` hook screens it again. Run from a repository
        linked to a store, or from inside the store, where the store's own
-       level gives `sync`. Exit 0 when pushed or in step; 1 with no remote,
+       level gives `sync`. A message's trailer block may carry the host's
+       attribution trailer, for the host the store's own level names in
+       `host.kind` (ADR-024 D5). Exit 0 when pushed or in step; 1 with no remote,
        refused, or a push git did not make; refused, exit 2, in an in-repo
        project. It installs or repairs the store's hooks first. --json
        carries `state` (pushed, current, no_remote, refused, blocked,
@@ -1138,8 +1164,12 @@ Setup
        needs to. Quiet when clean; a finding, or anything in scope it cannot
        read, exits 1 naming each finding redacted on stderr, which refuses
        the commit or push. `pre-commit` reads the staged content in the
-       store's scope, `commit-msg` the message file git names (comment lines
-       left out), each with the store's block as staged; `pre-push` reads
+       store's scope, `commit-msg` the message file git names, read as bytes
+       (comment lines left out), each with the store's block as staged;
+       `commit-msg` and `pre-push` let the host's attribution trailer through
+       in a message's trailer block, for the host the store's own level names
+       in `host.kind` over the user level and the defaults (ADR-024 D5);
+       `pre-push` reads
        git's ref lines on stdin and screens every commit each would
        publish, as `store push` does. While `privacy.store.scan: false` is
        honoured (no remote) the commit hooks pass unread; `pre-push` always
@@ -1633,8 +1663,14 @@ Setup
        refuses it, naming the unit, its holder, the queue position, and the
        `docs lock` command to run (`--wait` when queued, `--take-over` when
        the holder is stale). Memory and the other data records kept in the
-       store are outside the lock (ruling 20), and so are the store's
-       `invariant.yaml` and git directory. The hook calls keep the lease's
+       store are outside the lock (ruling 20), and so is the store's git
+       directory. The store's `invariant.yaml` is under it, its own unit
+       `file:invariant.yaml` unless a declared area matches it
+       (DEC_ADR_014_B143): since increment 4c-2 it holds the guidelines'
+       policy keys. `rules loosen`, `rules carry-over` and `store migrate`
+       write it from the CLI, outside every hook, and take no unit for it; a
+       session holding its unit cannot `docs unlock` while such a write is
+       left uncommitted. The hook calls keep the lease's
        heartbeat (`invariant hook`, below), and the turn context says which
        units a release passed to the session (`invariant context`, below).
 
@@ -1882,6 +1918,13 @@ Session
        --force runs none, and is then held (fail closed, ADR-001 D25): it
        prints "forced: step <name> did not run after the merge; …" for each
        `block` step. --json carries `after_merge`, the runs.
+       Built (ADR-032 increment 6, DEC_ADR_032_I6): last, after those steps,
+       the plan page is rendered again from the main checkout's queue as it
+       stands once the branch is merged, as `queue render` renders it, and
+       one line says so ("plan page <path>: <status>"), or why it was not
+       ("plan page not rendered: <reason>"). It never fails the landing, and
+       a project with no docs project prints nothing. `session resume`
+       finishing a landing does the same.
        Built (ADR-014 D6, increment 5b), in a store project: units the session
        still holds are released first, as `docs unlock` releases them, and a
        stop there merges nothing (exit 2). The merge then records
@@ -2260,6 +2303,22 @@ Session
        handoff this form does not make. --dry-run names the note and writes
        nothing. Prints no `session <id> (`.
 
+   invariant session report --outcome done|blocked|needs-user [--note "<line>"] [--id <id>] [--json]
+       Built (ADR-027 D1, D11, increment 1). Record how this session ended,
+       for the oracle to read: done (this session's part is finished; the
+       chain still waits for its teardown), blocked or needs-user (both pause
+       the project's chain). An event, not an edge, as a handoff is: legal in
+       every state, torn down included, written as an entry of the record's
+       `reports` ({"outcome", "note", "at", "state"}) and a standstill row in
+       `history` carrying `report: <outcome>`; a finished session is saved
+       and not registered again. The session is the one `session handoff`
+       would record on: --id or INVARIANT_SESSION_ID, else a session the call
+       proves, else the most recently moved one at or above here. --note is
+       one line, vetted as a handoff note is, and refused (exit 1) on a
+       privacy finding. No session here is a usage error (exit 2). The text
+       never prints `session <id> (`. JSON: {"session", "session_name",
+       "report"}.
+
    invariant session plan add "<deliverable>" | done <n> | reopen <n>
                        | remove <n> | show          [--id <id>] [--json]
        The deliverable set this session owes — what makes a session outlive its
@@ -2417,8 +2476,14 @@ Pipeline
        "audit   <host>: <agent> tier <t>, asked <m>, observed <m> + <m>; ...",
        with "none" for a fact it does not hold. asked is the model requested at
        dispatch, or the one on the agent's installed model line. observed is what
-       the run's own transcript showed. No gate reads any of it, and a pipeline
-       older than the record prints no line.
+       the run's own transcript showed. No gate reads any of it but whether
+       host.forbidden_models holds a model (ADR-030 D4), and a pipeline older
+       than the record prints no line.
+
+       And a line when an agent ran with no model known, so the forbidden list
+       could not judge it and its gate passed on the role alone (ADR-030 D3):
+       "models  not checked against the forbidden list (<entries>): <agent>, ...
+       ran with no model known".
    invariant pipeline advance <state> [--force]
        Validates the transition against the FSM and runs the gates. --force
        records an override with a required --reason rather than bypassing
@@ -2433,6 +2498,16 @@ Pipeline
        Built (ADR-021 increment 1): the project's `pipeline.enter.<state>`
        steps run first, in the session worktree, and are recorded; their
        `step.<name>` gates then read the runs. A forced advance runs none.
+       Built (ADR-032 increment 3, DEC_ADR_032_I3): an advance out of a
+       design-role state into a build state records the design snapshot in
+       evidence["design_snapshots"] and prints it after the gates:
+         "design snapshot  <n> design document(s) changed: <path>, ..."
+       or, with none changed,
+         "design snapshot  no design document differs from the merge base"
+         "  a structural change will fail docs.ahead_of_code at review: write
+          the doc now"
+       or why it could not be read. --json carries it as `design_snapshot`.
+       docs.ahead_of_code judges it on entering the review state.
    invariant pipeline gates [--state <id>]
        List the gates for a state and their current verdicts, without advancing.
        A step's gate is read, never run: before the advance that runs it, it
@@ -2567,6 +2642,109 @@ covers ``new`` and ``transition``. ``--json`` carries the item and
 ``changed``, the rows written. Each row is ``field``, ``was``, ``now``,
 ``reason``, ``date`` and, when given, ``evidence``, with no ``from`` and ``to``
 (:need:`DEC_ADR_023_D2`; state_model.md, "Domain: work item").
+
+The queue
+---------
+
+.. comp:: The queue commands
+   :id: COMP_CMD_QUEUE
+   :part_of: COMP_CLI_MAIN
+
+   The command group for ``invariant queue``: add, list, remove, move, and
+   since increment 5 link and mirror (:need:`ADR-027 <DEC_ADR_027>` D2,
+   :need:`DEC_ADR_027_D10`, :need:`DEC_ADR_027_D44`,
+   :need:`DEC_ADR_027_D48`), and since ADR-032 increment 6 render, the plan
+   page (:need:`DEC_ADR_032_I6`); each command's contract is in this section.
+
+
+::
+
+   invariant queue add REF [--brief "<line>"] [--at N] [--propose] [--serves ITEM] [--project <name|key|root>] [--id <id>] [--json]
+       Put work on the project's queue, at the end or at position N (counting
+       from 1). REF is a work item id, which must name an item in no terminal
+       state of its machine, or any other one-line label (at most 200
+       characters), taken as is. A REF a queued or started entry already holds
+       is refused. --brief is the next session's first prompt: one line, at
+       most 2000 characters. REF and --brief are vetted as a handoff note is
+       and refused (exit 1) on a privacy finding. The entry's added_by is the
+       session the call resolves (--id, INVARIANT_SESSION_ID, or a session the
+       call proves), else `user`. --propose makes the entry one the oracle only
+       offers and never starts on its own (`oracle chain start` does; ADR-027
+       ruling 9). --project queues in another registered project, matched as
+       `oracle projects remove` matches, from wherever the command runs; the
+       adder is then `user` when no session here can be resolved. --serves
+       names the open work item the entry serves (ADR-027 ruling 18): the
+       backlog mirror skips that item while the entry is queued or started.
+       Every refusal writes nothing. JSON: {"entry", "path", "next",
+       "entries"}.
+   invariant queue list [--project <name|key|root>] [--json]
+       The queue, in order: position, id, state, ref, who added it, and the
+       brief; a proposed entry is marked [proposed], and one serving an item
+       (serves ITEM). JSON: {"path", "next", "entries": [{"id", "ref",
+       "added_by", "state", "brief", "session", "reason", "mode", "triage_of",
+       "retry_of", "serves", "blind"}]}, an unset key left out.
+   invariant queue remove ID [--if-queued-at N] [--json]
+       Take entry ID (Q<n>) off the queue; its id is never issued again.
+       --if-queued-at N refuses (exit 2), writing nothing, unless the entry is
+       still queued at position N, checked under the queue's lock: the phone's
+       confirmed remove (ADR-027 increment 3, DEC_ADR_027_D33).
+       JSON: {"removed", "path", "next", "entries"}.
+   invariant queue move ID --to N [--if-queued-at P] [--json]
+       Put entry ID at position N, counting from 1. --if-queued-at P refuses
+       (exit 2), writing nothing, unless the entry is still queued at
+       position P. JSON: {"path", "next", "entries"}.
+   invariant queue link ID (ITEM | --clear) [--json]
+       Say which open work item entry ID serves, or --clear it; naming both,
+       or neither, is refused (exit 2). A label such as "ADR-029 inc 1"
+       serving IDEA_060 keeps the mirror from queueing that idea while the
+       label is live (ADR-027 ruling 18, DEC_ADR_027_D48). JSON: {"entry"}.
+   invariant queue mirror [--project <name|key|root>] [--json]
+       Mirror the backlog onto the queue now, as the oracle's chain step does
+       on its own once a minute while a project is idle (ADR-027 ruling 18,
+       DEC_ADR_027_D44 to D47): every open item in a mirrored state goes on
+       the queue once, added_by `backlog`, by backlog rank among the mirrored
+       entries; a queued mirrored entry leaves when its item closes or
+       another live entry serves it. It reads the main checkout's backlog.
+       Exit 0; "oracle.chain.mirror is off" when it is; a mirrored state the
+       machine does not have is refused (exit 2). JSON: {"off", "added":
+       [{"entry", "ref"}], "removed": [{"entry", "ref"}]}.
+   invariant queue render [--project <name|key|root>] [--json]
+       Render the plan page (ADR-032 D11, DEC_ADR_032_I6): `plan.rst` in the
+       docs project's source directory, read in the main checkout beside the
+       queue (the store's, where the docs and the queue are both kept
+       there). The page is the queue in order (position, entry, ref, kind,
+       linked item as a :need: reference where it is a need in the docs
+       project, else plain text, and status) under the managed marker and
+       the queue's digest, then each live session's deliverable plan as of
+       today's date. Written under the queue's lock. Prints "<path>: new",
+       "current" (not written), "stale" or "edited" (written over the hand
+       edit). With no page home, "no plan page: <reason>", exit 0. A file
+       there without the marker, or a privacy finding in the text, is
+       refused (exit 2) with nothing written. Every other queue command
+       above, and the chain's writes, render the page again after their
+       edit, under the same lock; a refusal there never fails the edit and
+       is printed on stderr ("plan page not rendered: <reason>").
+       `docs.plan_current` (warn in every profile; `invariant check`)
+       fails when the page's queue digest is not the record's. JSON:
+       {"path", "status", "written"}, or {"path": null, "reason"}.
+
+The queue is one JSON file at ``paths.queue`` (``docs/queue.json``), where
+``records.queue`` places it, which follows ``records.backlog`` unless set
+(manifest.md, "Records and their locations"). A repository queue is read and
+written in the main checkout whatever worktree the command runs in, so it is
+committed from there. Each edit holds the state root's ``locks/queue.lock`` and replaces the file atomically.
+Increment 1 wrote ``queued`` only. Since increment 2 the watcher's chain step
+writes ``started`` (with the session once bound), ``done`` and ``failed``, and
+queues a failure's triage and retry (ADR-027 ruling 9), always through the
+CLI's ``ChainHands`` over ``domains/queue``: the oracle writes no record
+(:need:`DEC_ADR_027_D18`). A repository queue's writes land in the main
+checkout, and the reviewer's memory/config sync commits them
+(:need:`DEC_ADR_027_D22`). Since increment 5 the step also mirrors the backlog
+(``ChainHands.mirror``) and routes a reproduce-first session's verdict
+(``ChainHands.reproduced``), through the same hands. Since ADR-032 increment
+6 each of those writes renders the plan page beside the queue again, so the
+reviewer's memory/config sync commits the page with ``paths.queue``
+(:need:`DEC_ADR_032_I6`).
 
 Memory
 ------
@@ -2841,6 +3019,17 @@ else; a verdict writes only the pipeline's evidence, under the state root;
        adds a line for `rules.rst`, and `--json` a `rules` field, `{"path",
        "status", "written"}`, null with no rules page.
 
+       Built (ADR-032 D5, increment 1a). Where the ruleset names a
+       `catalogue` and the docs are a sphinx-needs project in the tree, the
+       render writes a fourth file, `<srcdir>/patterns.rst`: the catalogue
+       by family, one label per pattern id (so a verdict cites
+       `patterns.rst#<id>`), with the managed marker
+       `guidelines.generated_current` checks as it checks the rules page. The
+       text output adds a line for it, and `--json` a `patterns` field of the
+       `rules` field's shape, null with no catalogue or no docs project. A
+       rule derived from the layer map is rendered on both pages with a
+       "derived from the layer map" line.
+
        With no ruleset configured it reports "nothing to render" and exits 0
        (ADR-012 D3, "No ruleset, no change"). --json carries status, written,
        dry_run, path, the ruleset digest, and blocks: one entry per instruction
@@ -2850,7 +3039,10 @@ else; a verdict writes only the pipeline's evidence, under the state root;
        guidelines.instruction_files, or with that key null the host adapter's
        default (CLAUDE.md for claude_code; none for a host kind with no
        adapter), which the CLI supplies on the rule context, so the drift rule
-       reads the same files. There is one block, guidelines/index (ADR-012 DN-C): a header
+       reads the same files. An empty list names no file: render writes the
+       checklist and no block (BUG_161). A host default exempt from session
+       isolation is refused, and the fix names instruction_files: [].
+       There is one block, guidelines/index (ADR-012 DN-C): a header
        naming the ruleset, then one line per rule, the `always` rules first with
        their statements, then every other rule's id and title. It is capped at
        guidelines.injection.max_lines lines, and past the cap its last line is
@@ -2941,7 +3133,8 @@ else; a verdict writes only the pipeline's evidence, under the state root;
        two fields, so a path with spaces still parses.
 
        --record scans every file the index tracks under each pattern and
-       boundary rule's applies_to, with the evaluator
+       imports boundary rule's applies_to (a fitness boundary rule is never
+       baselined: its test keeps its own ratchet, ADR-032 D3), with the evaluator
        guidelines.mechanical_clean uses, and records each (rule, path,
        fingerprint) it finds with how many times. A staged new file counts; an
        untracked one does not. With --rule (repeatable) it replaces only those
@@ -2969,8 +3162,8 @@ else; a verdict writes only the pipeline's evidence, under the state root;
          - a target that is the ruleset, the checklist, an instruction file or
            a registry the ruleset names, or that isolation exempts (ruling 13);
          - --rule naming no guideline, or a rule that is not pattern or
-           boundary (a cochange finding has no fingerprint, DN-4); --rule with
-           --prune;
+           boundary (a cochange finding has no fingerprint, DN-4) or is a
+           fitness boundary; --rule with --prune;
          - a scan with an unanswerable file: a record of part of the tree is no
            record, and a prune cannot say what such a file still holds;
          - --prune with no file, a file that does not parse, or a changed set
@@ -2994,6 +3187,84 @@ else; a verdict writes only the pipeline's evidence, under the state root;
        rule that is not pattern or boundary each fail guidelines.mechanical_clean
        rather than yield a smaller record.
 
+   invariant guidelines except <rule-id> <path> [--fingerprint <fp>] --by <who> --reason <why>
+       Built (ADR-032 D7, increment 2; DEC_ADR_032_I2). Record the user's
+       exception to a guideline: an entry under the rule's `exceptions`
+       (for a rule derived from the layer map, under its layer's in the
+       map), {path, reason, fingerprint, ruled: {by, date: today, reason}}.
+       <path> is a project-relative path or glob; --fingerprint (twelve hex,
+       as `check guidelines.mechanical_clean` prints it) excuses one finding
+       instead of the whole file. It shows the ruleset, the rule and the
+       entry, and asks "Record this exception? [y/N]" at a terminal; with no
+       terminal on stdin, or under --json, it refuses, writing nothing and
+       exiting 1, as `rules loosen` does: an exception an agent could write
+       is the agent ruling for the user. There is no --yes. An agent that
+       would except a finding proposes this line in its report instead.
+
+       The entry is written into the ruleset in place, every other line
+       kept, under the docs lock as `render`'s writes are, and only when the
+       result reads back as exactly the ruleset plus the entry and still
+       validates; otherwise nothing is written and the entry is printed to
+       add by hand. A ruleset changed while the question was asked is not
+       written over. Refused, exit 2, naming the fix: no ruleset configured
+       or one that does not load, a rule id the ruleset lacks, an engine
+       guideline (its rule is overridden instead), a path that is not
+       project-relative, a malformed fingerprint, and an exception the rule
+       already carries.
+
+   invariant guidelines loosen <rule-id | layers> --to warn|off --by <who> --reason <why>
+       Built (ADR-032 D7, increment 2; ruling 13). Lower a guideline and
+       record the user's ruling on it: `severity: warn` or `severity: off`
+       and `ruled: {by, date: today, reason}` on the rule, replacing an older
+       ruling. `off` pauses the rule: it stays in the ruleset, no gate
+       evaluates it, no verdict is owed on it, `guidelines show` and the
+       generated pages leave it out, and its baseline entries are kept for
+       when it is raised again. `layers` lowers the layer map, whose severity
+       every derived rule takes; a derived rule's id is refused naming that
+       route. The same terminal confirmation, in-place write and refusals as
+       `except`, and refused too: a rule already at or below the level asked
+       for (raising needs nothing). A version-1 ruleset refuses `off`.
+
+   invariant guidelines retire <rule-id> --by <who> --reason <why>
+       Built (ADR-032 ruling 13, increment 2). Take a declared rule out of the
+       ruleset for good: its lines are removed and `{id, ruled: {by, date:
+       today, reason}}` is appended to the version-2 top-level `retired`
+       list, the ruling guidelines.user_rules_ruled reads for the removal;
+       `guidelines adopt` never adds a retired id back. The same terminal
+       confirmation, in-place write and refusals as `except`; a derived
+       rule's id is refused naming `loosen layers --to off`.
+
+   invariant guidelines adopt [--layer <id>=<glob>]... [--update <id>]... [--dry-run]
+       Built (ADR-032 D8, increment 2). Copy invariant's default guidelines
+       into this project. With no ruleset configured it writes the default
+       set at the docs project's guidelines folder (ADR-020 D10), the
+       catalogue beside it, sets guidelines.ruleset and, where unset,
+       guidelines.baseline (baseline.txt beside the ruleset) at the
+       project's own level, records the baseline, and renders. With one it
+       adds each default rule, section and the layer block the ruleset
+       lacks, never one it retired, and rewrites nothing the project wrote (the merge of ADR-032
+       increment 1b), records the baseline for each pattern or boundary rule
+       it added (`baseline --record --rule`), and renders.
+
+       --layer fills a layer's paths in a map it adds (repeatable; a layer
+       id the defaults name); without it the map stays empty and the run
+       says so. Refused where the ruleset maps its layers already.
+
+       It lists each default the ruleset holds with an origin: current;
+       updatable (the copy is as it was copied, and the shipped rule, filled
+       for this project, moved); or diverged (the project changed its copy,
+       which is left). --update <id> (repeatable) replaces an updatable rule
+       with the shipped one; any other is refused. The layer map is listed
+       and never replaced: it holds the project's paths.
+
+       A run that would add and update nothing writes nothing and says
+       "nothing to adopt", exit 0. Otherwise it prints the plan and asks
+       "Adopt the defaults? [y/N]" at a terminal; with no terminal, or under
+       --json, it refuses as `rules loosen` does. --dry-run prints the plan
+       anywhere and writes nothing. --json carries status, ruleset, added
+       (sections, rules, layers, catalogue), standings ({rule, standing}),
+       updated, settings and written.
+
    invariant guidelines verdict <rule-id> --status pass|fail|na
        [--cite <path> <first> <last>]... [--test <selector>]...
        [--na-condition <id>] [--note "<text>"]
@@ -3010,9 +3281,15 @@ else; a verdict writes only the pipeline's evidence, under the state root;
        gate (A4 increment 3) reads the same facts and checks every recorded
        verdict again with the same predicates, the review role aside. A
        verdict is accepted only when every predicate holds:
-         P1  the rule is a judgement guideline; the ruleset in the tree has
-             the digest the pipeline pinned (no pin, or a null one, takes the
-             tree's); a changed file present in the tree falls under the
+         P1  the rule is a judgement guideline; it is judged against the
+             ruleset the pipeline pinned (no pin, or a null one, takes the
+             tree's). With the tree moved off the pin (DEC_ADR_012_B115), a
+             rule the pin lacks is judged against the tree's ruleset and its
+             record carries the tree's digest, a rule the pin holds unchanged
+             is judged against the pin, and a rule the change edited is
+             refused naming it and both digests; when the pinned rules cannot
+             be read at the base, every rule is refused, naming why. A
+             changed file present in the tree falls under the
              rule's applies_to outside its path exceptions (a deleted file
              does not count); the state carries the review role, and the
              rule's phases name review, landing or always.
@@ -3035,7 +3312,10 @@ else; a verdict writes only the pipeline's evidence, under the state root;
              is the engine's to answer: the na is accepted only when the
              engine finds it true over the change, and refused, naming the
              file and line or why it cannot answer, when it is false or
-             unanswerable.
+             unanswerable. An na on an `owner: user` rule is refused
+             whatever condition it names (ADR-032 D7, increment 2): only the
+             user excepts such a rule, and only the engine's mechanical
+             conditions answer it N/A, which the gate reads on its own.
          P6  the note is at most guidelines.verdicts.note_max_chars characters
              (default 280), and the privacy scan finds nothing in it, whatever
              privacy.scope says. A note may not carry the exemption marker.
@@ -3157,7 +3437,11 @@ Rules and gates
 
        evaluates the pattern, boundary and cochange guidelines over the changed
        files and names each finding by rule, path, line and, for a boundary,
-       target. A cochange finding names the rule and the trigger file, and its
+       target. A fitness boundary (ADR-032 increment 5) is answered by the
+       latest run recorded with `invariant pipeline test` that included its
+       test selector over the tree in hand: a pass is clean, a failure is one
+       finding whose target is the selector, and no such run is an
+       unanswerable finding whose fix is that command with --selector. A cochange finding names the rule and the trigger file, and its
        note says what triggered it and what did not change with it. Under
        --json each finding is a record in D5's shape: rule, kind, severity,
        status (fail, or pass for an exception that applied), finding (new,
@@ -3233,6 +3517,38 @@ Rules and gates
        current pass, the engine's N/A, a rule not owed) is named as unused. A
        blocking rule's fixes name `invariant override <rule> --reason '<why>'`
        beside the verdict. Every other guideline stays in force.
+
+         invariant check guidelines.blocking_verdicts [--json]
+
+       Built (ADR-032 D7, increment 2). The same read as verdicts_complete
+       (core.rules.read_standings), judged on the judgement guidelines at
+       blocker alone: a missing verdict, a stale one and a current fail each
+       fail it, unless a live grant passes the rule, as above. So a
+       blocker's fail stops the landing where verdicts_complete only warns.
+       A path the user excepted (`guidelines except`) is set aside as every
+       path exception is (DN-3), so a rule only excepted files meet is not
+       owed. Block in standard and strict, warn in loose. N/A with no ruleset
+       or no running pipeline.
+
+         invariant check guidelines.user_rules_ruled [--json]
+
+       Built (ADR-032 D7, increment 2). Compares the ruleset with the base
+       branch's committed copy, read where guidelines.baseline_only_shrinks
+       reads the baseline's. Each `owner: user` rule of the base, and an
+       `owner: user` layer map, that the change removed, lowered, made the
+       project's, narrowed (phases or applies_to losing an entry, exclude
+       gaining one, a check changed other than by dropping an N/A
+       condition; for the map, a layer dropped, retitled, moved or losing a
+       path) or reworded, without a `ruled` that is set and differs from the
+       base's, fails, named with what changed; so does an exception added to
+       such a rule whose `ruled` is one the rule held at the base. Adding a
+       rule, a layer, a path or a phase, or raising a severity, needs
+       nothing. A removed rule passes only with a `retired` entry for its id
+       whose ruled is new in the change (`invariant guidelines retire`); a
+       paused one (`severity: off`) needs its new ruled as any lowering does. The fixes name `invariant guidelines loosen` and
+       `invariant guidelines except`, run by the user. Block in every
+       profile. N/A with no ruleset; a base copy that cannot be read fails
+       it, as for the shrink gate.
 
          invariant check agents.rendered_current [--json]
 
@@ -3362,7 +3678,7 @@ Rules and gates
        discoverable only by noticing that nothing is stopping you.
 
    invariant override <rule-id> --reason "<why>" [--calls N] [--id <sid>]
-   invariant override <guideline-id> --reason "<why>" [--id <sid>]
+   invariant override <guideline-id> --reason "<why>" [--by <who>] [--id <sid>]
    invariant override <rule-id | guideline-id> --clear [--id <sid>]
        Pass a rule that fires at a HOOK, deliberately, with the decision
        recorded. The next N evaluations of that rule at `pre-tool-use` or `stop`
@@ -3382,6 +3698,13 @@ Rules and gates
            failing verdict at `guidelines.verdicts_complete`, a fail at warn
            included; the engine's mechanical N/A still answers the rule, and a
            grant on a rule whose verdict holds passes nothing.
+       Built (ADR-032 D7, increment 2). A guideline marked `owner: user` is
+       the user's to pass: its grant needs --by <who> and a confirmation at
+       a terminal, "Grant this override? [y/N]", and is refused, writing
+       nothing, with no terminal or under --json, as `rules loosen` is. The
+       grant records `by`. guidelines.blocking_verdicts reads it as
+       verdicts_complete does, and one advance spends it once.
+
        The id must name such a guideline in the ruleset of the tree in hand
        (an engine guideline is refused naming its rule, a warn mechanical one
        and a design-only judgement one as never spendable), and the grant
@@ -3528,7 +3851,7 @@ they run from any directory.
        seen raises the `docs_granted` alert; a queue place is the
        `docs_queued` marker.
 
-   invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify] [--json]
+   invariant oracle watch [--once] [--interval 5] [--stuck-minutes 20] [--no-notify] [--no-chain] [--json]
        Every --interval seconds: scan every registered project, write the
        snapshot (<oracle home>/oracle/snapshot.json — the `oracle list --json`
        document plus version, generated, watcher_pid and interval), and post one
@@ -3548,9 +3871,103 @@ they run from any directory.
        nothing: the edges it sees are recorded as owed, and a later watcher that
        notifies delivers them. Gates are evaluated as `list` evaluates them, in
        worker threads the loop never waits for; an answer that finishes between
-       ticks is the next tick's. --once waits for them, up to the timeout. Both numbers must be positive (exit 2). JSON:
+       ticks is the next tick's. --once waits for them, up to the timeout. Both numbers must be positive (exit 2).
+       After the alerts, every tick (--once included) runs the chain step
+       (ADR-027 increment 2, oracle.md "The chain step"): it follows the
+       session it started in each project, and starts, proposes or holds the
+       next one; a failed start is triaged (ruling 9). --no-chain leaves the
+       chain to another watcher; --no-notify keeps its notices owed. JSON:
        {"snapshot", "ledger", "rows", "elapsed", "alerts": [{"key", "project",
-       "subject", "kind", "severity", "detail", "since", "notified"}]}.
+       "subject", "kind", "severity", "detail", "since", "notified"}],
+       "chain": [{"project", "action", "detail"}]}; an action is started,
+       proposed, held, bound, done, failed or paused, and since increment 2b
+       stalled, nudged, not nudged or still stalled; text mode prints each as
+       a CHAIN line. A "held" with project "chain" is the machine's weekly
+       usage hold (ruling 10).
+
+   invariant oracle chain status [PROJECT] [--json]
+   invariant oracle chain pause PROJECT [--reason "<line>"] [--json]
+   invariant oracle chain resume PROJECT [--json]
+   invariant oracle chain start PROJECT [--entry Q<n> | --item <id>] [--json]
+       Built (ADR-027 increment 2; --item, increment 3). PROJECT is matched as `projects remove`
+       matches; one the index does not name, or a root that lost its
+       manifest, is refused (exit 2). `status` prints each project's chain
+       (every registered one, or PROJECT): paused and why, the start it
+       follows, the day's starts against oracle.chain.daily_cap, and the
+       machine's live chains against chain.machine_cap; a chain ledger that
+       cannot be read exits 3 naming it. JSON: {"projects": [{"key", "name",
+       "paused", "resumed", "current", "proposed", "started_today",
+       "daily_cap", "starts"}], "machine_live", "machine_cap",
+       "notices_owed"}. `pause` stops the project's chain until `resume`; one
+       already paused keeps its first reason. `resume` lifts a pause, and a
+       stop report made before it no longer pauses; it retries nothing, and
+       one not paused says so; both exit 0. JSON: {"project", "paused"} and
+       {"project", "was"}. `start` is the user's start, which accepts a
+       proposal: the --entry named (a queued one, else exit 2), or the
+       --item named (a ready backlog item no queue entry names, in any state,
+       else exit 2: a backlog proposal accepted from the phone,
+       DEC_ADR_027_D34), else the queue's first queued entry whatever its
+       mode, else the backlog's first ready item no entry names; --entry and
+       --item are exclusive. No limit holds it. It opens the window
+       exactly as `oracle start-session` does, marks the entry started and
+       records it as a chained start the watcher follows. Refused (exit 2)
+       with nothing to start, or while the project already has a chained
+       start. A launch that fails exits 1, and is triaged as any failure is.
+       JSON: {"project", "started": {"entry", "ref", "name", "pid"},
+       "actions"}.
+       Since increment 2b `status` also prints the plan's weekly usage
+       against chain.weekly_usage_max and whether it holds the chain; JSON
+       adds "usage": {"weekly", "five_hour", "read_at", "weekly_usage_max",
+       "hold", "greenlight"} and "weekly_usage_max".
+
+   invariant oracle chain greenlight [--json]
+       Built (ADR-027 increment 2b, ruling 10, D25). Lets the chain go ahead
+       while the plan's weekly usage cannot be read (no status line, or a
+       reading older than 30 minutes), for the whole machine, until a fresh
+       reading arrives. Refused (exit 2) while a fresh reading is at or over
+       chain.weekly_usage_max; with nothing held, nothing is recorded (exit
+       0). JSON: {"greenlit", "was"} or {"greenlit": false, "why"}.
+
+   invariant oracle chain continue PROJECT [--json]
+   invariant oracle chain retry PROJECT [--json]
+   invariant oracle chain close PROJECT [--json]
+       Built (ADR-027 increment 2b, ruling 12, D29). The user's answer to a
+       stalled chained session; refused (exit 2) without a chained start in
+       PROJECT, or while the watcher has recorded no stall on it. `continue`
+       types one more "continue" into its Terminal tab and re-arms the fuse
+       (exit 1 when it cannot type). `retry` closes the window through
+       close-host's checks and puts the same queue entry back at the head,
+       started fresh on the next tick; `close` closes it and marks the entry
+       failed ("closed by the user after a stall"), with no triage. Neither
+       pauses the chain, and the session is released: it stays parked and no
+       longer holds the project (ruling 13). JSON: {"project", "actions"}.
+
+   invariant oracle chain consent PROJECT (--close | --not-yet --note TEXT) [--json]
+       Built (ADR-027 ruling 21, IDEA_062, D57). A landed chained session's
+       answer to the line the oracle typed into its tab: --close lets the
+       oracle close this window, which the watcher's next tick does through
+       close-host's checks; --not-yet keeps it, with a note (one line,
+       privacy-scanned, as a handoff note), and the oracle asks again later.
+       An engine record in the chain ledger: consent is never read from a
+       transcript. --note goes only with --not-yet. Refused (exit 2) when
+       PROJECT has no landed window, the oracle has not asked it yet, the
+       window is the user's (typed in since the teardown, or left open), or
+       CLAUDE_PID names another Claude than the window asked. JSON:
+       {"project", "state", "already", "entry", "ref", "name",
+       "ask_at_epoch"}.
+
+   invariant oracle chain close-window PROJECT [--json]
+   invariant oracle chain leave-open PROJECT [--json]
+       Built (ADR-027 ruling 21, D59). The user's answer to a landed window
+       the oracle could not settle (no answer, the last "not yet", an ask it
+       could not type, a record it cannot read, a close that failed); refused
+       (exit 2) unless that notice was sent. `close-window` ends the window
+       through close-host's checks, found again in a fresh scan, and releases
+       its session; a window already gone is said. `leave-open` keeps it: it
+       holds the project, the oracle never asks it again, and the chain waits
+       until the user closes it. JSON: {"project", "actions"}.
+       `status` prints a project's landed window and its state; JSON adds
+       "landed" on each project.
 
    invariant oracle tui
        The live dashboard (needs the [oracle] extra: pip install
@@ -3563,9 +3980,10 @@ they run from any directory.
        `list` does, under a "watcher not running" banner. It refreshes on the
        snapshot's interval; r refreshes now, q quits. n opens a New session
        modal for `oracle start-session`: a picker of the registered projects
-       (the highlighted row's preselected), an optional first message and an
-       editable label, then the full name, the open-window and uncommitted-
-       change facts and the exact command, asked again after each edit through
+       (the highlighted row's preselected), an optional first message, an
+       editable label and an optional model (blank: the configured window
+       model, ADR-030 D6), then the full name, the model, the open-window and
+       uncommitted-change facts and the exact command, asked again after each edit through
        the command's own prepare step. Nothing launches until Start, which
        prepares again from a fresh read and starts nothing if the name moved;
        the outcome ("started as <name>", or "did not start: <why>") is shown as
@@ -3601,10 +4019,16 @@ they run from any directory.
        Terminal; refused or unanswered (30 s), it says so and how to allow it.
        JSON: {"host_id", "pid", "tty", "lines"}.
 
-   invariant oracle start-session PROJECT [--prompt TEXT] [--name LABEL] [--dry-run] [--json]
+   invariant oracle start-session PROJECT [--prompt TEXT] [--name LABEL] [--model MODEL] [--dry-run] [--json]
        Open a new macOS Terminal window running `claude --name <name>
-       --remote-control <name> [TEXT]` in a registered project's main checkout
-       (IDEA_030, ADR-009 D16). PROJECT is matched as `projects remove` matches
+       --remote-control <name> --model <model> [TEXT]` in a registered
+       project's main checkout (IDEA_030, ADR-009 D16, ADR-030 D6). MODEL
+       defaults to host.window_model, resolved at the project over the user
+       level, else the host adapter's default (opus for claude_code); one that
+       host.forbidden_models holds, or that claude would misread (blank, a
+       space, a leading '-'), is refused (exit 1) and nothing launches. Every
+       other window invariant opens (a chained, triage or reproduce start, the
+       dashboard's terminal step, session handoff) carries the configured one. PROJECT is matched as `projects remove` matches
        (key, root, then name); one the index does not name is refused (exit 2)
        and nothing launches, and so is a registered root that lost its manifest
        or a project whose host.kind is not claude_code. The name is
@@ -3625,17 +4049,43 @@ they run from any directory.
        (IDEA_035). It counts once the new claude
        is seen alive; otherwise exit 1 with the line to run by hand. Off macOS,
        or without claude on PATH, exit 1. --dry-run prints the command and the
-       facts and launches nothing. JSON: {"project", "name", "label", "cwd",
-       "argv", "prompt", "by_hand", "facts": {"open_windows", "uncommitted",
+       facts and launches nothing. JSON: {"project", "name", "label", "model",
+       "cwd", "argv", "prompt", "by_hand", "facts": {"open_windows", "uncommitted",
        "dirty"}, "dry_run", "successor": {"pid"} | null}; "label" is the label
        the name was made from (the time when --name was not given). The web
        page's "New session…" sheet and the dashboard's n run this command's own
        prepare and launch steps, not a copy (oracle.md, "Start a session").
 
+   invariant oracle next PROJECT [--json]
+       Built (IDEA_057, ADR-027 increment 1). What the oracle would start next
+       in one registered project, and every reason, read-only; it starts
+       nothing. PROJECT is matched as `projects remove` matches; one the index
+       does not name, or a root that lost its manifest, is refused (exit 2).
+       It reads the project's queue (`invariant queue`), its open backlog items
+       in a ready state, `oracle.chain` and one scan of its sessions and
+       windows, and prints the verdict: start (auto or propose), wait, paused
+       or idle, the candidate (the queue's head, else the backlog's first
+       ready item by tier, priority and id) and why (oracle.md, "What runs
+       next"). Exit 0 whatever it decides. JSON: {"project", "verdict",
+       "mode", "candidate": {"source", "ref", "entry", "brief", "title"} |
+       null, "reasons", "facts": {"live_sessions": [{"session_id", "name",
+       "state", "report"}], "open_windows", "queued", "ready", "paused"}};
+       "paused" is the chain ledger's pause (an unreadable ledger reads as
+       one); increment 2 adds "started_today", "daily_cap", "machine_live"
+       and "machine_cap" to "facts", and "limit" (the cap a wait is held by)
+       and "proposals" (the queued entries of propose mode) to the document.
+
    invariant oracle notify-test [--json]
        Post one notification through the seam the watcher uses, to check that
-       notifications reach you. A delivery failure exits 1 with the reason.
-       JSON: {"sent": true}.
+       notifications reach you: the Mac banner and, since ADR-027 increment 4,
+       web push to every paired device that turned it on (where cryptography,
+       the invariant[oracle] extra, is installed). It prints each channel's
+       outcome ("Mac banner: sent", "push to iPhone: sent", "push: no device
+       has turned push on", or why push is not available). No channel
+       delivering exits 1 with the reason; one channel failing while another
+       delivered also exits 1, naming it. JSON: {"sent": true, "channels":
+       [{"channel", "target", "ok", "detail"}]} ("ok" null for a channel with
+       nobody to send to).
 
    invariant oracle install [--interval 5] [--dry-run] [--json]
    invariant oracle install --web [--port 7341] [--dry-run] [--json]
@@ -3644,21 +4094,27 @@ they run from any directory.
        `launchctl bootstrap gui/<uid> <plist>`. The plist runs this
        interpreter (absolute) with `-m invariant`, at load and kept alive, logs
        both streams to <oracle home>/oracle/watcher.log, and carries an explicit
-       PATH that finds git and osascript, plus INVARIANT_HOME only if it is set.
+       PATH that finds git, osascript and claude (the chain step opens it),
+       plus INVARIANT_HOME only if it is set. A program this process's PATH
+       cannot find is looked for in /opt/homebrew/bin, /usr/local/bin,
+       ~/.local/bin and ~/.claude/local, and a note names where; one found
+       nowhere is a warning naming it and the remedy, and the install still
+       goes ahead (ADR-028).
        An agent already loaded is booted out first, and install waits for it to
        go, so a second install replaces the first cleanly. --dry-run prints the
        plist and the launchctl calls it would make, and changes nothing; it asks
        `launchctl print` whether the agent is loaded so the calls are exact. A
        non-positive --interval exits 2; a launchctl refusal exits 1 and names
        the plist. JSON: {"plist_path", "plist", "steps": [[argv]...],
-       "was_loaded", "dry_run", "wrote", "removed"}.
+       "was_loaded", "dry_run", "wrote", "removed", "programs": {"path",
+       "fallback": {program: where}, "missing": [program]}}.
        --web installs the web page's agent instead, and only it (ADR-008 D15):
        ~/Library/LaunchAgents/dev.invariant.oracle.web.plist, running `oracle
        web --port N --wait`, kept alive, logging to <oracle home>/oracle/web.log,
        with a PATH that also finds invariant (an action runs it), claude (a
        start from the page opens it; the folder `claude` resolves to in the
        shell that runs the install), git, osascript, tailscale and the
-       interpreter's own directory. After an upgrade that adds a program to that
+       interpreter's own directory, with the same fallback and warning. After an upgrade that adds a program to that
        list, run `install --web` again so the plist carries it. A second --web install replaces it. It
        says so when the watcher's agent is not installed. --port without --web,
        --interval with it, and a port outside 1-65535 exit 2. JSON: as above.
@@ -3676,7 +4132,9 @@ they run from any directory.
 
    invariant oracle status [--json]
        Is the agent installed and loaded, does the interpreter its plist names
-       still exist, and how old is the watcher's snapshot. The snapshot is
+       still exist, and how old is the watcher's snapshot. A `programs` line
+       (`web programs` for the page) appears when the plist's PATH cannot find
+       a program the agent needs, naming it and the remedy (BUG_155). The snapshot is
        STALE when it is older than three of its own intervals, or missing: no
        watcher is writing it. Then the web page's half: its agent, installed
        and loaded, its port and interpreter; where the page serves, or that it
@@ -3692,7 +4150,8 @@ they run from any directory.
        running page (BUG_089). Exit 0
        whatever it finds: it is a query. JSON:
        {"agent": {"plist_path", "installed", "loaded", "interpreter",
-       "interpreter_exists", "interval", "error", "label", "port"}, "snapshot":
+       "interpreter_exists", "interval", "error", "label", "port",
+       "missing_programs"}, "snapshot":
        {"path", "exists", "age", "interval", "stale", "watcher_pid"}, "web":
        {"agent": <as agent>, "page": {"path", "exists", "state", "pid",
        "running", "addresses", "port", "urls", "since", "error", "unreadable",
@@ -3778,12 +4237,15 @@ they run from any directory.
        JSON: {"code", "name", "expires", "links"}.
 
    invariant oracle web devices [--json]
-       The paired devices and the count of unused codes. JSON: {"devices":
-       [{"id", "name", "paired"}], "pending"}.
+       The paired devices and the count of unused codes; a device with web
+       push on says "notifications on". JSON: {"devices": [{"id", "name",
+       "paired", "push"}], "pending"}, "push" the device's push subscriptions
+       (null when web/push.json cannot be read).
 
    invariant oracle web revoke ID [--json]
-       Forget one device; its next request gets nothing, and the others are
-       untouched. An unknown ID exits 2. JSON: {"revoked"}.
+       Forget one device; its next request gets nothing, its web push
+       subscriptions are dropped, and the others are untouched. An unknown ID
+       exits 2. JSON: {"revoked", "push_dropped"}.
 
 The other two routes into the index are automatic: ``init`` (above) and the
 first SessionStart in a project, which ``invariant hook session-start``
@@ -3794,13 +4256,16 @@ the hook's output cannot change.
 ``oracle list`` writes nothing anywhere: not to any project's state root, and
 not to the oracle home. Neither does ``oracle tui`` itself; what a confirmed
 action changes is what that command changes. ``oracle watch`` writes only its two derived files and
-their lock under the oracle home, never under a project's state root; both
-files are safe to delete. ``oracle web`` writes nothing
+their lock under the oracle home (and, with web push on, each push's result in
+``web/push.json``), never under a project's state root; both derived files
+are safe to delete. ``oracle web`` writes nothing
 but ``web/devices.json`` under the oracle home, when a device pairs, and
 ``web/actions.log``, one line when an action from the page starts and one when
-it ends; what a confirmed action changes is what that command changes.
-``pair`` and ``revoke`` write ``web/devices.json`` too. Both files are created
-owner-only, and so is ``web/tls/oracle.pem``, the HTTPS certificate and its
+it ends, and ``web/push.json`` when a device turns web push on or off and when
+push is first offered (its VAPID key); what a confirmed action changes is what
+that command changes. ``pair`` and
+``revoke`` write ``web/devices.json`` too, and ``revoke`` ``web/push.json``.
+These files are created owner-only, and so is ``web/tls/oracle.pem``, the HTTPS certificate and its
 key, which ``oracle web`` writes when Tailscale hands it one. ``oracle web --wait`` also writes its report, ``oracle/web.json``,
 derived and removed when it stops. ``oracle install`` and ``uninstall`` are the
 only commands that write outside a repository and the oracle home: the two
@@ -3836,6 +4301,14 @@ Host bridge
        path in `.git/info/exclude`, grants the store's main checkout in
        `permissions.additionalDirectories` and records it all in the receipt
        (ADR-014 D11). A second run adds nothing already wired.
+
+       `invariant hook statusline` is not an event but Claude Code's status
+       line (ADR-027 ruling 10, D24): it needs no manifest, records the
+       plan's usage from its stdin's rate_limits in the oracle home, prints
+       one line such as "week 41% · 5h 12%" ("usage ?" without a reading)
+       and always exits 0. `invariant hooks statusline` installs it as the
+       user's statusLine in Claude Code's settings.json, opt-in; another
+       statusLine already there is refused (exit 2) and never replaced.
 
        The governing manifest is resolved from CLAUDE_PROJECT_DIR when the host
        supplies it, falling back to the working directory. The host guarantees
@@ -3896,7 +4369,12 @@ Host bridge
        in a file a config level is read from, an in-repo manifest in any
        checkout, the project's store invariant.yaml or the user level, is
        denied, naming `invariant rules loosen` and `invariant rules
-       carry-over`. The edit is applied to the file as it stands and both
+       carry-over`. Since ADR-032 increment 2 the same is said of an edit
+       adding or changing a `ruled` entry in the configured guidelines
+       ruleset, in any checkout, or the catalogue it names, a `ruled`
+       inside a `retired` entry included (ruling 13), naming `invariant
+       guidelines except` and `invariant guidelines loosen`. The edit is
+       applied to the file as it stands and both
        are read as YAML; a ruling removed passes, and an edit that does not
        read as YAML is denied only when it names rulings. A shell command
        writing the file is not screened, as for every edit rule; the

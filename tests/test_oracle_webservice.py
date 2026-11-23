@@ -100,20 +100,21 @@ class TestTheWebPlist:
 
     def test_the_search_path_takes_its_programs_and_extra_directories(self):
         found = {"invariant": "/x/bin/invariant", "tailscale": "/opt/ts/tailscale"}
-        path = search_path(found.get, programs=launchd.WEB_PROGRAMS, extra=("/venv/bin",))
+        path = search_path(found.get, programs=launchd.WEB_PROGRAMS, extra=("/venv/bin",),
+                           fallback=lambda _: None).path
         assert path.split(":") == ["/x/bin", "/opt/ts", "/venv/bin", *launchd.SYSTEM_PATH]
 
     def test_the_pages_search_path_finds_claude_for_a_start_from_the_phone(self):
         # A session started from the page opens Claude from inside this agent
         # (IDEA_030), so the directory claude is in must be on its PATH.
         found = {"invariant": "/x/bin/invariant", "claude": "/c/bin/claude"}
-        path = search_path(found.get, programs=launchd.WEB_PROGRAMS)
+        path = search_path(found.get, programs=launchd.WEB_PROGRAMS).path
         assert "claude" in launchd.WEB_PROGRAMS
         assert path.split(":")[:2] == ["/x/bin", "/c/bin"]
 
-    def test_the_watchers_search_path_is_unchanged(self):
-        found = {"git": "/g/git", "osascript": "/usr/bin/osascript"}
-        assert search_path(found.get).split(":")[:2] == ["/g", "/usr/bin"]
+    def test_the_watchers_search_path_finds_its_programs_first(self):
+        found = {"git": "/g/git", "osascript": "/usr/bin/osascript", "claude": "/c/claude"}
+        assert search_path(found.get).path.split(":")[:3] == ["/g", "/usr/bin", "/c"]
 
 
 class TestTheInstallerByLabel:

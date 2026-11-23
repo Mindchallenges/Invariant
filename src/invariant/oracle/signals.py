@@ -5,7 +5,8 @@ never a store, a process table or the wall clock, so the watcher and the suite
 ask it the same question and get the same answer.
 
 **Alerts** are what IDEA_012 settled the oracle interrupts for: a host waiting
-on the person, a gate that refused the turn, a turn gone silent, work finished
+on the person, a gate that refused the turn, a turn gone silent, a session
+with no activity for hours (``stalled``, ADR-027 ruling 11), work finished
 and awaiting the next step, and an error. **Markers** are shown and never
 interrupt: parked, stranded, a leaked worktree, an orphan host, a host gone
 without ``SessionEnd``, an idle "your turn", a merge awaiting teardown, a
@@ -42,6 +43,15 @@ GATE_BLOCKED = "gate_blocked"
 STUCK = "stuck"
 FINISHED = "finished"
 ERROR = "error"
+#: A live session with no activity for its project's ``stall_after`` while
+#: not waiting on the person (ADR-027 ruling 11, D7). Its cause is the
+#: diagnosis: :data:`STALL_LIMIT`, :data:`STALL_ERROR` or :data:`STALL_UNKNOWN`.
+STALLED = "stalled"
+STALL_LIMIT = "limit"
+STALL_ERROR = "error"
+STALL_UNKNOWN = "unknown"
+#: How a usage limit's window is named to a person.
+_LIMIT_NAMES = {"five_hour": "the five-hour limit", "seven_day": "the weekly limit"}
 
 PARKED = "parked"
 STRANDED = "stranded"
@@ -127,6 +137,9 @@ class Thresholds:
     #: attention turn counts as mid-turn without the host's own status
     #: (:func:`turn_state`, BUG_087).
     orphan_idle_minutes: float = 60.0
+    #: How long a live session may go without activity before it reads
+    #: ``stalled``, when its row carries no ``stall_after`` of its project's.
+    stall_hours: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -167,6 +180,7 @@ def classify(row: Row, now: float, thresholds: Thresholds | None = None) -> list
     else:
         _host_signals(row, now, thresholds, add)
         if row.kind == ROW_SESSION:
+            _stall_signal(row, now, thresholds, add)
             _session_signals(row, add)
         elif row.kind == ROW_HOST:
             previous = f", last bound to {row.previous_session}" if row.previous_session else ""
@@ -363,6 +377,44 @@ def _host_signals(row: Row, now: float, thresholds: Thresholds, add) -> None:
 
     if gone and not row.host_ended and not record.get("ended"):
         add(HOST_GONE, INFO, False, f"host pid {host.pid} is gone without a SessionEnd")
+
+
+def _stall_signal(row: Row, now: float, thresholds: Thresholds, add) -> None:
+    """``stalled``: no activity for the project's ``stall_after`` (ADR-027 ruling 11).
+
+    Activity is the row's ``last_activity``: the host's transcripts (a commit
+    is made by the host's own turn, so it is there), the attention record,
+    the session's heartbeat and its plan. A session waiting on a permission
+    prompt or a question, or on the person by Claude Code's own status, is
+    not stalled; nor is one whose host is not known to be alive: no host, or
+    one gone (``parked`` and ``host_gone`` say so), or one whose liveness
+    could not be asked, since nothing then says a window is there to nudge. The diagnosis is how the host's
+    last turn ended (``HostView.turn_end``, D7); the discriminator is when
+    the quiet began, so each stall alerts once.
+    """
+    host = row.current_host
+    if host is None or host.alive is not True or row.last_activity is None:
+        return
+    quiet = now - row.last_activity
+    hours = row.stall_after if row.stall_after else thresholds.stall_hours
+    if quiet < hours * 3600:
+        return
+    if turn_state(host, row.last_activity, now, thresholds) == TURN_WAITING:
+        return
+    end = host.turn_end or {}
+    detail = f"no activity for {_minutes(quiet)}"
+    if end.get("limit"):
+        cause = STALL_LIMIT
+        detail += f": stopped at {_LIMIT_NAMES.get(end['limit'], 'a usage limit')}"
+        resets = end.get("resets_at")
+        if isinstance(resets, (int, float)) and resets > now:
+            detail += f", which resets in {_minutes(resets - now)}"
+    elif end.get("error"):
+        cause = STALL_ERROR
+        detail += f": its last turn ended in an error ({end['error']})"
+    else:
+        cause = STALL_UNKNOWN
+    add(STALLED, MEDIUM, True, detail, str(int(row.last_activity)), cause)
 
 
 def _session_signals(row: Row, add) -> None:

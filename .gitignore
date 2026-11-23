@@ -6,6 +6,8 @@ build/
 *.egg-info/
 .pytest_cache/
 .coverage
+# Each pytest-xdist worker's data file, before pytest-cov combines them.
+.coverage.*
 htmlcov/
 .uv/
 

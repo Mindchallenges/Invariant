@@ -1,7 +1,7 @@
 description: >
   A compliant change. The architecture doc is read before design, the suite
-  fails before app.py is added and passes after it, the doc is updated beside
-  the code, both agents run, and every gate on the way to committed passes.
+  fails before app.py is added and passes after it, the doc is updated in
+  design, before the code (ADR-032 D6), both agents run, and every gate on the way to committed passes.
 
 manifest:
   version: 1
@@ -36,17 +36,6 @@ steps:
       cwd: "{worktree}"
       tool_name: Task
       tool_input: {subagent_type: feature-architect}
-  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
-  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
-  - kind: write
-    in: worktree
-    path: app.py
-    content: |
-      def answer():
-          return 42
-  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
-  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
-  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
   - kind: write
     in: worktree
     path: docs/architecture/overview.md
@@ -58,6 +47,17 @@ steps:
           APP[app] --> CHECK[check]
           APP --> ANSWER[answer]
       ```
+  - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
+  - kind: write
+    in: worktree
+    path: app.py
+    content: |
+      def answer():
+          return 42
+  - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
+  - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
   - kind: hook
     in: worktree
     event: post-tool-use
@@ -75,7 +75,7 @@ expect:
   gates:
     red: {docs.read_architecture: pass}
     green: {test.new_test_fails: pass}
-    reviewing: {test.all_pass: pass}
+    reviewing: {test.all_pass: pass, docs.ahead_of_code: pass}
     committed:
       test.all_pass: pass
       coverage.meets_floor: pass

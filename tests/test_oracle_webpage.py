@@ -62,11 +62,12 @@ _ROWS = [
 ]
 
 
-def _state(rows=None, age=1.0, acting=True, jobs=()):
+def _state(rows=None, age=1.0, acting=True, jobs=(), excerpts=None, talking=False):
     document = {"now": NOW, "projects": [{"project": {"key": "K", "name": "Heap",
                                                       "root": "/r"},
                                           "rows": list(_ROWS if rows is None else rows)}]}
-    return {"document": {}, "view": panel.view(document, acting=acting, jobs=jobs),
+    return {"document": {}, "view": panel.view(document, acting=acting, jobs=jobs,
+                                               excerpts=excerpts, talking=talking),
             "freshness": {"age": age, "interval": 5, "stale_after": 15, "banner": ""},
             "jobs": list(jobs)}
 
@@ -134,9 +135,11 @@ globalThis.document = {
   createRange: () => ({selectNodeContents: (node) => selected.push(node.textContent)}),
   visibilityState: "visible",
   title: "",
+  documentElement: {scrollHeight: 2000},
 };
 globalThis.window = {
   scrollY: 0,
+  innerHeight: 800,
   scrollTo: (x, y) => { window.scrollY = y; },
   addEventListener: (name, fn) => { (winListeners[name] = winListeners[name] || []).push(fn); },
   getSelection: () => ({removeAllRanges() {}, addRange() {}}),
@@ -566,10 +569,11 @@ def _start_state(rows=None, jobs=(), acting=True, projects=None):
             "jobs": list(jobs)}
 
 
-def _prepared(name=_NAME, label="1026-0049", prompt=None, windows=2, changes=3):
+def _prepared(name=_NAME, label="1026-0049", prompt=None, windows=2, changes=3, model=None):
     argv = ["/opt/bin/claude", "--name", name, "--remote-control", name,
-            *([prompt] if prompt else [])]
+            *(["--model", model] if model else []), *([prompt] if prompt else [])]
     return {"name": name, "label": label, "argv": argv, "cwd": "/r", "prompt": prompt,
+            "model": model,
             "facts": {"open_windows": windows, "uncommitted": changes, "dirty": bool(changes)}}
 
 
@@ -689,6 +693,35 @@ class TestStartASession:
             "label": "flaky"}
         assert result["posted"] == [{"project": "K", "nonce": "S2"}]
         assert result["headline"] == ["Running…"]
+
+    def test_the_model_field_is_sent_only_when_typed_and_its_answer_shown(self):
+        """DEC_ADR_030_D6: blank asks for the configured model, so the confirm
+        URL is the one it always was; a typed model is sent and shown."""
+        updated = _start_confirm(nonce="S2", model="chosen-model")
+        result = _run({"/api/state": [200, _start_state()],
+                       "/api/start/confirm": [200, _start_confirm(model="configured-model")]},
+                      r"""
+  element("newsession").fire("click");
+  await settle();
+  const before = texts(sheet(), "start-model");
+  const model = all(sheet()).filter((n) => n.tagName === "INPUT")[1];
+  model.value = "chosen-model";
+  model.fire("input");
+  answers["/api/start/confirm"] = [200, UPDATED];
+  const debounce = timers.filter((t) => t.ms === 400);
+  timers.length = 0;
+  debounce[debounce.length - 1].fn();
+  await settle();
+  say({before: before, after: texts(sheet(), "start-model"),
+       placeholder: model.attrs.placeholder,
+       fetched: fetched.filter((u) => u.startsWith("/api/start/confirm"))});""".replace(
+            "UPDATED", json.dumps(updated)))
+        assert result["before"] == ["Runs on configured-model"]
+        assert result["after"] == ["Runs on chosen-model"]
+        assert result["placeholder"] == "Leave it empty for the default."
+        assert result["fetched"] == [
+            "/api/start/confirm?project=K&label=&prompt=",
+            "/api/start/confirm?project=K&label=1026-0049&prompt=&model=chosen-model"]
 
     def test_a_refusal_is_said_in_the_sheet_and_the_fields_stay(self):
         refused = {**_start_confirm(), "nonce": None, "words": None,
@@ -849,3 +882,807 @@ class TestTheStartMarkup:
         assert "form input {" in style
         page = webpage.page("n", panel.WORDS)
         assert 'id="newsession"' in page and "hidden" in page.split('id="newsession"')[1][:40]
+
+
+# -- the last-message excerpt (ADR-029 increment 1, ADR-009 D17) ---------------------------
+
+_MARKUP = '<script>alert(1)</script> and [a link](http://x.example)'
+_LONG = "Line one of a long answer.\n" + "word " * 300
+
+
+def _excerpts(claude=_MARKUP, you="<b>Ship it</b>"):
+    return {"K|w1": {"claude": claude, "you": you}, "K|i1": {"claude": "All done.", "you": None},
+            "K|host:h00000000": {"claude": "Should I delete the branch?", "you": None}}
+
+
+class TestTheExcerpt:
+    def test_a_full_card_shows_claudes_text_under_its_label_as_characters(self):
+        result = _run({"/api/state": [200, _state(excerpts=_excerpts())]}, r"""
+  const card = find(screen(), (n) => n.className === "card tap");
+  const block = withClass(card, "excerpt")[0];
+  const kids = card.children.map((n) => n.className);
+  say({label: texts(block, "excerpt-label"), text: withClass(block, "excerpt-text")[0].own,
+       cls: withClass(block, "excerpt-text")[0].className, order: kids});""")
+        assert result["label"] == ["Claude"]
+        assert result["text"] == _MARKUP
+        assert result["cls"] == "excerpt-text clamp"
+        assert result["order"] == ["meta", "card-title", "chips", "inset excerpt", "note"]
+
+    def test_a_compact_card_and_a_leftover_row_show_one_line(self):
+        result = _run({"/api/state": [200, _state(excerpts=_excerpts())]}, r"""
+  const idle = texts(screen(), "excerpt-line");
+  withClass(screen(), "tile-leftovers")[0].fire("click", {preventDefault() {}});
+  say({idle: idle, leftovers: texts(screen(), "excerpt-line")});""")
+        assert result == {"idle": ["All done."], "leftovers": ["Should I delete the branch?"]}
+
+    def test_no_text_draws_no_block(self):
+        result = _run({"/api/state": [200, _state()]}, r"""
+  const cards = withClass(screen(), "excerpt").length + withClass(screen(), "excerpt-line").length;
+  find(screen(), (n) => n.className === "card tap").fire("click");
+  say({cards: cards, last: texts(screen(), "section-label").includes("Last message"),
+       blocks: withClass(screen(), "excerpt").length});""")
+        assert result == {"cards": 0, "last": False, "blocks": 0}
+
+    def test_the_detail_shows_the_prompt_then_claudes_text(self):
+        result = _run({"/api/state": [200, _state(excerpts=_excerpts())]}, r"""
+  find(screen(), (n) => n.className === "card tap").fire("click");
+  const blocks = withClass(screen(), "excerpt");
+  say({section: texts(screen(), "section-label"),
+       labels: blocks.map((b) => texts(b, "excerpt-label")[0]),
+       texts: blocks.map((b) => withClass(b, "excerpt-text")[0].own),
+       clamp: blocks.map((b) => withClass(b, "excerpt-text")[0].className),
+       showAll: texts(screen(), "show-all")});""")
+        assert result == {"section": ["Last message", "Recent"], "labels": ["You", "Claude"],
+                          "texts": ["<b>Ship it</b>", _MARKUP],
+                          "clamp": ["excerpt-text", "excerpt-text"], "showAll": []}
+
+    def test_a_long_text_folds_behind_show_all_and_stays_open_on_refresh(self):
+        state = _state(excerpts=_excerpts(claude=_LONG, you=None))
+        result = _run({"/api/state": [200, state]}, r"""
+  find(screen(), (n) => n.className === "card tap").fire("click");
+  const text = () => withClass(screen(), "excerpt-text")[0].own;
+  const folded = {text: text(), labels: texts(screen(), "excerpt-label"),
+                  button: texts(screen(), "show-all")};
+  byText(screen(), "Show all").fire("click");
+  const opened = {text: text(), button: texts(screen(), "show-all")};
+  await refresh();
+  say({folded: folded, opened: opened, after: text()});""")
+        head = state["view"]["details"]["K|w1"]["last"]["head"]
+        assert result["folded"] == {"text": head, "labels": ["Claude"], "button": ["Show all"]}
+        assert result["opened"] == {"text": _LONG, "button": []}
+        assert result["after"] == _LONG
+
+    def test_the_text_keeps_its_lines_and_wraps_a_long_word(self):
+        from invariant.oracle import webpage
+
+        style = webpage._STYLE
+        assert "white-space: pre-wrap" in style and "overflow-wrap: break-word" in style
+        assert "-webkit-line-clamp: 3" in style
+
+
+# -- the Conversation screen (ADR-029 increment 2, ADR-009 D17) ---------------------------
+
+_TURNS = [{"role": "user", "text": "<b>Ship it</b>", "at": NOW - 30, "cut": False},
+          {"role": "tool", "text": "Ran git status", "at": NOW - 20, "cut": False},
+          {"role": "assistant", "text": _MARKUP, "at": NOW - 10, "cut": True}]
+
+
+def _talk(turns=_TURNS, cursor="c1", live=True, unreadable=False, **extra):
+    return {"row": "K|w1", "live": live, "unreadable": unreadable, "cursor": cursor,
+            "head": {"kicker": "Heap · Conversation", "title": "Mobile panel",
+                     "chips": [{"text": "Needs permission", "tone": "needs"}]},
+            "turns": list(turns),
+            "offered": {"send": False, "answer": False, "interrupt": False,
+                        "why": "reading_only"}, **extra}
+
+
+#: Open the waiting card's detail, then its conversation.
+_OPEN = r"""
+  find(screen(), (n) => n.className === "card tap").fire("click");
+  byText(screen(), "Open conversation").fire("click");
+  await settle();
+"""
+
+_TIMERS = r"""
+async function fire(ms) {
+  const timer = timers.filter((t) => t.ms === ms).pop();
+  if (!timer) return false;
+  timers.splice(timers.indexOf(timer), 1);
+  timer.fn();
+  await settle();
+  return true;
+}
+const sessions = () => fetched.filter((url) => url.startsWith("/api/session"));
+const hide = () => {
+  document.visibilityState = "hidden";
+  for (const fn of docListeners.visibilitychange || []) fn();
+};
+const show = async () => {
+  document.visibilityState = "visible";
+  for (const fn of docListeners.visibilitychange || []) fn();
+  await settle();
+};
+const everything = () => all(screen()).map((n) => n.own).filter(Boolean).join("|");
+"""
+
+
+def _talking(talk=None, excerpts=None):
+    return {"/api/state": [200, _state(excerpts=excerpts or _excerpts(), talking=True)],
+            "/api/session": [200, talk or _talk()]}
+
+
+class TestTheConversation:
+    def test_the_detail_ends_its_last_message_with_open_conversation(self):
+        result = _run(_talking(), r"""
+  find(screen(), (n) => n.className === "card tap").fire("click");
+  const kids = screen().children.map((n) => n.className || n.own);
+  const at = kids.indexOf("btn secondary tall talk-open");
+  say({before: kids[at - 1], label: screen().children[at].own});""")
+        assert result == {"before": "inset excerpt", "label": "Open conversation"}
+
+    def test_without_a_last_message_it_stands_alone_and_without_a_reader_is_absent(self):
+        alone = _run({"/api/state": [200, _state(talking=True)]}, r"""
+  find(screen(), (n) => n.className === "card tap").fire("click");
+  say({button: texts(screen(), "talk-open"), last: withClass(screen(), "excerpt").length});""")
+        assert alone == {"button": ["Open conversation"], "last": 0}
+        absent = _run({"/api/state": [200, _state(excerpts=_excerpts())]}, r"""
+  find(screen(), (n) => n.className === "card tap").fire("click");
+  say({button: texts(screen(), "talk-open")});""")
+        assert absent == {"button": []}
+
+    def test_it_shows_the_turns_oldest_first_as_characters(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  const turns = withClass(screen(), "turns")[0].children;
+  say({url: sessions()[0], back: texts(screen(), "back"), kicker: texts(screen(), "kicker"),
+       title: texts(screen(), "talk-title"), chips: texts(screen(), "chip"),
+       classes: turns.map((n) => n.className),
+       labels: turns.map((n) => texts(n, "excerpt-label")),
+       texts: turns.map((n) => n.className.includes("tool-line") ? n.own
+                                 : withClass(n, "turn-text")[0].own),
+       cut: texts(screen(), "cut-line")});""")
+        assert result == {
+            "url": "/api/session?row=K%7Cw1", "back": ["Mobile panel"],
+            "kicker": ["Heap · Conversation"], "title": ["Mobile panel"],
+            "chips": ["Needs permission"],
+            "classes": ["card quiet-card turn", "mono scroll tool-line", "card turn"],
+            "labels": [["You"], [], ["Claude"]],
+            "texts": ["<b>Ship it</b>", "Ran git status", _MARKUP],
+            "cut": ["Cut here: the rest is on the Mac"]}
+
+    def test_it_opens_at_the_bottom(self):
+        result = _run(_talking(), _OPEN + "say({y: window.scrollY});")
+        assert result == {"y": 2000}
+
+    def test_it_asks_again_every_two_seconds_from_its_cursor(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  answers["/api/session"] = [200, {row: "K|w1", unchanged: true, cursor: "c1",
+                                   head: {kicker: "Heap · Conversation", title: "Mobile panel",
+                                          chips: []},
+                                   offered: {send: false, answer: false, interrupt: false,
+                                             why: "reading_only"}}];
+  await fire(2000);
+  const kept = withClass(screen(), "turn").length + withClass(screen(), "tool-line").length;
+  say({urls: sessions(), kept: kept});""")
+        assert result == {"urls": ["/api/session?row=K%7Cw1",
+                                   "/api/session?row=K%7Cw1&after=c1"], "kept": 3}
+
+    def test_a_new_turn_keeps_the_bottom_in_view(self):
+        newer = _talk(turns=[*_TURNS, {"role": "assistant", "text": "Pushed.", "at": NOW,
+                                       "cut": False}], cursor="c2")
+        result = _run(_talking(), _TIMERS + _OPEN + f"""
+  answers["/api/session"] = [200, {json.dumps(newer)}];
+  window.scrollY = 1600;
+  document.documentElement.scrollHeight = 2400;
+  await fire(2000);
+  say({{y: window.scrollY, pill: withClass(screen(), "new-pill")[0].hidden,
+       last: texts(screen(), "turn-text").pop()}});""")
+        assert result == {"y": 2400, "pill": True, "last": "Pushed."}
+
+    def test_scrolled_up_a_new_turn_shows_the_pill_which_scrolls_down(self):
+        newer = _talk(turns=[*_TURNS, {"role": "user", "text": "And?", "at": NOW,
+                                       "cut": False}], cursor="c2")
+        result = _run(_talking(), _TIMERS + _OPEN + f"""
+  answers["/api/session"] = [200, {json.dumps(newer)}];
+  window.scrollY = 100;
+  await fire(2000);
+  const pill = withClass(screen(), "new-pill")[0];
+  const shown = {{hidden: pill.hidden, text: pill.own, y: window.scrollY}};
+  pill.fire("click");
+  say({{shown: shown, after: {{hidden: element("newpill").hidden, y: window.scrollY}}}});""")
+        assert result == {"shown": {"hidden": False, "text": "New messages", "y": 100},
+                          "after": {"hidden": True, "y": 2000}}
+
+    def test_scrolling_to_the_bottom_puts_the_pill_away(self):
+        newer = _talk(cursor="c2")
+        result = _run(_talking(), _TIMERS + _OPEN + f"""
+  answers["/api/session"] = [200, {json.dumps(newer)}];
+  window.scrollY = 100;
+  await fire(2000);
+  const before = element("newpill").hidden;
+  window.scrollY = 1200;
+  for (const fn of winListeners.scroll || []) fn();
+  say({{before: before, after: element("newpill").hidden}});""")
+        assert result == {"before": False, "after": True}
+
+    def test_a_hidden_page_does_not_ask_and_asks_at_once_when_seen_again(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  hide();
+  await fire(2000);
+  const whileHidden = sessions().length;
+  await show();
+  say({whileHidden: whileHidden, after: sessions().length});""")
+        assert result == {"whileHidden": 1, "after": 2}
+
+    def test_leaving_stops_the_asking(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  texts(screen(), "back");
+  find(screen(), (n) => n.className === "back").fire("click");
+  await settle();
+  await fire(2000);
+  say({screen: texts(screen(), "detail-title"), asked: sessions().length});""")
+        assert result["asked"] == 1 and result["screen"]
+
+    def test_after_a_minute_in_the_background_every_text_is_dropped(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  hide();
+  fakeNow += 61000;
+  await fire(60000);
+  const dropped = everything();
+  answers["/api/session"] = [200, Object.assign({}, answers["/api/session"][1],
+                                                {cursor: "c9"})];
+  await show();
+  say({dropped: dropped, urls: sessions(), back: everything().includes("Ship it")});""")
+        assert result["dropped"] == "Reading again…"
+        assert result["urls"][-1] == "/api/session?row=K%7Cw1"
+        assert result["back"] is True
+
+    def test_a_drop_the_timer_missed_happens_on_return(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  hide();
+  fakeNow += 61000;
+  timers.length = 0;
+  answers["/api/session"] = [500, {}];
+  answers["/api/state"] = [500, {error: "down"}];
+  await show();
+  say({shown: everything()});""")
+        assert result["shown"] == "Reading again…"
+
+    def test_a_short_absence_keeps_the_text(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  hide();
+  fakeNow += 5000;
+  answers["/api/session"] = [500, {}];
+  await show();
+  say({kept: everything().includes("Ship it")});""")
+        assert result == {"kept": True}
+
+    def test_the_overview_drops_its_excerpts_too(self):
+        result = _run(_talking(), _TIMERS + r"""
+  hide();
+  await fire(60000);
+  say({shown: everything(), hasText: everything().includes("alert(1)")});""")
+        assert result == {"shown": "Reading again…", "hasText": False}
+
+    def test_an_unreadable_stop_shows_the_notice_above_the_newer_turns(self):
+        talk = _talk(turns=_TURNS[2:], unreadable=True)
+        result = _run(_talking(talk), _OPEN + r"""
+  const turns = withClass(screen(), "turns")[0].children;
+  say({first: turns[0].className, notice: turns[0].textContent,
+       rest: turns.slice(1).map((n) => n.className)});""")
+        assert result == {"first": "card quiet-card",
+                          "notice": "Can't read this session here — use the Mac.",
+                          "rest": ["card turn"]}
+
+    @pytest.mark.parametrize("answer", [[200, _talk(turns=[], live=False)],
+                                        [404, {"error": "no such session"}]])
+    def test_a_gone_window_says_so(self, answer):
+        result = _run({**_talking(), "/api/session": answer}, _OPEN + r"""
+  say({turns: withClass(screen(), "turns")[0].textContent});""")
+        assert result == {"turns": "The Claude window is gone."}
+
+    def test_a_failed_read_keeps_what_was_shown_and_backs_off(self):
+        result = _run(_talking(), _TIMERS + _OPEN + r"""
+  answers["/api/session"] = [503, {error: "busy"}];
+  await fire(2000);
+  say({kept: everything().includes("Ship it"), next: timers.some((t) => t.ms === 4000)});""")
+        assert result == {"kept": True, "next": True}
+
+    def test_its_style_is_the_panels(self):
+        from invariant.oracle import webpage
+
+        style = webpage._STYLE
+        for rule in (".turns {", ".tool-line {", ".new-pill {", ".talk-title {",
+                     ".turn-text {", ".cut-line {", ".talk-open {"):
+            assert rule in style, rule
+        assert webpage.CONVERSATION_INTERVAL == 2.0 and webpage.BACKGROUND_DROP == 60.0
+
+
+# -- sending (ADR-029 increment 3) ---------------------------------------------------
+
+_OFFERED = {"send": True, "answer": False, "interrupt": False, "why": None, "running": False}
+
+
+def _sendable(**extra):
+    fields = {"nonce": "N1", "sends": [], "boot": "B1", **extra}
+    fields["offered"] = dict(_OFFERED, **extra.get("offered", {}))
+    return _talk(**fields)
+
+
+def _held(send_id="S1", state="held", **extra):
+    return {"id": send_id, "row": "K|w1", "kind": "message", "state": state,
+            "reason": extra.get("reason"), "what": extra.get("what"), "at": NOW, "length": 5}
+
+
+def _sending(talk=None, **answers):
+    return {"/api/talk/cancel": answers.get("cancel", [200, {"send": _held(state="cancelled")}]),
+            "/api/talk": answers.get("post", [202, {"send": _held(), "boot": "B1"}]),
+            **_talking(talk or _sendable())}
+
+
+_TYPE = r"""
+  const box = element("composer");
+  const input = find(box, (n) => n.tagName === "TEXTAREA");
+  const send = withClass(box, "send-btn")[0];
+  input.value = "Ship it <now>";
+"""
+
+
+class TestSending:
+    def test_the_composer_shows_where_send_is_offered(self):
+        result = _run(_sending(), _OPEN + r"""
+  const box = element("composer");
+  const input = find(box, (n) => n.tagName === "TEXTAREA");
+  say({hidden: box.hidden, placeholder: input.attrs.placeholder, value: input.value,
+       label: withClass(box, "send-btn")[0].attrs["aria-label"],
+       talking: screen().className});""")
+        assert result == {"hidden": False, "placeholder": "Message Claude", "value": "",
+                          "label": "Send", "talking": "sub talking"}
+
+    def test_a_running_turn_says_it_is_sent_when_the_turn_ends(self):
+        result = _run(_sending(_sendable(offered={"running": True})), _OPEN + r"""
+  const input = find(element("composer"), (n) => n.tagName === "TEXTAREA");
+  say({placeholder: input.attrs.placeholder});""")
+        assert result == {"placeholder": "Message Claude — sent when this turn ends"}
+
+    def test_reading_only_has_no_composer(self):
+        result = _run(_talking(), _OPEN + "say({hidden: element('composer').hidden});")
+        assert result == {"hidden": True}
+
+    @pytest.mark.parametrize(("why", "said"), [
+        ("no_tab", "Send from here works for Terminal windows only."),
+        ("no_claude", "Claude is not running in this window."),
+        ("unreadable", None), ("gone", None)])
+    def test_send_off_says_why_in_its_place(self, why, said):
+        talk = _talk(offered={"send": False, "answer": False, "interrupt": False, "why": why},
+                     nonce=None, sends=[], boot="B1")
+        result = _run(_sending(talk), _OPEN + r"""
+  say({hidden: element("composer").hidden, off: texts(screen(), "talk-off")});""")
+        assert result == {"hidden": True, "off": [said] if said else []}
+
+    def test_send_posts_the_row_nonce_and_text_and_shows_it_held(self):
+        result = _run(_sending(), _TIMERS + _OPEN + _TYPE + r"""
+  send.fire("click");
+  await settle();
+  const card = withClass(screen(), "send")[0];
+  say({posted: posted, input: input.value, text: texts(card, "turn-text"),
+       line: texts(card, "send-state"), act: texts(card, "send-act"),
+       again: sessions().length});""")
+        assert result == {
+            "posted": [{"row": "K|w1", "nonce": "N1", "kind": "message",
+                        "text": "Ship it <now>"}],
+            "input": "", "text": ["Ship it <now>"], "line": ["Sending…", "·"],
+            "act": ["Undo"], "again": 2}
+
+    def test_an_empty_message_is_not_sent(self):
+        result = _run(_sending(), _OPEN + _TYPE + r"""
+  input.value = "   ";
+  send.fire("click");
+  await settle();
+  say({posted: posted.length});""")
+        assert result == {"posted": 0}
+
+    def test_undo_cancels_it_and_gives_the_text_back(self):
+        result = _run(_sending(), _OPEN + _TYPE + r"""
+  send.fire("click");
+  await settle();
+  byText(screen(), "Undo").fire("click");
+  await settle();
+  say({cancel: posted[1], input: input.value, sends: withClass(screen(), "send").length});""")
+        assert result == {"cancel": {"id": "S1"}, "input": "Ship it <now>", "sends": 0}
+
+    def test_an_undo_too_late_says_so(self):
+        answers = _sending(cancel=[409, {"error": "it is already being sent"}])
+        result = _run(answers, _OPEN + _TYPE + r"""
+  send.fire("click");
+  await settle();
+  byText(screen(), "Undo").fire("click");
+  await settle();
+  say({error: texts(element("composer"), "composer-error")});""")
+        assert result == {"error": ["Not sent: it is already being sent"]}
+
+    def test_a_refusal_says_why_and_keeps_the_text(self):
+        answers = _sending(post=[409, {"error": "not sent: menu_command",
+                                       "reason": "menu_command"}])
+        result = _run(answers, _OPEN + _TYPE + r"""
+  send.fire("click");
+  await settle();
+  say({error: texts(element("composer"), "composer-error"), input: input.value});""")
+        assert result == {"error": ["Not sent: This command opens a menu — use it on the Mac."],
+                          "input": "Ship it <now>"}
+
+    def test_a_post_that_fails_says_it_may_not_have_reached_the_mac(self):
+        result = _run(_sending(), _OPEN + _TYPE + r"""
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (url === "/api/talk") throw new Error("offline");
+    return real(url, options);
+  };
+  send.fire("click");
+  await settle();
+  say({error: texts(element("composer"), "composer-error")});""")
+        assert result == {"error": ["The message may not have reached the Mac: offline"]}
+
+    @pytest.mark.parametrize(("send", "line", "text"), [
+        (_held(state="queued"), ["Queued: sent when Claude's turn ends", "·"], True),
+        (_held(state="typed"), ["Sent · checking"], True),
+        (_held(state="delivered"), ["Delivered"], False),
+        (_held(state="not_confirmed"), ["Not confirmed — check the session on the Mac"],
+         True),
+        (_held(state="refused", reason="changed", what="turn"),
+         ["Not sent: The session changed since you looked. A new turn began."], True),
+        (_held(state="refused", reason="typing"), ["Not sent: Someone is typing on the Mac."],
+         True),
+        (_held(state="dropped", reason="ring"),
+         ["Dropped, not delivered: too many were queued"], True),
+        (_held(state="dropped", reason="revoked"),
+         ["Not sent: This device is not paired any more."], True),
+        (_held(state="dropped"), ["Dropped, not delivered"], True),
+    ])
+    def test_each_state_is_one_line_under_its_turn(self, send, line, text):
+        listed = _sendable(sends=[send], cursor="c2")
+        answers = _sending()
+        result = _run(answers, _TIMERS + _OPEN + _TYPE + f"""
+  send.fire("click");
+  await settle();
+  answers["/api/session"] = [200, {json.dumps(listed)}];
+  await fire(2000);
+  const card = withClass(screen(), "send")[0];
+  say({{line: texts(card, "send-state"), text: texts(card, "turn-text").length}});""")
+        assert result == {"line": line, "text": 1 if text else 0}
+
+    def test_a_send_from_an_older_boot_is_dropped_the_oracle_restarted(self):
+        restarted = _sendable(boot="B2", cursor="c2")
+        result = _run(_sending(), _TIMERS + _OPEN + _TYPE + f"""
+  send.fire("click");
+  await settle();
+  answers["/api/session"] = [200, {json.dumps(restarted)}];
+  await fire(2000);
+  const first = texts(screen(), "send-state");
+  await fire(2000);
+  say({{first: first, again: texts(screen(), "send-state")}});""")
+        assert result == {"first": ["Dropped, not delivered: the oracle restarted"],
+                          "again": ["Dropped, not delivered: the oracle restarted"]}
+
+    def test_a_minute_in_the_background_drops_the_held_text(self):
+        result = _run(_sending(), _TIMERS + _OPEN + _TYPE + r"""
+  send.fire("click");
+  await settle();
+  hide();
+  fakeNow += 61000;
+  await fire(60000);
+  answers["/api/session"] = [200, Object.assign({}, answers["/api/session"][1],
+                                                {cursor: "c9", sends: [
+    {id: "S1", row: "K|w1", kind: "message", state: "held", at: 0, length: 5}]})];
+  await show();
+  say({text: everything().includes("Ship it <now>"), box: element("composer").hidden});""")
+        assert result == {"text": False, "box": False}
+
+    def test_reply_on_a_card_waiting_for_input_opens_the_composer(self):
+        rows = [dict(_ROWS[0], signals=[{"kind": "waiting", "cause": "input", "alert": True,
+                                         "severity": "high"}])]
+        state = _state(rows=rows, excerpts=_excerpts(), talking=True)
+        state["view"] = panel.view(
+            {"now": NOW, "projects": [{"project": {"key": "K", "name": "Heap", "root": "/r"},
+                                       "rows": rows}]},
+            acting=True, excerpts=_excerpts(), talking=True, sending=True)
+        answers = {"/api/state": [200, state], "/api/session": [200, _sendable()]}
+        result = _run(answers, r"""
+  const reply = byText(screen(), "Reply…");
+  reply.fire("click");
+  await settle();
+  const input = find(element("composer"), (n) => n.tagName === "TEXTAREA");
+  say({classes: reply.className, url: fetched.filter((u) => u.startsWith("/api/session")),
+       focused: focused === input});""")
+        assert result == {"classes": "btn primary", "url": ["/api/session?row=K%7Cw1"],
+                          "focused": True}
+
+    def test_its_style_is_the_panels(self):
+        from invariant.oracle import webpage
+
+        for rule in ("#composer {", ".composer-input {", ".send-btn {", ".send-line {",
+                     ".talk-off {", "main.talking {"):
+            assert rule in webpage._STYLE, rule
+        assert '<div id="composer" hidden></div>' in webpage.page("n", panel.WORDS)
+
+
+# -- Stop (ADR-029 increment 4) ---------------------------------------------------------
+
+
+def _stoppable(**offered):
+    return _sendable(offered={"running": True, "interrupt": True, **offered})
+
+
+def _stopped(state="held", **extra):
+    return dict(_held(state=state, **extra), kind="interrupt", length=0)
+
+
+class TestStop:
+    def test_stop_stands_beside_send_while_a_turn_runs(self):
+        result = _run(_sending(_stoppable()), _OPEN + r"""
+  const box = element("composer");
+  const row = withClass(box, "composer-row")[0];
+  say({buttons: row.children.map((n) => n.className),
+       label: withClass(box, "stop-btn")[0].attrs["aria-label"]});""")
+        assert result == {"buttons": ["composer-input", "stop-btn", "send-btn"],
+                          "label": "Stop"}
+
+    def test_no_stop_while_claude_waits_for_input(self):
+        result = _run(_sending(), _OPEN + r"""
+  say({stop: withClass(element("composer"), "stop-btn").map((n) => n.hidden)});""")
+        assert result == {"stop": [True]}
+
+    def test_stop_stays_alone_when_send_is_off(self):
+        talk = _stoppable(send=False, why="unreadable")
+        result = _run(_sending(talk), _OPEN + r"""
+  const box = element("composer");
+  say({hidden: box.hidden,
+       input: find(box, (n) => n.tagName === "TEXTAREA").hidden,
+       send: withClass(box, "send-btn")[0].hidden,
+       stop: withClass(box, "stop-btn")[0].hidden});""")
+        assert result == {"hidden": False, "input": True, "send": True, "stop": False}
+
+    def test_stop_posts_an_interrupt_with_no_text_and_shows_it_held(self):
+        answers = _sending(_stoppable(), post=[202, {"send": _stopped(), "boot": "B1"}])
+        result = _run(answers, _TIMERS + _OPEN + r"""
+  const input = find(element("composer"), (n) => n.tagName === "TEXTAREA");
+  input.value = "a draft that stays";
+  withClass(element("composer"), "stop-btn")[0].fire("click");
+  await settle();
+  const card = withClass(screen(), "send")[0];
+  say({posted: posted, input: input.value, text: texts(card, "turn-text"),
+       line: texts(card, "send-state"), act: texts(card, "send-act")});""")
+        assert result == {"posted": [{"row": "K|w1", "nonce": "N1", "kind": "interrupt"}],
+                          "input": "a draft that stays", "text": ["Stop"],
+                          "line": ["Sending…", "·"], "act": ["Undo"]}
+
+    def test_undoing_a_stop_leaves_the_draft_alone(self):
+        answers = _sending(_stoppable(), post=[202, {"send": _stopped(), "boot": "B1"}])
+        result = _run(answers, _OPEN + r"""
+  const input = find(element("composer"), (n) => n.tagName === "TEXTAREA");
+  withClass(element("composer"), "stop-btn")[0].fire("click");
+  await settle();
+  byText(screen(), "Undo").fire("click");
+  await settle();
+  say({input: input.value, sends: withClass(screen(), "send").length});""")
+        assert result == {"input": "", "sends": 0}
+
+    def test_a_refused_stop_says_why(self):
+        answers = _sending(_stoppable(), post=[409, {"error": "x", "reason": "ended"}])
+        result = _run(answers, _OPEN + r"""
+  withClass(element("composer"), "stop-btn")[0].fire("click");
+  await settle();
+  say({error: texts(element("composer"), "composer-error")});""")
+        assert result == {"error": ["Not sent: Claude's turn had already ended."]}
+
+    def test_a_stop_that_cannot_reach_the_mac_says_so(self):
+        result = _run(_sending(_stoppable()), _OPEN + r"""
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    if (url === "/api/talk") throw new Error("offline");
+    return real(url, options);
+  };
+  withClass(element("composer"), "stop-btn")[0].fire("click");
+  await settle();
+  say({error: texts(element("composer"), "composer-error")});""")
+        assert result == {"error": ["The message may not have reached the Mac: offline"]}
+
+    @pytest.mark.parametrize(("send", "line"), [
+        (_stopped(state="refused", reason="asking"),
+         ["Not sent: Claude is waiting on a prompt — answer it on the Mac."]),
+        (_stopped(state="refused", reason="ended"),
+         ["Not sent: Claude's turn had already ended."]),
+        (_stopped(state="delivered"), ["Delivered"]),
+    ])
+    def test_a_listed_stop_reads_as_stop(self, send, line):
+        listed = _stoppable()
+        listed["sends"] = [send]
+        result = _run(_sending(listed), _OPEN + r"""
+  const card = withClass(screen(), "send")[0];
+  say({line: texts(card, "send-state"), text: texts(card, "turn-text")});""")
+        assert result == {"line": line, "text": [] if send["state"] == "delivered" else ["Stop"]}
+
+
+# -- answering a question (ADR-029 increment 5) -----------------------------------------
+
+_HUE = {"text": "Pick one hue", "header": "Hue", "multi": False, "other": True,
+        "choices": [{"label": "Crimson", "description": "<b>red</b>"},
+                    {"label": "Teal", "description": ""}]}
+_TOPPINGS = {"text": "Pick toppings", "header": "Toppings", "multi": True, "other": True,
+             "choices": [{"label": "Cheese", "description": ""},
+                         {"label": "Basil", "description": ""}]}
+
+
+def _asking(*questions, **extra):
+    pending = {"kind": "question", "id": "toolu_q1", "unreadable": False,
+               "questions": list(questions or (_HUE,))}
+    return _sendable(pending=pending, offered={"answer": True, "running": True}, **extra)
+
+
+def _answer_sent(state="held", **extra):
+    return dict(_held(state=state, **extra), kind="question", length=0)
+
+
+def _answering(talk=None, **answers):
+    return _sending(talk or _asking(),
+                    post=answers.get("post", [202, {"send": _answer_sent(), "boot": "B1"}]),
+                    **{k: v for k, v in answers.items() if k != "post"})
+
+
+_BLOCK = r"""
+  const block = () => withClass(screen(), "asking")[0] || null;
+  const choices = () => withClass(block(), "choice");
+"""
+
+
+class TestAnswering:
+    def test_answer_on_a_card_waiting_on_a_question_opens_its_conversation(self):
+        rows = [dict(_ROWS[0], signals=[{"kind": "waiting", "cause": "question",
+                                         "alert": True, "severity": "high"}])]
+        rows[0]["hosts"] = [dict(rows[0]["hosts"][0], attention={
+            "waiting": {"kind": "question", "since": "2026-10-21T10:00:00+00:00"},
+            "turn": "running"})]
+        document = {"now": NOW, "projects": [{"project": {"key": "K", "name": "Heap",
+                                                          "root": "/r"}, "rows": rows}]}
+        state = _state(rows=rows, excerpts=_excerpts(), talking=True)
+        state["view"] = panel.view(document, acting=True, excerpts=_excerpts(), talking=True,
+                                   sending=True, prompts={"K|w1": {"text": "Pick one hue",
+                                                                  "unreadable": False}})
+        answers = {"/api/state": [200, state], "/api/session": [200, _asking()]}
+        result = _run(answers, _BLOCK + r"""
+  const card = withClass(screen(), "card")[0];
+  const note = texts(card, "note");
+  byText(screen(), "Answer…").fire("click");
+  await settle();
+  say({note: note, url: fetched.filter((u) => u.startsWith("/api/session")),
+       block: !!block(), focused: focused === null});""")
+        assert result == {"note": ["Pick one hue"], "url": ["/api/session?row=K%7Cw1"],
+                          "block": True, "focused": True}
+
+    def test_a_lone_choice_is_sent_on_one_tap(self):
+        result = _run(_answering(), _BLOCK + _OPEN + r"""
+  const shown = {text: texts(block(), "question-text"),
+                 labels: texts(block(), "choice-label"),
+                 notes: texts(block(), "choice-note"),
+                 other: texts(block(), "other-open"),
+                 send: texts(block(), "send-answer")};
+  choices()[1].fire("click");
+  await settle();
+  const card = withClass(screen(), "send")[0];
+  say({shown: shown, posted: posted, you: texts(card, "turn-text"),
+       line: texts(card, "send-state"), block: !!block()});""")
+        assert result == {
+            "shown": {"text": ["Pick one hue"], "labels": ["Crimson", "Teal"],
+                      "notes": ["<b>red</b>"], "other": ["Other…"], "send": []},
+            "posted": [{"row": "K|w1", "nonce": "N1", "kind": "question",
+                        "answers": [{"choices": [1], "other": None}]}],
+            "you": ["Teal"], "line": ["Sending…", "·"], "block": False}
+
+    def test_other_opens_a_field_and_sends_its_text(self):
+        result = _run(_answering(), _BLOCK + _OPEN + r"""
+  byText(block(), "Other…").fire("click");
+  const input = find(block(), (n) => n.tagName === "INPUT");
+  input.value = "my <own> hue";
+  input.fire("input");
+  byText(block(), "Send").fire("click");
+  await settle();
+  say({posted: posted[0].answers, you: texts(withClass(screen(), "send")[0], "turn-text"),
+       focused: focused === input});""")
+        assert result == {"posted": [{"choices": [], "other": "my <own> hue"}],
+                          "you": ["my <own> hue"], "focused": True}
+
+    def test_an_empty_other_is_not_sent(self):
+        result = _run(_answering(), _BLOCK + _OPEN + r"""
+  byText(block(), "Other…").fire("click");
+  byText(block(), "Send").fire("click");
+  await settle();
+  say({posted: posted.length});""")
+        assert result == {"posted": 0}
+
+    def test_several_questions_are_chosen_then_sent_together(self):
+        result = _run(_answering(_asking(_HUE, _TOPPINGS)), _BLOCK + _OPEN + r"""
+  const send = () => withClass(block(), "send-answer")[0];
+  const before = send().disabled;
+  choices()[0].fire("click");
+  choices()[1].fire("click");
+  const half = send().disabled;
+  choices()[2].fire("click");
+  choices()[3].fire("click");
+  choices()[3].fire("click");
+  withClass(block(), "other-open")[1].fire("click");
+  const input = find(block(), (n) => n.tagName === "INPUT");
+  input.value = "olive oil";
+  input.fire("input");
+  const pressed = choices().map((n) => n.attrs["aria-pressed"]);
+  send().fire("click");
+  await settle();
+  say({before: before, half: half, pressed: pressed, posted: posted[0].answers,
+       you: texts(withClass(screen(), "send")[0], "turn-text")});""")
+        assert result == {
+            "before": True, "half": True, "pressed": ["false", "true", "true", "false"],
+            "posted": [{"choices": [1], "other": None},
+                       {"choices": [0], "other": "olive oil"}],
+            "you": ["Teal\nCheese, olive oil"]}
+
+    def test_a_question_it_cannot_read_says_so(self):
+        talk = _sendable(pending={"kind": "question", "unreadable": True})
+        result = _run(_answering(talk), _TIMERS + _BLOCK + _OPEN + r"""
+  say({block: !!block(), said: everything().includes("Can't read this question here")});""")
+        assert result == {"block": False, "said": True}
+
+    def test_no_block_where_answer_is_not_offered(self):
+        talk = _asking()
+        talk["offered"]["answer"] = False
+        result = _run(_answering(talk), _BLOCK + _OPEN + "say({block: !!block()});")
+        assert result == {"block": False}
+
+    def test_a_refusal_says_why_in_the_block(self):
+        answers = _answering(post=[409, {"error": "not sent: answered",
+                                          "reason": "answered"}])
+        result = _run(answers, _BLOCK + _OPEN + r"""
+  choices()[0].fire("click");
+  await settle();
+  say({error: texts(block(), "answer-error")});""")
+        assert result == {"error": ["Not sent: Claude is no longer waiting on that question."]}
+
+    def test_a_post_that_fails_says_it_may_not_have_reached_the_mac(self):
+        result = _run(_answering(), _BLOCK + _OPEN + r"""
+  globalThis.fetch = async () => { throw new Error("offline"); };
+  choices()[0].fire("click");
+  await settle();
+  say({error: texts(block(), "answer-error")});""")
+        assert result == {"error": ["The message may not have reached the Mac: offline"]}
+
+    def test_undo_brings_the_question_back(self):
+        result = _run(_answering(_asking(_HUE, _TOPPINGS)), _BLOCK + _OPEN + r"""
+  choices()[1].fire("click");
+  choices()[2].fire("click");
+  withClass(block(), "send-answer")[0].fire("click");
+  await settle();
+  const hidden = !block();
+  byText(screen(), "Undo").fire("click");
+  await settle();
+  say({hidden: hidden, back: !!block(), cancel: posted[1],
+       pressed: choices().map((n) => n.attrs["aria-pressed"])});""")
+        assert result == {"hidden": True, "back": True, "cancel": {"id": "S1"},
+                          "pressed": ["false", "true", "true", "false"]}
+
+    def test_a_new_question_starts_afresh(self):
+        other = _asking(dict(_HUE, text="Another"), _TOPPINGS)
+        other["pending"]["id"] = "toolu_q2"
+        other["cursor"] = "c2"
+        result = _run(_answering(_asking(_HUE, _TOPPINGS)), _TIMERS + _BLOCK + _OPEN + f"""
+  choices()[1].fire("click");
+  answers["/api/session"] = [200, {json.dumps(other)}];
+  await fire(2000);
+  say({{text: texts(block(), "question-text"),
+       pressed: choices().map((n) => n.attrs["aria-pressed"])}});""")
+        assert result == {"text": ["Another", "Pick toppings"],
+                          "pressed": ["false", "false", "false", "false"]}
+
+    def test_its_style_is_the_panels(self):
+        from invariant.oracle import webpage
+
+        for rule in (".asking {", ".choice {", ".choice.picked {", ".question-text {",
+                     ".answer-other {"):
+            assert rule in webpage._STYLE, rule
+        assert "var(--tile-needs)" in webpage._STYLE.split(".asking {")[1].split("}")[0]

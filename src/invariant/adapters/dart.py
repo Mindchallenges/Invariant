@@ -14,7 +14,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
-from .base import Adapter, Hazard, TestResult
+from .base import Adapter, Hazard, Reference, TestResult
+from .dart_imports import dart_references
 
 #: `docs` defaults shared by both runners, as every shipped adapter gives.
 _DOCS = {"format": "markdown", "diagrams": "mermaid"}
@@ -51,17 +52,30 @@ class DartAdapter(Adapter):
     def detect(self, root: Path) -> bool:
         return (root / "pubspec.yaml").is_file() and not _uses_flutter(root)
 
-    def source_files(self, changed: list[Path]) -> list[Path]:
-        """Every `.dart` file, generated ones included.
+    #: Every `.dart` file is a source file, generated ones included. A
+    #: `*.g.dart` or `*.freezed.dart` file is still code the reporter
+    #: measures when a test loads it, so it is not set aside here. A
+    #: generator that marks its output `// coverage:ignore-file` (freezed
+    #: does) gets no row, and :meth:`carries_executable_code` explains that
+    #: absence. Any other generated file is the project's to exempt, through
+    #: `methodology.gates.coverage_exclude`, where the exemption is named.
+    source_suffixes: ClassVar[frozenset[str]] = frozenset({".dart"})
 
-        A `*.g.dart` or `*.freezed.dart` file is still code the reporter
-        measures when a test loads it, so it is not set aside here. A
-        generator that marks its output `// coverage:ignore-file` (freezed
-        does) gets no row, and :meth:`carries_executable_code` explains that
-        absence. Any other generated file is the project's to exempt, through
-        `methodology.gates.coverage_exclude`, where the exemption is named.
+    #: The import graph (ADR-032 D3, DEC_ADR_032_I5). No mask yet (IDEA_047).
+    guideline_engines: ClassVar[frozenset[str]] = frozenset({"imports"})
+
+    def references(self, path: Path, relative: Path, root: Path) -> list[Reference] | None:
+        """The project files a ``.dart`` file's directives name.
+
+        ``import``, ``export`` and ``part``, read up to the first declaration
+        and resolved through the project's own ``pubspec.yaml`` names and
+        relative URIs (``adapters/dart_imports``). ``dart:`` and other
+        packages are outside the project; anything that cannot be resolved,
+        and any file that is not ``.dart``, answers ``None``.
         """
-        return [p for p in changed if p.suffix == ".dart"]
+        if Path(relative).suffix != ".dart":
+            return None
+        return dart_references(Path(path), Path(relative), Path(root))
 
     def is_test_file(self, path: Path) -> bool | None:
         """The layout `dart test` and `flutter test` themselves enforce.

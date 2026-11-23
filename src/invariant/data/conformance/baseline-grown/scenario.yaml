@@ -53,6 +53,17 @@ steps:
       cwd: "{worktree}"
       tool_name: Task
       tool_input: {subagent_type: feature-architect}
+  - kind: write
+    in: worktree
+    path: docs/architecture/overview.md
+    content: |
+      # Overview
+
+      ```mermaid
+      graph TD
+          APP[app] --> CHECK[check]
+          APP --> ANSWER[answer]
+      ```
   - {kind: cli, in: worktree, argv: [pipeline, advance, red]}
   - {kind: cli, in: worktree, argv: [pipeline, test, --phase, red]}
   - kind: write
@@ -73,17 +84,6 @@ steps:
   - {kind: cli, in: worktree, argv: [pipeline, advance, green]}
   - {kind: cli, in: worktree, argv: [pipeline, test, --phase, green]}
   - {kind: cli, in: worktree, argv: [pipeline, advance, reviewing]}
-  - kind: write
-    in: worktree
-    path: docs/architecture/overview.md
-    content: |
-      # Overview
-
-      ```mermaid
-      graph TD
-          APP[app] --> CHECK[check]
-          APP --> ANSWER[answer]
-      ```
   - kind: hook
     in: worktree
     event: post-tool-use
@@ -102,7 +102,7 @@ expect:
   gates:
     red: {docs.read_architecture: pass}
     green: {test.new_test_fails: pass}
-    reviewing: {test.all_pass: pass}
+    reviewing: {test.all_pass: pass, docs.ahead_of_code: pass}
     committed:
       test.all_pass: pass
       coverage.meets_floor: pass
@@ -121,6 +121,8 @@ expect:
       guidelines.generated_current: pass
       guidelines.mechanical_clean: pass
       guidelines.verdicts_complete: pass
+      guidelines.blocking_verdicts: pass
+      guidelines.user_rules_ruled: pass
       guidelines.baseline_only_shrinks: block
   refusals:
     land: [guidelines.baseline_only_shrinks]

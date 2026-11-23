@@ -175,8 +175,7 @@ class TestGroups:
         assert [c["text"] for c in card["chips"]] == ["Waiting for you"]
         assert card["button"] is None and card["tap"] is True
         going = shown["details"][card["row"]]["going_on"][0]
-        assert going == ("Claude is waiting for you in its window. Answer it in Claude "
-                         "on your Mac or phone. This panel never answers prompts.")
+        assert going == "Claude is waiting for your next message."
 
     def test_an_orphan_host_that_alerts_stays_in_its_group(self):
         row = orphan(signals=[sig("waiting", "question")])
@@ -251,14 +250,13 @@ class TestGroups:
 
 
 class TestCards:
-    def test_a_waiting_card_has_no_button_and_says_this_panel_never_answers(self):
+    def test_a_permission_card_has_no_button_and_says_where_to_answer(self):
         row = session("w", signals=[sig("waiting", "permission")],
                       hosts=[host(attention=waiting())],
                       recommendation=step((), kind="info"))
         card = cards(panel.view(doc(row), acting=True), "needs")[0]
         assert card["button"] is None and card["tap"] is True
-        assert card["note"] == ("Answer it in Claude on your Mac or phone. "
-                                "This panel never answers prompts.")
+        assert card["note"] == "Answer it in Claude on your Mac or phone."
         assert card["age"] == "4 min"
         assert card["project"] == "Heap"
         assert [c["text"] for c in card["chips"]] == ["Waiting for your permission"]
@@ -491,7 +489,7 @@ class TestDetail:
         details = panel.view(doc(*rows))["details"]
         going = {k.split("|")[1]: v["going_on"][0] for k, v in details.items()}
         assert going == {
-            "q": "Claude asked you a question 2 min ago. Answer it in Claude.",
+            "q": "Claude asked you a question 2 min ago. Answer it here or on the Mac.",
             "v": "The review checks passed. It can be merged.",
             "y": "Its plan is complete and its lane has landed. "
                  "It is ready for the review checks.",
@@ -1053,6 +1051,8 @@ class TestStartWords:
             "name_line": f"Remote Control name: {NAME}",
             "label": "1026-0049",
             "prompt": "go",
+            "model": "",
+            "model_line": "",
             "command": f"/opt/bin/claude --name {NAME} --remote-control {NAME} go",
             "place": "In Heap › main checkout",
             "cwd": "/r",
@@ -1062,6 +1062,10 @@ class TestStartWords:
 
     def test_no_prompt_is_an_empty_one(self):
         assert panel.start_words(self.prepared(), "Heap")["prompt"] == ""
+
+    def test_the_model_that_runs_is_said(self):
+        words = panel.start_words({**self.prepared(), "model": "chosen-model"}, "Heap")
+        assert (words["model"], words["model_line"]) == ("chosen-model", "Runs on chosen-model")
 
     def test_a_starts_result_is_worded_as_a_window(self):
         job = start_job(state="running")
@@ -1073,7 +1077,7 @@ class TestStartWords:
 
     def test_the_fixed_strings_the_sheet_needs_are_in_the_table(self):
         for key in ("new_session", "projects", "project_field", "label_field", "prompt_field",
-                    "prompt_hint", "exact_start", "checked_now"):
+                    "prompt_hint", "model_field", "model_hint", "exact_start", "checked_now"):
             assert panel.WORDS[key], key
         assert panel.WORDS["new_session"] == "New session…"
 
@@ -1230,3 +1234,244 @@ class TestBackgroundCards:
             "No progress for 1 h", "Waiting on 1 background command"]
         assert shown["details"]["K|b"]["going_on"][0] == (
             "Its background work has shown no sign of progress for 1 h.")
+
+
+# -- the last-message excerpt (ADR-029 increment 1, ADR-009 D17) -----------------------
+
+ORPHAN = "9c1e02aa-0000-0000-0000-000000000000"
+SESSION_HOST = "2abd173c-1111-2222-3333-444455556666"
+
+
+def said(claude, you=None):
+    return {"claude": claude, "you": you}
+
+
+class TestTheExcerpt:
+    def test_the_hosts_read_are_each_rows_live_current_window(self):
+        rows = [
+            session("live", hosts=[host("old", current=False, alive=True),
+                                   host(SESSION_HOST)]),
+            session("gone", hosts=[host("g", alive=False)]),
+            session("unknown", hosts=[host("u", alive=None)]),
+            session("none"),
+            orphan(ORPHAN),
+            leaked(),
+        ]
+        broken = session("odd", hosts=[host(7)])
+        assert panel.excerpt_hosts(doc(*rows, broken)) == {
+            "K|live": SESSION_HOST, f"K|host:{ORPHAN}": ORPHAN}
+
+    def test_a_full_card_carries_it_and_a_detail_shows_it_with_the_prompt(self):
+        row = session("w", hosts=[host(SESSION_HOST, attention=waiting())],
+                      signals=[sig("waiting", "permission")])
+        shown = panel.view(doc(row), excerpts={"K|w": said("May I run git push?", "Ship it")})
+        card = cards(shown, "needs")[0]
+        assert card["excerpt"] == "May I run git push?"
+        assert shown["details"]["K|w"]["last"] == {
+            "claude": "May I run git push?", "you": "Ship it", "head": None}
+
+    def test_a_compact_card_carries_it_too(self):
+        shown = panel.view(doc(session("i")), excerpts={"K|i": said("All done.")})
+        assert cards(shown, "idle")[0]["excerpt"] == "All done."
+        assert shown["details"]["K|i"]["last"]["you"] is None
+
+    def test_a_row_with_none_has_no_excerpt_and_no_placeholder(self):
+        shown = panel.view(doc(session("i")), excerpts={"K|other": said("x")})
+        assert cards(shown, "idle")[0]["excerpt"] is None
+        assert shown["details"]["K|i"]["last"] is None
+        empty = panel.view(doc(session("i")), excerpts={"K|i": said("")})
+        assert empty["details"]["K|i"]["last"] is None
+        assert panel.view(doc(session("i")))["details"]["K|i"]["last"] is None
+
+    def test_a_card_carries_only_the_start_of_a_long_text(self):
+        text = "word " * 400
+        shown = panel.view(doc(session("i")), excerpts={"K|i": said(text)})
+        assert cards(shown, "idle")[0]["excerpt"] == text[:panel.EXCERPT_CARD_CHARS]
+        assert shown["details"]["K|i"]["last"]["claude"] == text
+
+    def test_past_1200_characters_the_detail_folds_behind_show_all(self):
+        assert panel.EXCERPT_FOLD_CHARS == 1200
+        exact = "x" * 1200
+        assert panel.view(doc(session("i")), excerpts={"K|i": said(exact)})[
+            "details"]["K|i"]["last"]["head"] is None
+        longer = "y" * 1199 + " z" + "w" * 50
+        last = panel.view(doc(session("i")), excerpts={"K|i": said(longer)})[
+            "details"]["K|i"]["last"]
+        assert last["head"] == "y" * 1199 + "…"
+        assert last["claude"] == longer
+
+    def test_a_leftover_window_lists_it_on_its_row(self):
+        shown = panel.view(doc(orphan(ORPHAN, last_activity=NOW - 2 * 86400)),
+                           excerpts={f"K|host:{ORPHAN}": said("Should I delete it?")})
+        (row,) = shown["leftovers"]["sections"][0]["rows"]
+        assert row["excerpt"] == "Should I delete it?"
+        bare = panel.view(doc(orphan(ORPHAN, last_activity=NOW - 2 * 86400)))
+        assert bare["leftovers"]["sections"][0]["rows"][0]["excerpt"] is None
+
+    def test_its_text_is_the_sessions_own_and_shown_as_it_is(self):
+        text = '<script>alert(1)</script> [link](http://x) /Users/me/p'
+        shown = panel.view(doc(session("i")), excerpts={"K|i": said(text, "<b>me</b>")})
+        assert shown["details"]["K|i"]["last"] == {"claude": text, "you": "<b>me</b>",
+                                                   "head": None}
+
+    def test_its_labels_are_in_the_one_table(self):
+        assert {panel.WORDS[k] for k in ("claude", "you", "last_message", "show_all")} == {
+            "Claude", "You", "Last message", "Show all"}
+
+
+# -- the Conversation screen (ADR-029 increment 2, DEC_ADR_029_D23) -----------------------
+
+
+class TestTheConversation:
+    def test_a_detail_opens_the_conversation_only_where_the_page_reads_a_live_window(self):
+        rows = [session("live", hosts=[host(SESSION_HOST)]),
+                session("gone", hosts=[host("g", alive=False)]),
+                session("none")]
+        talking = panel.view(doc(*rows), talking=True)["details"]
+        assert {k: d["conversation"] for k, d in talking.items()} == {
+            "K|live": True, "K|gone": False, "K|none": False}
+        quiet = panel.view(doc(*rows))["details"]
+        assert {d["conversation"] for d in quiet.values()} == {False}
+
+    def test_the_head_names_the_project_and_the_session(self):
+        row = session("w", hosts=[host(SESSION_HOST, attention=waiting())],
+                      signals=[sig("waiting", "permission")])
+        head = panel.conversation_head(doc(row), "K|w")
+        detail = panel.view(doc(row))["details"]["K|w"]
+        assert head == {"kicker": "Heap · Conversation", "title": detail["title"],
+                        "chips": detail["chips"]}
+
+    def test_an_orphan_windows_head_has_its_title(self):
+        head = panel.conversation_head(doc(orphan(ORPHAN)), f"K|host:{ORPHAN}")
+        assert head["kicker"] == "Heap · Conversation" and head["title"]
+
+    def test_a_row_that_is_not_there_has_no_head(self):
+        assert panel.conversation_head(doc(session("w")), "K|other") is None
+        assert panel.conversation_head(doc(session("w")), "Z|w") is None
+
+    def test_its_words_are_in_the_one_table(self):
+        assert {panel.WORDS[k] for k in (
+            "open_conversation", "conversation", "new_messages", "cut_here", "reading_again",
+            "cant_read_session", "window_gone")} == {
+            "Open conversation", "Conversation", "New messages",
+            "Cut here: the rest is on the Mac", "Reading again…",
+            "Can't read this session here — use the Mac.", "The Claude window is gone."}
+
+
+class TestReply:
+    """ADR-029 D10 and increment 3: a Needs you card waiting for input offers
+    "Reply…", which opens its conversation with the composer."""
+
+    def _waiting(self, cause, alive=True):
+        return session("w", hosts=[host(SESSION_HOST, alive=alive)],
+                       signals=[sig("waiting", cause)])
+
+    def test_a_card_waiting_for_input_replies_where_the_page_sends(self):
+        card = cards(panel.view(doc(self._waiting("input")), talking=True, sending=True),
+                     "needs")[0]
+        assert card["reply"] == {"text": "Reply…"} and card["tap"] is False
+
+    @pytest.mark.parametrize(("cause", "talking", "sending", "alive"), [
+        ("input", True, False, True), ("input", False, False, True),
+        ("input", True, True, None), ("permission", True, True, True),
+        ("question", True, True, True)])
+    def test_no_reply_elsewhere(self, cause, talking, sending, alive):
+        card = cards(panel.view(doc(self._waiting(cause, alive)), talking=talking,
+                                sending=sending), "needs")[0]
+        assert card["reply"] is None and card["tap"] is True
+
+    def test_the_send_words_are_in_the_one_table(self):
+        assert panel.WORDS["reply"] == "Reply…"
+        assert panel.WORDS["message_turn_end"] == "Message Claude — sent when this turn ends"
+        assert panel.WORDS["talk_not_confirmed"] == (
+            "Not confirmed — check the session on the Mac")
+        assert panel.WORDS["talk_why_typing"] == "Someone is typing on the Mac."
+        assert panel.WORDS["talk_why_no_tab"] == (
+            "Send from here works for Terminal windows only.")
+        assert panel.WORDS["talk_why_no_claude"] == "Claude is not running in this window."
+        from invariant.oracle import talk
+
+        reasons = [getattr(talk, name) for name in dir(talk) if name.startswith("WHY_")]
+        for reason in reasons:
+            if reason not in ("reading_only", "other_hash", "no_receipt"):
+                assert f"talk_why_{reason}" in panel.WORDS, reason
+        for what in ("window", "process", "terminal", "turn"):
+            assert f"changed_{what}" in panel.WORDS
+
+
+def test_the_stop_words_are_in_the_one_table():
+    assert panel.WORDS["stop"] == "Stop"
+    assert panel.WORDS["talk_why_ended"] == "Claude's turn had already ended."
+    assert panel.WORDS["talk_why_asking"] == (
+        "Claude is waiting on a prompt — answer it on the Mac.")
+
+
+def test_the_slash_command_words_are_in_the_one_table():
+    assert panel.WORDS["talk_why_menu_command"] == (
+        "This command opens a menu — use it on the Mac.")
+    assert "talk_why_slash_command" not in panel.WORDS
+
+
+class TestAnswer:
+    """ADR-029 D10 and increment 5 (D45): a Needs you card waiting on a question
+    the server read offers "Answer…", and its note is the question's first
+    line; a permission prompt keeps its card until increment 6."""
+
+    def _waiting(self, cause="question", alive=True):
+        return session("w", hosts=[host(SESSION_HOST, alive=alive,
+                                        attention=waiting(cause))],
+                       signals=[sig("waiting", cause)])
+
+    def _card(self, row, prompts=None, sending=True, talking=True):
+        return cards(panel.view(doc(row), talking=talking, sending=sending,
+                                prompts=prompts), "needs")[0]
+
+    def test_a_question_it_read_offers_answer_with_its_first_line(self):
+        card = self._card(self._waiting(), {"K|w": {"text": "Pick one hue",
+                                                    "unreadable": False}})
+        assert card["answer"] == {"text": "Answer…"} and card["note"] == "Pick one hue"
+        assert card["tap"] is False and card["reply"] is None
+
+    def test_a_question_it_cannot_read_keeps_its_card_and_says_so(self):
+        card = self._card(self._waiting(), {"K|w": {"text": None, "unreadable": True}})
+        assert card["answer"] is None and card["tap"] is True
+        assert card["note"] == "Can't read this prompt here — use the Mac."
+
+    @pytest.mark.parametrize(("sending", "talking", "alive"), [
+        (False, True, True), (False, False, True), (True, True, None)])
+    def test_no_answer_where_the_page_does_not_answer(self, sending, talking, alive):
+        card = self._card(self._waiting(alive=alive),
+                          {"K|w": {"text": "Pick one hue", "unreadable": False}},
+                          sending=sending, talking=talking)
+        assert card["answer"] is None and card["tap"] is True
+
+    def test_without_a_read_the_note_says_where_to_answer(self):
+        card = self._card(self._waiting())
+        assert card["answer"] is None
+        assert card["note"] == "Answer it in Claude on your Mac or phone."
+
+    def test_a_permission_keeps_its_card_until_increment_6(self):
+        card = self._card(self._waiting("permission"),
+                          {"K|w": {"text": "Pick one hue", "unreadable": False}})
+        assert card["answer"] is None and card["tap"] is True
+        assert card["note"] == "Answer it in Claude on your Mac or phone."
+
+    def test_a_card_waiting_for_input_says_claude_waits_for_your_next_message(self):
+        card = self._card(self._waiting("input"))
+        assert card["note"] == "Claude is waiting for your next message."
+
+    def test_no_waiting_sentence_says_this_panel_never_answers(self):
+        for cause in ("question", "permission", "input"):
+            row = self._waiting(cause)
+            going = panel.view(doc(row))["details"]["K|w"]["going_on"]
+            assert not any("never answers" in line for line in going), cause
+
+    def test_the_answer_words_are_in_the_one_table(self):
+        assert panel.WORDS["answer"] == "Answer…"
+        assert panel.WORDS["send_answer"] == "Send answer"
+        assert panel.WORDS["other"] == "Other…"
+        assert panel.WORDS["cant_read_question"] == (
+            "Can't read this question here — use the Mac.")
+        assert panel.WORDS["cant_read_prompt"] == "Can't read this prompt here — use the Mac."
+        assert panel.WORDS["talk_why_answered"] == (
+            "Claude is no longer waiting on that question.")

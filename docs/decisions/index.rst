@@ -34,3 +34,9 @@ renumbered, and a superseded one stays, linked through ``supersedes``.
    ADR-024-a-host-declares-its-own-commit-attribution-trailer-which-pri
    ADR-025-a-subagent-s-shell-call-is-placed-where-its-commands-run
    ADR-026-the-gate-receipt-is-the-pipeline-s-coverage-record
+   ADR-027-the-oracle-decides-and-starts-the-next-session-from-the-proj
+   ADR-028-an-oracle-agent-s-path-finds-every-program-it-needs-or-insta
+   ADR-029-the-oracle-page-talks-to-running-sessions-it-reads-sends-int
+   ADR-030-development-never-runs-on-a-forbidden-model-a-window-model-a
+   ADR-031-a-finished-session-ends-its-own-window-and-a-window-the-user
+   ADR-032-every-managed-project-s-default-guidelines-carry-the-four-cl

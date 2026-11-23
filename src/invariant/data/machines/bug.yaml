@@ -11,8 +11,14 @@ initial: filed
 terminal: [closed, not_reproducible, wont_fix]
 states:
   filed:
+    # Mirrored onto the queue (ADR-027 ruling 18), and reproduced first when
+    # its turn comes: a bug-reproducer session before any fix (ruling 20).
+    roles: [mirror, reproduce]
     next: [reproduced, not_reproducible, wont_fix]
   reproduced:
+    # Ready to work: the oracle's backlog fallback offers it (ADR-027 D12),
+    # and mirrored onto the queue (ruling 18).
+    roles: [ready, mirror]
     next: [fixed, not_reproducible, wont_fix]
   not_reproducible:
     description: >

@@ -5,10 +5,19 @@ initial: proposed
 terminal: [done, dropped]
 states:
   proposed:
+    # Ready to work: the oracle's backlog fallback offers it (ADR-027 D12),
+    # and mirrored onto the queue (ruling 18).
+    roles: [ready, mirror]
     next: [accepted, dropped]
   accepted:
+    # Ready to work: the oracle's backlog fallback offers it (ADR-027 D12),
+    # and mirrored onto the queue (ruling 18).
+    roles: [ready, mirror]
     next: [in_progress, dropped]
   in_progress:
+    # Mirrored onto the queue unless a live entry or session works on it
+    # (ADR-027 ruling 18).
+    roles: [mirror]
     next: [done, accepted]
   done:
     # Entry, not exit. `done` is terminal: nothing ever leaves it, so an exit

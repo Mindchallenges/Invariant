@@ -223,6 +223,43 @@ def _no_real_notifier(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_talk(monkeypatch):
+    """No test reads a real transcript, looks at a real tab or types into one
+    (ADR-029 D4, increment 3).
+
+    ``oracle web`` reaches Claude Code's talk seam through ``_oracle_talk``,
+    replaced here suite-wide by ``oracle/talk``'s ``RecordingTalk``: it reads
+    what a test gives it and records what it would have typed. A test reads
+    the recorder this fixture returns; the ``osascript`` guard is the backstop.
+    """
+    from invariant.oracle.talk import RecordingTalk
+
+    recorder = RecordingTalk()
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_talk", lambda: recorder, raising=False
+    )
+    return recorder
+
+
+@pytest.fixture(autouse=True)
+def _no_real_push(monkeypatch):
+    """No test reaches a push service (ADR-027 increment 4).
+
+    Web push POSTs through one seam, ``_oracle_push_post``, replaced here
+    suite-wide by one that refuses; a test of the channel hands
+    ``PushNotifier`` a recorder of its own. The socket guard below refuses
+    anything past loopback as the backstop.
+    """
+
+    def refuse(url, body, headers, timeout):
+        raise AssertionError(f"a test tried to reach the network: POST {url}")
+
+    monkeypatch.setattr(
+        "invariant.cli.main._oracle_push_post", lambda: refuse, raising=False
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_real_launchd(monkeypatch, tmp_path_factory):
     """No test loads, unloads or writes a real LaunchAgent (IDEA_012 increment 6).
 

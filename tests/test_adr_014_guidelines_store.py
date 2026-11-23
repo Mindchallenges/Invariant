@@ -164,7 +164,7 @@ class TestTheProof:
         pin = ruleset_pin(RuleContext(manifest=manifest, cwd=root))
         assert pin == {
             "path": "docs/guidelines/ruleset.yaml",
-            "digest": "02ed45e4db9d",
+            "digest": "2c832ea55bcb",
             "error": None,
         }
 

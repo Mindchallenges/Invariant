@@ -1,0 +1,881 @@
+{
+  "entries": [
+    {
+      "added_by": "backlog",
+      "id": "Q63",
+      "ref": "BUG_115",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Haiku cleanup (user ruling 2026-11-21): revert ADR-029 increments 5, 6 and 7 (the files changed between fee9a90 and the commit after 72a03af, Haiku-built), keeping the BUG_158 and BUG_159 fixes intact; reopen IDEA_060; then queue increments 5, 6 and 7 as separate Opus rebuild sessions.",
+      "id": "Q122",
+      "ref": "haiku-revert-adr-029-inc-5-7",
+      "session": "ecbe424c",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): plan IDEA_064 (finished sessions end their own window and the chain starts the next) by writing its ADR, no build. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology docs in the worktree if the docs lane fits, else tdd. Read the memory index, invariant item show IDEA_064, IDEA_062 and IDEA_057, ADR-027 in full (rulings 7 and 21, D28-D30), ADR-005 (handoff) and ADR-030, oracle.rst and oracle-panel.rst. The three rulings in IDEA_064 are the user's (2026-11-22): the session exits itself after a FINAL landing with its consent recorded, the oracle still decides what runs next; a window the user typed into after landing stays open but no longer holds the one-at-a-time limit; one mechanism for every managed project. Interview the user in rounds with concrete options (recommended first) on what the entry leaves open (its Risks list): telling a typed-into window apart at landing, bounds on starting alongside an open user window, whether ruling 21's ask stays as a fallback, how handoff relates, and that every new window keeps the forbidden-model guard. Write the ADR amending ADR-027 rulings 7 and 21, host-neutral, with an increment table; update oracle.rst only where the ADR says. feature-architect writes it; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor (build increments are queued once the user approves the plan) and end.",
+      "id": "Q139",
+      "ref": "IDEA_064",
+      "serves": "IDEA_064",
+      "session": "33ccce76",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): rebuild ADR-029 increment 5 for IDEA_060 on Opus: answering interactive questions (multiple choice, multi-select, Other) and the Needs-you Answer button (D8, D10). The Haiku build of this increment was reverted (user ruling 2026-11-21); build fresh from ADR-029 and the current code, never from the reverted Haiku commits. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q136",
+      "ref": "ADR-029 inc 5 (Opus rebuild)",
+      "serves": "IDEA_060",
+      "session": "d9595cdd",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "ADR-032 increment 1a: ruleset schema v2 (layer map, derived layers.<id>-depends-inward rules, owner/ruled/origin/catalogue keys), the 32-pattern catalogue data file with validation and rendering, and the starter's default set including the five solid.* rules at blocker with owner: user; deliverable tests as in ADR-032's increment table. Read the memory index, invariant item show IDEA_065 and ADR-032 in full (rulings 1-12, D1-D13, the increments table) and docs/audits/default-guidelines-gap-2026-11.rst first. The rulings are the user's; ask only what ADR-032 leaves open. Docs first, then TDD; scoped tests only (DEC_ADR_010_D10), env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Host-neutral; never hand-edit docs/guidelines/ruleset.yaml. feature-architect designs and builds; compliance-reviewer commits via a message file and git commit -F and lands. Do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q140",
+      "ref": "ADR-032 inc 1a",
+      "serves": "IDEA_065",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "ADR-032 increment 1b: invariant adopts the defaults per ruling 11 (Entities core, Use Cases domains, Interface Adapters adapters and hosts, Frameworks and Drivers oracle and cli), adds SOLID, patterns, docs.design-before-code and the catalogue to its ruleset, records the baseline, renders through invariant guidelines render, and names the layers in overview.rst. Read the memory index, invariant item show IDEA_065 and ADR-032 in full (rulings 1-12, D1-D13, the increments table) and docs/audits/default-guidelines-gap-2026-11.rst first. The rulings are the user's; ask only what ADR-032 leaves open. Docs first, then TDD; scoped tests only (DEC_ADR_010_D10), env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Host-neutral; never hand-edit docs/guidelines/ruleset.yaml. feature-architect designs and builds; compliance-reviewer commits via a message file and git commit -F and lands. Do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q141",
+      "ref": "ADR-032 inc 1b",
+      "serves": "IDEA_065",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "ADR-032 increment 2: user-only exceptions and changes (D7: owner and ruled keys, guidelines except and loosen at a terminal, agent N/A refused, user_rules_ruled and blocking_verdicts gates) plus invariant guidelines adopt (D8); deliverable tests as in ADR-032. Read the memory index, invariant item show IDEA_065 and ADR-032 in full (rulings 1-12, D1-D13, the increments table) and docs/audits/default-guidelines-gap-2026-11.rst first. The rulings are the user's; ask only what ADR-032 leaves open. Docs first, then TDD; scoped tests only (DEC_ADR_010_D10), env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Host-neutral; never hand-edit docs/guidelines/ruleset.yaml. feature-architect designs and builds; compliance-reviewer commits via a message file and git commit -F and lands. Do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q142",
+      "ref": "ADR-032 inc 2",
+      "serves": "IDEA_065",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "ADR-032 increment 3: the docs.ahead_of_code gate (D6), with a design snapshot at the advance out of design; block in standard and strict, warn in loose; plus profiles; deliverable tests as in ADR-032. Read the memory index, invariant item show IDEA_065 and ADR-032 in full (rulings 1-12, D1-D13, the increments table) and docs/audits/default-guidelines-gap-2026-11.rst first. The rulings are the user's; ask only what ADR-032 leaves open. Docs first, then TDD; scoped tests only (DEC_ADR_010_D10), env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Host-neutral; never hand-edit docs/guidelines/ruleset.yaml. feature-architect designs and builds; compliance-reviewer commits via a message file and git commit -F and lands. Do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q143",
+      "ref": "ADR-032 inc 3",
+      "serves": "IDEA_065",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "ADR-032 increment 4: feature-architect and compliance-reviewer templates name the four layers, each of the five SOLID principles, the pattern catalogue, docs-ahead and the propose-never-waive exception route (D10); re-render agents. Read the memory index, invariant item show IDEA_065 and ADR-032 in full (rulings 1-12, D1-D13, the increments table) and docs/audits/default-guidelines-gap-2026-11.rst first. The rulings are the user's; ask only what ADR-032 leaves open. Docs first, then TDD; scoped tests only (DEC_ADR_010_D10), env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Host-neutral; never hand-edit docs/guidelines/ruleset.yaml. feature-architect designs and builds; compliance-reviewer commits via a message file and git commit -F and lands. Do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q144",
+      "ref": "ADR-032 inc 4",
+      "serves": "IDEA_065",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "ADR-032 increment 5: Dart and TypeScript imports engines and the fitness boundary engine (D3); deliverable tests as in ADR-032. Read the memory index, invariant item show IDEA_065 and ADR-032 in full (rulings 1-12, D1-D13, the increments table) and docs/audits/default-guidelines-gap-2026-11.rst first. The rulings are the user's; ask only what ADR-032 leaves open. Docs first, then TDD; scoped tests only (DEC_ADR_010_D10), env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Host-neutral; never hand-edit docs/guidelines/ruleset.yaml. feature-architect designs and builds; compliance-reviewer commits via a message file and git commit -F and lands. Do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q145",
+      "ref": "ADR-032 inc 5",
+      "serves": "IDEA_065",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "ADR-032 increment 6: invariant queue render writes the generated plan page and docs.plan_current (D11). After it lands, release the proposed ADR-032 rollout entries in the other managed projects with oracle chain start in each. Read the memory index, invariant item show IDEA_065 and ADR-032 in full (rulings 1-12, D1-D13, the increments table) and docs/audits/default-guidelines-gap-2026-11.rst first. The rulings are the user's; ask only what ADR-032 leaves open. Docs first, then TDD; scoped tests only (DEC_ADR_010_D10), env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Host-neutral; never hand-edit docs/guidelines/ruleset.yaml. feature-architect designs and builds; compliance-reviewer commits via a message file and git commit -F and lands. Do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q146",
+      "ref": "ADR-032 inc 6",
+      "serves": "IDEA_065",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): rebuild ADR-029 increment 6 for IDEA_060 on Opus, after increment 5's rebuild has landed: answering permission prompts with every choice through the confirm sheet, and the phone-rule list (page and oracle web rules) for allow-always (D9). The Haiku build of this increment was reverted (user ruling 2026-11-21); build fresh from ADR-029 and the current code, never from the reverted Haiku commits. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q137",
+      "ref": "ADR-029 inc 6 (Opus rebuild)",
+      "serves": "IDEA_060",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): rebuild ADR-029 increment 7 for IDEA_060 on Opus, after increment 6's rebuild has landed: Claude Code drift in doctor (the oracle talk row, D11). The Haiku build of this increment was reverted (user ruling 2026-11-21); build fresh from ADR-029 and the current code, never from the reverted Haiku commits. IDEA_060 is complete once this lands: have the reviewer close IDEA_060 through the item machine (in_progress to done; IDEA_029 stays open for its Hand-off half). First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. Stop if the session or an audit shows a Haiku model. When landed, queue no successor and end.",
+      "id": "Q138",
+      "ref": "ADR-029 inc 7 (Opus rebuild)",
+      "serves": "IDEA_060",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Move the oracle queue out of the tracked repo into invariant's store (user 2026-11-21: first 'keep the queue in invariant's store', then 'Move the queue out of the repo'), so main stays clean for the whole-suite sweep. records.queue already accepts repo or store (ADR-027 D10): set it to store, carry the existing entries over with their ids and states, and prove a queue write leaves main clean. Scoped tests only; do not push.",
+      "id": "Q127",
+      "mode": "propose",
+      "ref": "Move the oracle queue into invariant's store",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Schedule invariant sweep run nightly with a LaunchAgent (user 2026-11-21: nightly LaunchAgent; sweep.fresh stays warn-only, ADR-010 ruling 10). Start only after the queue has moved into the store (the entry before this one), since the sweep certifies only a clean committed main. Run it outside working hours, report invariant sweep status afterwards, install only what the plan states; do not push.",
+      "id": "Q128",
+      "mode": "propose",
+      "ref": "Schedule the whole-suite sweep nightly with a LaunchAgent",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Docs only, and only after the ADR-029 increment 5-7 revert (haiku-revert-adr-029-inc-5-7) has landed: make oracle-panel.rst and oracle.rst say built for exactly ADR-029 increments 1 to 4 and planned for 5 to 7 (user 2026-11-21: fix the stale planned wording now; the earlier claim that increments 3 to 6 are built no longer holds after the revert). Each rebuilt increment owns its own as-built wording. The strict docs build stays green; do not push.",
+      "id": "Q129",
+      "mode": "propose",
+      "ref": "Fix stale planned wording in oracle-panel.rst and oracle.rst",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Fix BUG_142 (status reproduced; red test tests/test_bug_142_repro.py). User ruling 2026-11-21 on the handoff options: the store leg records started_at_sha, the store's commit when the session starts, and the session's changed set includes the store files changed since then (rejected: uncommitted only; record each write). feature-architect designs under that ruling and declares it; TDD, scoped tests only; the reviewer lands it; do not push.",
+      "id": "Q130",
+      "mode": "propose",
+      "ref": "BUG_142",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Fix BUG_144. User ruling 2026-11-21: fail closed. Teardown refuses while an owed after-merge step cannot run because the session branch was deleted by hand (DEC_ADR_001_D25), replacing the fail-open case DEC_ADR_021_I2 declares. feature-architect amends DEC_ADR_021_I2; bug-reproducer proves the red first; then TDD with scoped tests only; the reviewer lands it; do not push.",
+      "id": "Q131",
+      "mode": "propose",
+      "ref": "BUG_144",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Reproduce BUG_118 first with bug-reproducer on the user's layout (user 2026-11-21: conf.py at the repository root plus a pyproject.toml), expecting detect() to put sphinx first; check cause 2 (docs/conf.py) against ADR-020 D8. The fix needs a rule for when Sphinx content outranks a Python packaging file. The user has not ruled on it (handoff 2026-11-18 decision 4; the 2026-11-21 interview asked only for the layout), so interview the user before designing. Fix only if RED-CONFIRMED; scoped tests only; do not push.",
+      "id": "Q132",
+      "mode": "propose",
+      "ref": "BUG_118",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Build ADR-017 increment 3 as written: D7 and D8, invariant configure with --questions, --answers, --set, --yes and --level on configure and init. User ruling 2026-11-21: build ADR-017 increments 3 and 4 rather than amend ADR-018. ADR-017's rulings decide the design; ask the user only what it leaves open. Scoped tests only; do not push.",
+      "id": "Q133",
+      "mode": "propose",
+      "ref": "ADR-017 increment 3",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Build ADR-017 increment 4 as written, after increment 3 has landed: D3.3 and D11, the advanced step, the review of where each answer goes, the store step shared with docs, and questionnaire overrides at the levels, including the docs.format refusal (a level may not add a question over docs.format). D10's CI pre-fill only where ADR-015 increment 3 has landed. User ruling 2026-11-21: build, not amend ADR-018. Ask the user only what the ADR leaves open; scoped tests only; do not push.",
+      "id": "Q134",
+      "mode": "propose",
+      "ref": "ADR-017 increment 4",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "Plan ADR-018 increment 8 (documentation repositories, D13; DEC_ADR_018_D13). The 2026-11-18 handoff owed the user four D13 questions and a choice of which documentation repositories to clone for the acceptance; the 2026-11-21 interview never asked them (user 2026-11-22: queue it, ask first). Interview the user in rounds before designing; BUG_118's fix is built alongside. Write the plan, no build; do not push.",
+      "id": "Q135",
+      "mode": "propose",
+      "ref": "ADR-018 increment 8",
+      "state": "queued"
+    },
+    {
+      "added_by": "oracle",
+      "brief": "Task (one task, this session only): build ADR-029 increment 7 for IDEA_060: Claude Code drift in doctor (the oracle talk row, D11). IDEA_060 is complete once this lands: have the reviewer close IDEA_060 through the item machine (IDEA_029 stays open for its Hand-off half). First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q104",
+      "ref": "ADR-029 inc 7",
+      "retry_of": "Q16",
+      "session": "7f340db3",
+      "state": "done"
+    },
+    {
+      "added_by": "oracle",
+      "brief": "Task (one task, this session only): build ADR-029 increment 6 for IDEA_060: answering permission prompts with every choice through the confirm sheet, and the phone-rule list (page and oracle web rules) for allow-always (D9). First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q102",
+      "ref": "ADR-029 inc 6",
+      "retry_of": "Q15",
+      "session": "9d0dec66",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): plan IDEA_060 (the oracle page talks to running sessions) by writing its ADR, no build. First run invariant session start, session isolate --execute and session plan add from the main checkout (within 10 minutes of the window opening, before reading anything), then pipeline start --methodology docs in the worktree if the docs lane fits, else tdd. Then read the project memory index, invariant item show IDEA_060 and IDEA_029, ADR-007 D18, ADR-009 (D2, D8, D17), ADR-008, ADR-027 D28, docs/architecture/oracle.rst and oracle-panel.rst. The rulings in IDEA_060 are the user's. Interview the user in rounds with concrete options (recommended first) on what they leave open: how a misdelivered message or a stale prompt answer is made impossible or detectable, what the page shows when Claude Code's transcript or prompt UI changes, whether allow-always from the phone needs more control than device revocation, and secret exposure in the shown conversation. Then write the ADR amending DEC_ADR_007_D18, DEC_ADR_009_D8 and DEC_ADR_009_D2 and settling ADR-009 D17, host-neutral, with an increment table (increment 1 is IDEA_029's Read half), and update oracle.rst and oracle-panel.rst only where the ADR says. feature-architect writes it; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's final report verbatim. Commit messages: write the message to a file, then git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When it has landed, queue no successor (the build increments are queued once the user approves the plan), say so and end.",
+      "id": "Q6",
+      "ref": "IDEA_060",
+      "session": "8486409f",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-027 increment 5 for IDEA_057: the whole backlog reaches the chain. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, ADR-027 in full, oracle.rst and oracle-panel.rst. Record the user's rulings of 2026-11-20 in ADR-027 as rulings 18-20 (ruling 17 is increment 4's web push) (amending rulings 2 and 4): (18) every open backlog item is mirrored onto the queue automatically: an entry when an item is filed, today's open items added once in backlog rank, shown and reordered on the phone like any entry, removed when the item closes; (19) backlog work starts on its own: invariant's oracle.chain.backlog becomes auto under the usual limits, and a session needing the user interviews them; (20) a filed bug starts a bug-reproducer session first; a confirmed bug gets its fix queued, one already fixed or not reproducible is closed by its verdict. Keep it generic and configurable per project, host-neutral, the oracle writing no record (D18). A question these rulings leave open goes to the user as an interview round. feature-architect builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q8",
+      "ref": "ADR-027 inc 5",
+      "session": "f49fa324",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build IDEA_062, the oracle closes a finished chained session's window once the session consents. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_062, ADR-027 in full (ruling 13, D5, D28, D29, D30 and the increment 5 rulings), oracle.rst and oracle-panel.rst. Record the user's choice of 2026-11-20 in ADR-027 as the next free ruling: option 2, the oracle closes a finished chained window, but only after asking the session in its own tab and getting its consent, recorded as an engine record (a CLI answer the session runs), never parsed from transcript text; no answer means a phone notice with Close and Leave open, never a silent close; a window where the user typed a turn after the teardown is never asked or closed. Interview the user in rounds with concrete options (recommended first) on what the item leaves open: the quiet period before asking, the re-ask interval and count, when to notify, and the exact text typed into the tab. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X and closes IDEA_062 through the item machine. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q9",
+      "ref": "IDEA_062",
+      "session": "ad9dcf3e",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-027 increment 2b for IDEA_057: the plan_usage host probe, the weekly-usage hold and its greenlight (D5, invariant oracle chain greenlight), and stall detection with the one continue nudge (D7). Increments 3 and 4 are out of scope. Read the project memory index first, then ADR-027 in full (rulings 1-9, D1-D23, the decisions made building increments 1 and 2) and docs/architecture/oracle.rst before designing. The rulings are the user's: a question they do not settle goes to the user as an interview round, not a guess. Normal flow: invariant session start, session isolate --execute and session plan add from the main checkout; pipeline start --methodology tdd in the worktree; feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's final report verbatim. Scoped test runs only (DEC_ADR_010_D10); a full run only if tests/conftest.py, pyproject.toml or uv.lock is touched. Commit messages: write the message to a file, then git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, with no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. When it has landed, queue no successor, say so and end.",
+      "id": "Q1",
+      "ref": "ADR-027 inc 2b",
+      "session": "0c87b041",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-027 increment 4 for IDEA_057: web push from the oracle's page (IDEA_013, folded in by ruling 8) as one more notifier behind the notifier seam, so chain notices reach the phone. Read the project memory index first, then ADR-027 in full (rulings 1-13, D1-D30, the decisions made building increments 1, 2 and 2b) and docs/architecture/oracle.rst and oracle-panel.rst before designing. The rulings are the user's: a question they do not settle goes to the user as an interview round, not a guess. Normal flow: invariant session start, session isolate --execute and session plan add from the main checkout; pipeline start --methodology tdd in the worktree; feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's final report verbatim. Scoped test runs only (DEC_ADR_010_D10); a full run only if tests/conftest.py, pyproject.toml or uv.lock is touched. Commit messages: write the message to a file, then git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, with no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. IDEA_057 is complete once this lands: have the reviewer close IDEA_057 (and IDEA_013 as folded in) through the item machine. When it has landed, queue no successor, say so and end.",
+      "id": "Q3",
+      "ref": "ADR-027 inc 4",
+      "session": "9059512c",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-029 increment 1 for IDEA_060: IDEA_029's Read half, the last-message excerpt on cards and the detail view, under ADR-009 D17. The user approved the ADR-029 plan on 2026-11-20, including the architect's numbers and choices listed for the approval round: in this increment set ADR-029, its D1-D13 and DEC_ADR_009_D17 to Accepted (ruling: user, 2026-11-20) and update ADR-009's status bullet. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor (increments 2-7 are already queued) and end.",
+      "id": "Q10",
+      "ref": "ADR-029 inc 1",
+      "serves": "IDEA_060",
+      "session": "8316ad51",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-029 increment 2 for IDEA_060: the live conversation view (screen 9), read on demand, fail closed per session. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q11",
+      "ref": "ADR-029 inc 2",
+      "serves": "IDEA_060",
+      "session": "91310357",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-029 increment 3 for IDEA_060: send, with one-tap Undo, the fingerprint check, the delivery receipt, hold-then-refuse on Mac typing, the memory-only ring queue and the talk audit lines. Settle where the Reply button lands (oracle-panel.rst says inc 3, ADR-029's table does not say) and make the two agree. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q12",
+      "ref": "ADR-029 inc 3",
+      "serves": "IDEA_060",
+      "session": "07f08d32",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-029 increment 4 for IDEA_060: interrupt (Esc) and slash commands sent as messages. First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q13",
+      "ref": "ADR-029 inc 4",
+      "serves": "IDEA_060",
+      "session": "80026f72",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Task (one task, this session only): build ADR-029 increment 5 for IDEA_060: answering interactive questions (multiple choice, multi-select, Other) and the Needs-you Answer button (D8, D10). First run invariant session start, session isolate --execute and session plan add from the main checkout, before reading anything; then pipeline start --methodology tdd in the worktree. Read the memory index, invariant item show IDEA_060 and IDEA_029, ADR-029 in full (rulings 1-14, D1-D13, the increments table), ADR-009 D17, oracle.rst and oracle-panel.rst (the Planned: talking to sessions sections) before designing. The rulings are the user's; a question ADR-029 leaves open goes to the user as an interview round, not a guess. Host-neutral: every Claude Code specific in hosts/, the oracle never imports hosts/, only the CLI joins them. Turn the planned doc sections into as-built for this increment only. feature-architect designs and builds; compliance-reviewer commits and lands with invariant session merge --id X && invariant session teardown --id X. Paste each agent's report verbatim. Scoped tests only (DEC_ADR_010_D10). Test env: env -u INVARIANT_HANDOFF UV_PYTHON=/usr/local/bin/python3.14 PYTHONPATH=src. Commit message via a file and git commit -F with a literal absolute path in a separate command; the only trailer is Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>, no Claude-Session line (tell the reviewer). Never git add -N; never edit docs/guidelines/ruleset.yaml; do not push. When landed, queue no successor and end.",
+      "id": "Q14",
+      "ref": "ADR-029 inc 5",
+      "serves": "IDEA_060",
+      "session": "454112b9",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "id": "Q124",
+      "ref": "IDEA_012",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q18",
+      "ref": "IDEA_029",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q19",
+      "ref": "IDEA_031",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q20",
+      "ref": "IDEA_033",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q21",
+      "ref": "IDEA_041",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q22",
+      "ref": "IDEA_043",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q23",
+      "ref": "IDEA_044",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q24",
+      "ref": "IDEA_058",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q25",
+      "ref": "IDEA_059",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q26",
+      "ref": "IDEA_061",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q27",
+      "ref": "IDEA_021",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q28",
+      "ref": "IDEA_027",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q29",
+      "ref": "IDEA_040",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q30",
+      "ref": "IDEA_015",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q31",
+      "ref": "IDEA_016",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q32",
+      "ref": "IDEA_014",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q33",
+      "ref": "IDEA_022",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q34",
+      "ref": "IDEA_037",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q35",
+      "ref": "IDEA_038",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q36",
+      "ref": "IDEA_039",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q37",
+      "ref": "IDEA_054",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q38",
+      "ref": "IDEA_018",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q39",
+      "ref": "IDEA_049",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q40",
+      "ref": "IDEA_050",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q41",
+      "ref": "IDEA_053",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q42",
+      "ref": "IDEA_055",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q43",
+      "ref": "IDEA_056",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q44",
+      "ref": "BUG_032",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q45",
+      "ref": "BUG_056",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q46",
+      "ref": "BUG_113",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q47",
+      "ref": "BUG_117",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q48",
+      "ref": "BUG_130",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q49",
+      "ref": "BUG_018",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q50",
+      "ref": "BUG_038",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q51",
+      "ref": "BUG_043",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q52",
+      "ref": "BUG_058",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q53",
+      "ref": "BUG_060",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q54",
+      "ref": "BUG_063",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q55",
+      "ref": "BUG_076",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q56",
+      "ref": "BUG_077",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q57",
+      "ref": "BUG_082",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q58",
+      "ref": "BUG_101",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q59",
+      "ref": "BUG_104",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q60",
+      "ref": "BUG_105",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q61",
+      "ref": "BUG_108",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q62",
+      "ref": "BUG_114",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q65",
+      "ref": "BUG_119",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q66",
+      "ref": "BUG_131",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q67",
+      "ref": "BUG_135",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q68",
+      "ref": "BUG_136",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q69",
+      "ref": "BUG_137",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q70",
+      "ref": "BUG_138",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q72",
+      "ref": "BUG_145",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q73",
+      "ref": "BUG_150",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q74",
+      "ref": "BUG_151",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q75",
+      "ref": "BUG_152",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q113",
+      "ref": "BUG_156",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q76",
+      "ref": "IDEA_002",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q77",
+      "ref": "IDEA_007",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q78",
+      "ref": "IDEA_010",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q79",
+      "ref": "IDEA_011",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q80",
+      "ref": "IDEA_036",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q81",
+      "ref": "BUG_023",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q82",
+      "ref": "BUG_055",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q83",
+      "ref": "BUG_070",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q84",
+      "ref": "BUG_072",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q85",
+      "ref": "BUG_091",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q86",
+      "ref": "BUG_116",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q87",
+      "ref": "BUG_120",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q88",
+      "ref": "BUG_121",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q89",
+      "ref": "BUG_122",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q90",
+      "ref": "BUG_139",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q91",
+      "ref": "BUG_140",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q93",
+      "ref": "BUG_146",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q94",
+      "ref": "BUG_148",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q95",
+      "ref": "BUG_149",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q96",
+      "ref": "BUG_153",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q97",
+      "ref": "BUG_154",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q98",
+      "ref": "IDEA_034",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q99",
+      "ref": "IDEA_046",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q100",
+      "ref": "IDEA_047",
+      "state": "queued"
+    },
+    {
+      "added_by": "backlog",
+      "id": "Q101",
+      "ref": "BUG_001",
+      "state": "queued"
+    },
+    {
+      "added_by": "user",
+      "brief": "First of the Haiku cleanup (user ruling 2026-11-21): requeue failed Q17 (IDEA_012) and triage Q117; close leftover windows cfe345a0 and 4eec8462 if still open; run a reap dry-run for stale sessions and abandon what is stranded; then resume the chain. Run on Opus.",
+      "id": "Q119",
+      "ref": "haiku-cleanup-chain",
+      "session": "194b08f9",
+      "state": "done"
+    },
+    {
+      "added_by": "user",
+      "brief": "Haiku cleanup (user ruling 2026-11-21): with the user, re-read the auto-memory notes Haiku wrote in this project on 2026-11-21 (one-claude-session-per-task-unbreakable, continuous-next-sessions-until-paused, phone-install-and-testflight-on-merge, pipeline-health-check-runs-in-parallel, history-fallback-squash-to-one-commit, no-dang-content-in-invariant-repo, start-the-next-session-yourself); show each before changing.",
+      "id": "Q123",
+      "mode": "propose",
+      "ref": "haiku-cleanup-memory",
+      "state": "queued"
+    }
+  ],
+  "mirrored": [
+    "BUG_001",
+    "BUG_018",
+    "BUG_023",
+    "BUG_032",
+    "BUG_038",
+    "BUG_043",
+    "BUG_055",
+    "BUG_056",
+    "BUG_058",
+    "BUG_060",
+    "BUG_063",
+    "BUG_070",
+    "BUG_072",
+    "BUG_076",
+    "BUG_077",
+    "BUG_082",
+    "BUG_091",
+    "BUG_101",
+    "BUG_104",
+    "BUG_105",
+    "BUG_108",
+    "BUG_113",
+    "BUG_114",
+    "BUG_115",
+    "BUG_116",
+    "BUG_117",
+    "BUG_118",
+    "BUG_119",
+    "BUG_120",
+    "BUG_121",
+    "BUG_122",
+    "BUG_130",
+    "BUG_131",
+    "BUG_135",
+    "BUG_136",
+    "BUG_137",
+    "BUG_138",
+    "BUG_139",
+    "BUG_140",
+    "BUG_142",
+    "BUG_144",
+    "BUG_145",
+    "BUG_146",
+    "BUG_148",
+    "BUG_149",
+    "BUG_150",
+    "BUG_151",
+    "BUG_152",
+    "BUG_153",
+    "BUG_154",
+    "BUG_156",
+    "IDEA_002",
+    "IDEA_007",
+    "IDEA_010",
+    "IDEA_011",
+    "IDEA_012",
+    "IDEA_014",
+    "IDEA_015",
+    "IDEA_016",
+    "IDEA_018",
+    "IDEA_021",
+    "IDEA_022",
+    "IDEA_027",
+    "IDEA_029",
+    "IDEA_031",
+    "IDEA_033",
+    "IDEA_034",
+    "IDEA_036",
+    "IDEA_037",
+    "IDEA_038",
+    "IDEA_039",
+    "IDEA_040",
+    "IDEA_041",
+    "IDEA_043",
+    "IDEA_044",
+    "IDEA_046",
+    "IDEA_047",
+    "IDEA_049",
+    "IDEA_050",
+    "IDEA_053",
+    "IDEA_054",
+    "IDEA_055",
+    "IDEA_056",
+    "IDEA_058",
+    "IDEA_059",
+    "IDEA_061"
+  ],
+  "next": 147,
+  "version": 1
+}

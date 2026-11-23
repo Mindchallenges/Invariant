@@ -21,7 +21,19 @@ path, and nothing else of the engine's.
   same finding however the rest of the line is masked.
 - **boundary** (DN-A1 to DN-A3, DN-3). Each reference a changed file under
   ``applies_to`` makes is checked against the rule's ``forbid`` deny-list or
-  its allow-only ``only`` list of project path globs.
+  its allow-only ``only`` list of project path globs. A rule derived from the
+  layer map (ADR-032 D2) is read through the map: a reference crosses when
+  its target lies in an outer layer, that layer's ``exclude`` counted, and a
+  file the map places in two layers is unanswerable, naming both.
+- **fitness** (ADR-032 D3, increment 5). A ``boundary`` on the ``fitness``
+  engine names a project's own test. It is asked once per rule, when a
+  changed file it covers is not excepted, through the ``Fitness`` callable
+  ``core/rules`` hands in, which answers from the latest recorded run of the
+  test over the tree in hand (:func:`fitness_answer`). Passed is clean for
+  every file; failed is one finding on the first such file, naming the test
+  as its target; no such run is one unanswerable finding. Neither has a
+  fingerprint, so no baseline holds it: the test keeps its own ratchet.
+  Without the callable a fitness rule is not evaluated.
 - **cochange** (DN-A4 to DN-A9). A ``pair`` triggers on a changed file under
   ``applies_to`` (``any``, ``added`` or ``executable``, narrowed by an added
   line matching ``when.match``), and is one finding when what ``then`` names
@@ -69,6 +81,7 @@ from typing import Any, Protocol
 
 from .guidelines import (
     DIGEST_LENGTH,
+    FITNESS,
     BaselineEntry,
     Guideline,
     GuidelineException,
@@ -76,6 +89,7 @@ from .guidelines import (
     Registry,
     Requirement,
     Trigger,
+    covers,
     matches,
     meets,
     path_exception,
@@ -116,6 +130,20 @@ Mask = Callable[[str, str, str], "str | None"]
 #: ``references(rel)``: every project file the file imports, or ``None``
 #: when no adapter can answer for it.
 References = Callable[[str], "Iterable[ReferenceLike] | None"]
+
+
+@dataclass(frozen=True)
+class FitnessAnswer:
+    """What the recorded runs say about one fitness test (ADR-032 D3):
+    ``pass``, ``fail`` or ``unanswerable``, and why."""
+
+    outcome: str
+    note: str = ""
+
+
+#: ``fitness(selector)``: the answer of the latest recorded run of that test
+#: over the tree in hand.
+Fitness = Callable[[str], FitnessAnswer]
 
 
 def collapse(text: str) -> str:
@@ -279,6 +307,7 @@ def evaluate(
     gone: Iterable[str] = (),
     history: History | None = None,
     registries: Iterable[Registry] | None = None,
+    fitness: Fitness | None = None,
 ) -> Evaluation:
     """Every finding of the mechanical rules in the change.
 
@@ -288,7 +317,9 @@ def evaluate(
     nothing. ``cochange`` reads both, because removing a file is a change.
     ``history`` is what git knows about the change, and ``registries`` the
     registry files as the change leaves them; a cochange rule without them is
-    unanswerable.
+    unanswerable. ``fitness`` answers a fitness boundary from its test's
+    recorded runs; without it a fitness rule is not evaluated, since nothing
+    here runs a test.
 
     Rules are taken in declared order and files in sorted order, so the same
     change gives the same findings in the same order. Each file is read once.
@@ -296,15 +327,24 @@ def evaluate(
     files = sorted(set(changed))
     present = set(files)
     everything = sorted(present | set(gone))
-    evaluated = [rule for rule in rules if rule.check.kind in EVALUATED_KINDS]
+    evaluated = [
+        rule for rule in rules
+        if rule.check.kind in EVALUATED_KINDS and (fitness is not None or not _is_fitness(rule))
+    ]
     texts = _Texts(read)
     pairs = _Pairs(history, texts, mask, everything)
     by_path = {registry.path: registry for registry in registries or ()}
     found: list[Finding] = []
     covered: set[str] = set()
     for rule in evaluated:
+        if _is_fitness(rule):
+            assert fitness is not None  # filtered above
+            held = [rel for rel in files if covers(rule, rel)]
+            covered.update(held)
+            found.extend(_fitness(rule, held, fitness))
+            continue
         for rel in everything if rule.check.kind == "cochange" else files:
-            if not any(matches(rel, glob) for glob in rule.applies_to):
+            if not covers(rule, rel):
                 continue
             covered.add(rel)
             exempt = path_exception(rule, rel)
@@ -385,7 +425,29 @@ def _pattern(rule: Guideline, rel: str, texts: _Texts, mask: Mask) -> list[Findi
     return found
 
 
+def _two_layers(rule: Guideline, rel: str) -> Finding | None:
+    """A derived rule's file the map places in more than one layer.
+
+    Which direction binds the file is the map's to say, not ours (ADR-032
+    D2): unanswered, and so failing, until it says, whatever the evidence.
+    """
+    if rule.layer_map is None:
+        return None
+    held = [layer.title for layer in rule.layer_map.layers_of(rel)]
+    if len(held) < 2:
+        return None
+    listed = f"{', '.join(held[:-1])} and {held[-1]}"
+    return _finding(
+        rule, rel, "unanswerable",
+        note=f"the layer map places it in {len(held)} layers, {listed}; "
+             f"give all but one of them an exclude for it",
+    )
+
+
 def _boundary(rule: Guideline, rel: str, references: References) -> list[Finding]:
+    doubled = _two_layers(rule, rel)
+    if doubled is not None:
+        return [doubled]
     answer = references(rel)
     if answer is None:
         return [_finding(
@@ -399,6 +461,116 @@ def _boundary(rule: Guideline, rel: str, references: References) -> list[Finding
         stamp = fingerprint(rule.id, collapse(ref.text), ref.target)
         found.append(_matched(rule, rel, ref.line, stamp, target=ref.target))
     return found
+
+
+def _is_fitness(rule: Guideline) -> bool:
+    return rule.check.kind == "boundary" and rule.check.engine == FITNESS
+
+
+def _fitness(rule: Guideline, files: list[str], fitness: Fitness) -> list[Finding]:
+    """The test asked once for every changed file the rule covers.
+
+    An excepted file is named and not asked for, and so is a file the map
+    places in two layers; the rest share the one answer, reported on the
+    first of them.
+    """
+    found: list[Finding] = []
+    asked: list[str] = []
+    for rel in files:
+        exempt = path_exception(rule, rel)
+        doubled = _two_layers(rule, rel)
+        if exempt is not None:
+            found.append(_finding(rule, rel, "excepted", note=exempt.reason))
+        elif doubled is not None:
+            found.append(doubled)
+        else:
+            asked.append(rel)
+    if not asked:
+        return found
+    selector = rule.check.test or ""
+    record = f"invariant pipeline test --selector {selector}"
+    answer = fitness(selector)
+    if answer.outcome == "pass":
+        return found
+    if answer.outcome == "fail":
+        found.append(_finding(
+            rule, asked[0], "new", target=selector, note=answer.note,
+            fix=f"make the test pass, then record it: {record}",
+        ))
+    else:
+        found.append(_finding(rule, asked[0], "unanswerable", note=answer.note, fix=record))
+    return found
+
+
+def fitness_answer(
+    runs: Iterable[Any], selector: str, signature: tuple[str, str] | None
+) -> FitnessAnswer:
+    """The latest recorded run that included ``selector`` over this tree.
+
+    ``runs`` are the pipeline's ``test_runs`` records, oldest first, and
+    ``signature`` the tree in hand's ``(commit, digest)``
+    (``git.tree_signature``), ``None`` when git could not say. A run includes
+    the selector when its ``selectors`` name it exactly or it ran the whole
+    suite; it is over this tree when the tree held still during it and its
+    signature is this one (ADR-032 D3, DEC_ADR_032_I5). That run decides:
+    passed, with tests executed and no hazard, passes; failed fails, naming
+    the test; a pass that executed nothing or carries a hazard proves nothing
+    and is unanswerable, and so is no such run.
+    """
+    if signature is None:
+        return FitnessAnswer(
+            "unanswerable",
+            f"git cannot say which tree is in hand, so no run of {selector} can be "
+            f"matched to it",
+        )
+    including = [run for run in runs if isinstance(run, Mapping) and _includes(run, selector)]
+    over = [run for run in including if _over(run, signature)]
+    if not over:
+        if including:
+            return FitnessAnswer(
+                "unanswerable",
+                f"{len(including)} run(s) of {selector} are recorded, none over this "
+                f"tree: an edit or a commit came after them",
+            )
+        return FitnessAnswer("unanswerable", f"no run of {selector} is recorded")
+    run = over[-1]
+    phase = run.get("phase") or "an unnamed"
+    if not run.get("passed"):
+        failed = run.get("failed")
+        count = "an unknown number of" if failed is None else failed
+        return FitnessAnswer(
+            "fail",
+            f"the test {selector} failed in the run recorded in the {phase} phase "
+            f"({count} failing)",
+        )
+    if run.get("executed") == 0:
+        return FitnessAnswer(
+            "unanswerable", f"the run of {selector} recorded in the {phase} phase "
+            f"executed no test, so it proves nothing",
+        )
+    hazards = [str(h) for h in run.get("hazards") or ()]
+    if hazards:
+        return FitnessAnswer(
+            "unanswerable", f"the run of {selector} recorded in the {phase} phase "
+            f"passed with hazard(s) {', '.join(hazards)}, so the pass is not trusted",
+        )
+    return FitnessAnswer("pass", f"the test {selector} passed in the {phase} phase")
+
+
+def _includes(run: Mapping[str, Any], selector: str) -> bool:
+    selectors = run.get("selectors")
+    if not selectors:
+        return run.get("scope") == "full"
+    return selector in selectors
+
+
+def _over(run: Mapping[str, Any], signature: tuple[str, str]) -> bool:
+    tree = run.get("tree")
+    if not isinstance(tree, Mapping):
+        return False
+    before = (tree.get("commit"), tree.get("before"))
+    after = (tree.get("commit_after"), tree.get("after"))
+    return before == after == tuple(signature)
 
 
 class _Unanswerable(Exception):
@@ -615,7 +787,13 @@ def _registry(rule: Guideline, rel: str, registry: Registry | None) -> list[Find
 
 
 def _crosses(rule: Guideline, target: str) -> bool:
-    """Does a reference to ``target`` break the rule's one polarity (DN-A3)?"""
+    """Does a reference to ``target`` break the rule's one polarity (DN-A3)?
+
+    For a rule derived from the layer map, the target crosses when an outer
+    layer holds it, so an outer layer's ``exclude`` counts (ADR-032 D2).
+    """
+    if rule.layer is not None and rule.layer_map is not None:
+        return any(layer.holds(target) for layer in rule.layer_map.outer_than(rule.layer))
     if rule.check.forbid:
         return any(matches(target, glob) for glob in rule.check.forbid)
     return not any(matches(target, glob) for glob in rule.check.only)

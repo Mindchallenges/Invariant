@@ -767,7 +767,8 @@ class TestStarterRuleset:
             (toy_python / "invariant-docs/guidelines/ruleset.yaml").read_text(encoding="utf-8")
         )
         rules = {rule["id"]: rule for rule in data["rules"]}
-        assert set(rules) == {"docs.items-carry-no-design", "docs.decisions-are-declared"}
+        # ADR-032 increment 1a: the mandate's two rules among the default set.
+        assert {"docs.items-carry-no-design", "docs.decisions-are-declared"} <= set(rules)
         for rule in rules.values():
             assert rule["check"]["kind"] == "judgement"
         assert "invariant-docs/backlog.rst" in rules["docs.items-carry-no-design"]["applies_to"]

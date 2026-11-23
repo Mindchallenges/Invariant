@@ -139,6 +139,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..core.errors import InvariantError
+from ..core.rules import forbidden_entry
 from .claude_code_telemetry import ClaudeCodeTranscripts, claude_home
 
 #: The binary looked up on PATH. Resolved, never assumed: a bare ``claude`` in
@@ -365,6 +366,29 @@ def require_prompt_is_not_a_flag(prompt: str) -> None:
         )
 
 
+def require_allowed_model(model: str | None, forbidden=()) -> None:
+    """Refuse a window model ``claude`` would misread, or one the list forbids.
+
+    The launch half of the user's ruling 4 (DEC_ADR_030_D6): ``model`` is
+    given to ``--model`` as one word, so a blank one, one with a line break
+    or a space, and one that starts with ``-`` are refused before a plan is
+    built, and so is one ``forbidden`` holds (``core/rules.forbidden_entry``).
+    ``None`` is no ``--model`` at all.
+    """
+    if model is None:
+        return
+    if not model.strip() or model.startswith("-") or len(model.split()) != 1:
+        raise InvariantError(
+            f"the window model must be one word that does not start with '-', got {model!r}"
+        )
+    entry = forbidden_entry(model, forbidden)
+    if entry is not None:
+        raise InvariantError(
+            f"the window would run on {model}, and the forbidden-model list forbids it "
+            f"(it holds {entry!r}); choose another model, or change host.forbidden_models"
+        )
+
+
 class Launcher(Protocol):
     """The seam the CLI is handed. A test passes a recorder."""
 
@@ -491,6 +515,8 @@ def plan_launch(
     token: str | None = None,
     *,
     stage: bool = True,
+    model: str | None = None,
+    forbidden=(),
 ) -> LaunchPlan:
     """The command, the launch file, the typed line and the script, for one handoff.
 
@@ -527,6 +553,11 @@ def plan_launch(
     directory. The by-hand line still starts with ``cd``: it is pasted into a
     shell that is already up, where nothing eats it.
 
+    ``model`` is the window's model, given to ``--model`` before the note
+    (DEC_ADR_030_D6); ``None`` passes none, and the window takes the host's
+    own default. One that ``forbidden`` holds is refused
+    (``require_allowed_model``).
+
     ``stage`` writes the launch file. ``False`` builds a preview that writes
     nothing and names a file a real run would create. A typed line over
     ``MAX_CANON`` — only a very long launch-directory path can make one now —
@@ -534,7 +565,9 @@ def plan_launch(
     """
     if note:
         require_prompt_is_not_a_flag(note)
-    argv = (claude, "--name", name, "--remote-control", name, *((note,) if note else ()))
+    require_allowed_model(model, forbidden)
+    argv = (claude, "--name", name, "--remote-control", name,
+            *(("--model", model) if model is not None else ()), *((note,) if note else ()))
     require_remote_control(argv, name)
     env = ((HANDOFF_ENV, token),) if token else ()
     unset = "".join(f"-u {marker} " for marker in LAUNCH_UNSET)
@@ -1229,34 +1262,269 @@ class TerminalTabCloser:
         self.run = run
 
     def close(self, tty: str) -> tuple[str, str]:
-        if not isinstance(tty, str) or not _TTY_NAME.fullmatch(tty):
-            return "no_tab", ""
-        try:
-            proc = self.run(
-                ["osascript", "-e", TERMINAL_TAB_SCRIPT, f"/dev/{tty}"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=OSASCRIPT_TIMEOUT_SECONDS,
-                env=without_host_markers(dict(os.environ)),
-            )
-        except subprocess.TimeoutExpired:
-            return "not_allowed", (
-                f"osascript waited {OSASCRIPT_TIMEOUT_SECONDS} s; a permission prompt may be "
-                "waiting on the Mac"
-            )
-        except OSError as exc:
-            return "failed", str(exc)
-        said = (proc.stdout or "").strip()
-        if proc.returncode != 0:
-            error = (proc.stderr or said).strip()
-            if "-1743" in error or "Not authori" in error:
-                return "not_allowed", error
-            return "failed", error or f"osascript exited {proc.returncode}"
-        if not said:
-            return "failed", "osascript said nothing"
-        code, _, detail = said.partition(" ")
-        return code, detail.strip()
+        return run_tab_script(self.run, TERMINAL_TAB_SCRIPT, tty)
+
+
+#: Types a line into the Terminal tab on a tty, as if typed there, then a lone
+#: Return a moment later (ADR-027 D7, the stall's one "continue"). Only a tab
+#: where something other than a shell runs is typed into, so the line never
+#: reaches a bare shell. ``do script ... in`` a tab sends its text as input to
+#: the program in the foreground; the second, empty one is a Return on its
+#: own, which submits the line when the first arrived as a paste.
+TERMINAL_TYPE_SCRIPT = """on run argv
+	set target to item 1 of argv
+	set line to item 2 of argv
+	if application "Terminal" is not running then return "not_running"
+	set shells to {"login", "sh", "-sh", "zsh", "-zsh", "bash", "-bash", "fish", "-fish"}
+	tell application "Terminal"
+		repeat with w in windows
+			repeat with t in tabs of w
+				if tty of t is target then
+					set procs to processes of t
+					set others to false
+					repeat with p in procs
+						if shells does not contain (p as text) then set others to true
+					end repeat
+					if not others then
+						set AppleScript's text item delimiters to ","
+						return "no_claude " & (procs as text)
+					end if
+					do script line in t
+					delay 0.5
+					do script "" in t
+					return "typed"
+				end if
+			end repeat
+		end repeat
+	end tell
+	return "no_tab"
+end run"""
+
+
+class TerminalTyper:
+    """Types one line into the Terminal tab a Claude runs in (ADR-027 D7).
+
+    The stall's nudge: ``osascript`` gets :data:`TERMINAL_TYPE_SCRIPT`, the
+    tty and the line as arguments, with no shell between, and runs without
+    ``HOST_MARKERS``. :meth:`type` answers ``(code, detail)``: ``typed``,
+    ``no_tab``, ``no_claude`` (only a shell runs there), ``not_running``,
+    ``not_allowed`` when macOS's Automation permission refused it or a prompt
+    for it went unanswered, or ``failed``. :meth:`key` types one named key the
+    same way (ADR-029 D4: the key's name an argument, never text in a script).
+    The suite replaces the whole typer.
+    """
+
+    def __init__(self, run=subprocess.run) -> None:
+        self.run = run
+
+    def type(self, tty: str, line: str) -> tuple[str, str]:
+        return run_tab_script(self.run, TERMINAL_TYPE_SCRIPT, tty, line)
+
+    def key(self, tty: str, name: str) -> tuple[str, str]:
+        """Type one named key (:data:`NAMED_KEYS`) into the tab, as :meth:`type`
+        answers. The name is the script's argument; the key's bytes are made
+        inside the script, so no text a caller gives is ever typed as a key.
+        A name not in :data:`NAMED_KEYS` is ``unknown_key`` and runs nothing."""
+        if name not in NAMED_KEYS:
+            return "unknown_key", str(name)
+        return run_tab_script(self.run, TERMINAL_KEY_SCRIPT, tty, name)
+
+    def keys(self, tty: str, names, text: str = "") -> tuple[str, str]:
+        """Type the moves ``names`` (:data:`MOVE_KEYS`), then ``text``, as one
+        script, which Terminal ends with a Return (ADR-029 increment 5: one
+        step of a question's answer). No names and no text is a lone Return.
+        The names and the text are the script's arguments; the moves' bytes are
+        made inside the script. A name not in :data:`MOVE_KEYS` is
+        ``unknown_key`` and runs nothing."""
+        names = list(names)
+        unknown = next((n for n in names if n not in MOVE_KEYS), None)
+        if unknown is not None:
+            return "unknown_key", str(unknown)
+        return run_tab_script(self.run, TERMINAL_KEYS_SCRIPT, tty, text, *names)
+
+
+#: The keys :meth:`TerminalTyper.key` can type, by name (ADR-029 increment 4).
+#: ``escape`` is Esc as Claude Code 2.1 reads it in the CSI-u form, ``ESC [ 27
+#: u``. Terminal's ``do script`` ends every text with a Return, and a bare Esc
+#: followed by a Return arrives as Option-Return, which Claude Code takes for a
+#: line break; in the CSI-u form it is Esc, and the Return after it does
+#: nothing in a running turn, on an open prompt or menu, or on an empty input
+#: line (seen on Claude Code 2.1.291).
+NAMED_KEYS = ("escape",)
+
+#: Types one named key into the Terminal tab on a tty, under the same
+#: shell-only refusal as :data:`TERMINAL_TYPE_SCRIPT`. The key's name is the
+#: second argument; its bytes are built here.
+TERMINAL_KEY_SCRIPT = """on run argv
+	set target to item 1 of argv
+	set named to item 2 of argv
+	if named is "escape" then
+		set keys to (character id 27) & "[27u"
+	else
+		return "unknown_key " & named
+	end if
+	if application "Terminal" is not running then return "not_running"
+	set shells to {"login", "sh", "-sh", "zsh", "-zsh", "bash", "-bash", "fish", "-fish"}
+	tell application "Terminal"
+		repeat with w in windows
+			repeat with t in tabs of w
+				if tty of t is target then
+					set procs to processes of t
+					set others to false
+					repeat with p in procs
+						if shells does not contain (p as text) then set others to true
+					end repeat
+					if not others then
+						set AppleScript's text item delimiters to ","
+						return "no_claude " & (procs as text)
+					end if
+					do script keys in t
+					return "typed"
+				end if
+			end repeat
+		end repeat
+	end tell
+	return "no_tab"
+end run"""
+
+
+#: The moves :meth:`TerminalTyper.keys` can type before its text, by name
+#: (ADR-029 increment 5): the arrow keys in their CSI form, ``ESC [ A`` and
+#: ``ESC [ B``, which Claude Code 2.1 reads as keys even when several and a
+#: text arrive in one write (seen on 2.1.330).
+MOVE_KEYS = ("up", "down")
+
+#: Types moves, then a text, into the Terminal tab on a tty, in one ``do
+#: script``, which ends it with a Return; under the same shell-only refusal as
+#: :data:`TERMINAL_TYPE_SCRIPT`. The text is the second argument and every
+#: later one names a move, whose bytes are built here. An empty text and no
+#: moves is a lone Return.
+TERMINAL_KEYS_SCRIPT = """on run argv
+	set target to item 1 of argv
+	set typed to item 2 of argv
+	set keys to ""
+	repeat with i from 3 to count of argv
+		set named to item i of argv
+		if named is "up" then
+			set keys to keys & (character id 27) & "[A"
+		else if named is "down" then
+			set keys to keys & (character id 27) & "[B"
+		else
+			return "unknown_key " & named
+		end if
+	end repeat
+	if application "Terminal" is not running then return "not_running"
+	set shells to {"login", "sh", "-sh", "zsh", "-zsh", "bash", "-bash", "fish", "-fish"}
+	tell application "Terminal"
+		repeat with w in windows
+			repeat with t in tabs of w
+				if tty of t is target then
+					set procs to processes of t
+					set others to false
+					repeat with p in procs
+						if shells does not contain (p as text) then set others to true
+					end repeat
+					if not others then
+						set AppleScript's text item delimiters to ","
+						return "no_claude " & (procs as text)
+					end if
+					do script (keys & typed) in t
+					return "typed"
+				end if
+			end repeat
+		end repeat
+	end tell
+	return "no_tab"
+end run"""
+
+
+#: Reads what the Terminal tab on a tty shows (ADR-029 D6, increment 3): its
+#: ``contents``, the visible text, after a first line ``contents``. Only a
+#: tab where something other than a shell runs is read, and nothing is typed.
+TERMINAL_READ_SCRIPT = """on run argv
+	set target to item 1 of argv
+	if application "Terminal" is not running then return "not_running"
+	set shells to {"login", "sh", "-sh", "zsh", "-zsh", "bash", "-bash", "fish", "-fish"}
+	tell application "Terminal"
+		repeat with w in windows
+			repeat with t in tabs of w
+				if tty of t is target then
+					set procs to processes of t
+					set others to false
+					repeat with p in procs
+						if shells does not contain (p as text) then set others to true
+					end repeat
+					if not others then
+						set AppleScript's text item delimiters to ","
+						return "no_claude " & (procs as text)
+					end if
+					return "contents" & linefeed & (contents of t)
+				end if
+			end repeat
+		end repeat
+	end tell
+	return "no_tab"
+end run"""
+
+
+class TerminalReader:
+    """Reads the visible text of the Terminal tab a Claude runs in (ADR-029 D6).
+
+    ``osascript`` gets :data:`TERMINAL_READ_SCRIPT` and the tty as arguments,
+    with no shell between, and runs without ``HOST_MARKERS``. :meth:`read`
+    answers ``("contents", text)``, or a code as :class:`TerminalTyper`'s do:
+    ``no_tab``, ``no_claude``, ``not_running``, ``not_allowed`` or ``failed``.
+    The suite replaces the whole talk seam; the ``osascript`` guard is the
+    backstop.
+    """
+
+    def __init__(self, run=subprocess.run) -> None:
+        self.run = run
+
+    def read(self, tty: str) -> tuple[str, str]:
+        return run_tab_script(self.run, TERMINAL_READ_SCRIPT, tty, contents=True)
+
+
+def run_tab_script(run, script: str, tty: str, *extra: str,
+                   contents: bool = False) -> tuple[str, str]:
+    """Run one of the Terminal tab scripts on ``tty`` and answer ``(code, detail)``.
+
+    The script, the tty and every ``extra`` argument are ``on run argv``
+    arguments, never text inside the script. With ``contents``, an answer
+    whose first line is ``contents`` keeps the rest as it came, line breaks
+    and all.
+    """
+    if not isinstance(tty, str) or not _TTY_NAME.fullmatch(tty):
+        return "no_tab", ""
+    try:
+        proc = run(
+            ["osascript", "-e", script, f"/dev/{tty}", *extra],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=OSASCRIPT_TIMEOUT_SECONDS,
+            env=without_host_markers(dict(os.environ)),
+        )
+    except subprocess.TimeoutExpired:
+        return "not_allowed", (
+            f"osascript waited {OSASCRIPT_TIMEOUT_SECONDS} s; a permission prompt may be "
+            "waiting on the Mac"
+        )
+    except OSError as exc:
+        return "failed", str(exc)
+    raw = proc.stdout or ""
+    said = raw.strip()
+    if proc.returncode != 0:
+        error = (proc.stderr or said).strip()
+        if "-1743" in error or "Not authori" in error:
+            return "not_allowed", error
+        return "failed", error or f"osascript exited {proc.returncode}"
+    if not said:
+        return "failed", "osascript said nothing"
+    if contents and raw.startswith("contents\n"):
+        return "contents", raw[len("contents\n"):]
+    code, _, detail = said.partition(" ")
+    return code, detail.strip()
 
 
 def carries_successor_flags(command: str, name: str) -> bool:

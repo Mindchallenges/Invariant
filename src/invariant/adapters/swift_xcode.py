@@ -123,8 +123,7 @@ class SwiftXcodeAdapter(Adapter):
 
     guideline_engines: ClassVar[frozenset[str]] = frozenset({"mask"})
 
-    def source_files(self, changed: list[Path]) -> list[Path]:
-        return [p for p in changed if p.suffix == ".swift"]
+    source_suffixes: ClassVar[frozenset[str]] = frozenset({".swift"})
 
     # `join_selectors` is deliberately NOT overridden. xcodebuild takes a
     # repeated `-only-testing:` FLAG rather than a list of values, and the flag

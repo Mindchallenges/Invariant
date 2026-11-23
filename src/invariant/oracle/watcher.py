@@ -12,7 +12,11 @@ Each tick does four things in order:
    document plus ``version``, ``generated``, ``watcher_pid`` and ``interval``,
    atomically replaced, so a reader never sees half of one;
 4. **de-duplicate and notify** through the ledger,
-   ``<oracle home>/oracle/alerts.json``.
+   ``<oracle home>/oracle/alerts.json``;
+5. **the chain step**, when the watcher was given one
+   (:class:`~invariant.oracle.chainstep.ChainStep`, ADR-027 increment 2):
+   follow, decide and start the next session in each project. It runs after
+   the alerts, so a launch never delays one.
 
 **The ledger is what makes "once" true.** It maps each alert's signal key to
 ``{since, notified}``. A key already there is not news. A key the tick no
@@ -54,6 +58,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.errors import StateError
+from .chainstep import ChainStep
 from .gates import GateCache
 from .index import HomeStore, ProjectIndex
 from .notify import Notification, Notifier
@@ -133,6 +138,8 @@ class TickResult:
     elapsed: float = 0.0
     snapshot_path: Path | None = None
     ledger_path: Path | None = None
+    #: What the chain step did this tick, ``{project, action, detail}`` each.
+    chain: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def rows(self) -> int:
@@ -144,6 +151,7 @@ class TickResult:
             "ledger": str(self.ledger_path),
             "rows": self.rows,
             "alerts": self.alerts,
+            "chain": self.chain,
             "elapsed": self.elapsed,
         }
 
@@ -163,6 +171,7 @@ class Watcher:
         log: Callable[[str], None] | None = None,
         gates: GateCache | None = None,
         gate_wait: float = 0.0,
+        chain: ChainStep | None = None,
     ) -> None:
         if not interval > 0:
             raise ValueError(f"the interval must be positive, not {interval!r}")
@@ -178,6 +187,7 @@ class Watcher:
         self.log = log or _stderr
         self.gates = gates
         self.gate_wait = gate_wait
+        self.chain = chain
         self.store = HomeStore(index.home)
         #: Set when :meth:`run` returned because invariant changed under it.
         self.restarting = False
@@ -212,9 +222,11 @@ class Watcher:
         )
         self.store.write(SNAPSHOT_FILE, document)
         alerts = self._announce(document, now)
+        chained = self.chain.step(document, now) if self.chain is not None else []
         return TickResult(
             document=document,
             alerts=alerts,
+            chain=chained,
             elapsed=time.perf_counter() - started,
             snapshot_path=self.snapshot_path,
             ledger_path=self.ledger_path,

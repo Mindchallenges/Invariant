@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any, ClassVar
 
-from .base import Adapter, Hazard, TestResult
+from .base import Adapter, Hazard, Reference, TestResult
+from .node_imports import node_references
 
 
 class NodeAdapter(Adapter):
     id = "node"
 
-    manifest_defaults = {
+    manifest_defaults: ClassVar[dict[str, Any]] = {
         "commands": {
             "build": "npm run build",
             "test": "npm test",
@@ -31,8 +33,25 @@ class NodeAdapter(Adapter):
     # and what a `--` argument narrows is that runner's business, so only
     # nothing-at-all is claimed as the whole suite (ADR-010 D5).
 
-    def source_files(self, changed: list[Path]) -> list[Path]:
-        return [p for p in changed if p.suffix in {".ts", ".tsx", ".js", ".jsx"}]
+    source_suffixes: ClassVar[frozenset[str]] = frozenset({".ts", ".tsx", ".js", ".jsx"})
+
+    #: The import graph (ADR-032 D3, DEC_ADR_032_I5). No mask yet (IDEA_038).
+    guideline_engines: ClassVar[frozenset[str]] = frozenset({"imports"})
+
+    def references(self, path: Path, relative: Path, root: Path) -> list[Reference] | None:
+        """The project files a TypeScript or JavaScript file imports.
+
+        Every static ``import``, ``export ... from``, ``require`` and
+        ``import()`` of a string literal, resolved through relative paths and
+        the nearest ``tsconfig.json``'s ``paths`` and ``baseUrl``
+        (``adapters/node_imports``). A specifier only ``node_modules`` or
+        Node itself answers is outside the project; one that cannot be
+        resolved, a file the lexer cannot finish, and a file of another
+        language answer ``None``.
+        """
+        if Path(relative).suffix not in self.source_suffixes:
+            return None
+        return node_references(Path(path), Path(relative), Path(root))
 
     def is_test_file(self, path: Path) -> bool | None:
         """The conventions jest, vitest and node:test all key on.
@@ -41,7 +60,7 @@ class NodeAdapter(Adapter):
         on the dot so ``latest.ts`` is not claimed as a test — see the base
         docstring on why that direction is the dangerous one.
         """
-        if path.suffix not in {".ts", ".tsx", ".js", ".jsx"}:
+        if path.suffix not in self.source_suffixes:
             return None
         if "__tests__" in path.parts[:-1]:
             return True
@@ -86,5 +105,5 @@ class NodeAdapter(Adapter):
 
 
 def _first_int(pattern: str, text: str) -> int | None:
-    match = re.search(pattern, text, re.S)
+    match = re.search(pattern, text, re.DOTALL)
     return int(match.group(1)) if match else None

@@ -246,6 +246,12 @@ class Session(PreservesUnknownKeys):
     #: that outlives the worktree is the only place it can live. ``at`` is the
     #: same epoch reading ``heartbeat`` holds, in the machine-local state root.
     handoffs: list[dict] = field(default_factory=list)
+    #: How the session said it ended, oldest first (ADR-027 D1, D11):
+    #: ``{"outcome", "note", "at", "state"}`` per ``invariant session report``,
+    #: ``outcome`` one of :data:`REPORT_OUTCOMES`. An event, like a handoff,
+    #: so it is kept on a record that may already be torn down; the oracle's
+    #: scan reads the latest one.
+    reports: list[dict] = field(default_factory=list)
     #: The session's legs beyond its repository (ADR-014 D5). The repository
     #: leg is the record's own ``worktree``, ``branch`` and ``base``, so a
     #: record written before legs existed is already a one-repo session and
@@ -1552,8 +1558,13 @@ class SessionDomain:
         reason: str,
         calls: int = 1,
         cwd: Path | None = None,
+        by: str | None = None,
     ) -> Session:
         """Let the next ``calls`` evaluations of ``rule_id`` at a hook through.
+
+        ``by`` names who granted it, recorded on the grant when given: the
+        CLI asks for it, at a terminal, for a guideline marked ``owner:
+        user`` (ADR-032 D7, increment 2).
 
         ``rule_id`` may name a guideline instead (ADR-012 ruling 4, D12): the
         grant then passes that guideline in one evaluation of its family
@@ -1600,14 +1611,15 @@ class SessionDomain:
         session.pending_overrides = [
             o for o in session.pending_overrides if o.get("rule") != rule_id
         ]
-        session.pending_overrides.append(
-            {
-                "rule": rule_id,
-                "reason": reason.strip(),
-                "calls": int(calls),
-                "granted": self.clock(),
-            }
-        )
+        grant: dict[str, Any] = {
+            "rule": rule_id,
+            "reason": reason.strip(),
+            "calls": int(calls),
+            "granted": self.clock(),
+        }
+        if by:
+            grant["by"] = by
+        session.pending_overrides.append(grant)
         self._save(session)
         return session
 
@@ -2315,41 +2327,54 @@ class SessionDomain:
         document it marks a place a reviewer can see; in a one-line note it
         would exempt the whole note from the only scan it gets.
         """
-        from ..core.privacy import EXEMPTION_MARKER, PrivacyScanner
-
-        text = (note or "").strip()
-        if not text:
-            raise UsageError("a handoff note cannot be empty")
-        if "\n" in text or "\r" in text:
-            raise UsageError(
+        return vet_line(
+            self.manifest,
+            note,
+            noun="handoff note",
+            one_line=(
                 "a handoff note is one line — a terse keyword line the next "
                 "session reads as its first prompt. Join it with ' · '."
-            )
-        if len(text) > HANDOFF_NOTE_MAX:
+            ),
+            refused="it is not recorded and no session is started",
+            again="run the handoff again",
+        )
+
+    # -- reporting how the session ended (ADR-027 D1) ------------------
+    #
+    # An event, not an edge, for the reasons a handoff is one: legal in every
+    # state, terminal ones included, recorded as a standstill row.
+
+    def record_report(self, session_id: str, outcome: str, note: str | None = None) -> Session:
+        """Write how the session ended onto its record, in any state.
+
+        ``outcome`` is one of :data:`REPORT_OUTCOMES`. The note, when given,
+        is vetted as a handoff note is, since the oracle shows it on the
+        phone. A finished session is saved and not registered again.
+        """
+        if outcome not in REPORT_OUTCOMES:
             raise UsageError(
-                f"a handoff note is a keyword line, not a document: "
-                f"{len(text)} characters against a bound of {HANDOFF_NOTE_MAX}"
+                f"{outcome!r} is not an outcome; report one of "
+                f"{', '.join(REPORT_OUTCOMES)}"
             )
-        if EXEMPTION_MARKER in text:
-            raise GateFailure(
-                f"a handoff note cannot carry the {EXEMPTION_MARKER!r} marker: "
-                f"it would exempt the whole note from the one scan it gets"
+        session = self.require(session_id)
+        text = None
+        if note is not None:
+            text = vet_line(
+                self.manifest,
+                note,
+                noun="report note",
+                one_line="a report note is one line. Join it with ' · '.",
+                refused="the report is not recorded",
+                again="report again",
             )
-        findings = PrivacyScanner.from_manifest(self.manifest).scan_text(text)
-        if findings:
-            lines = [
-                (
-                    "the handoff note carries personal or operational data, so "
-                    "it is not recorded and no session is started:"
-                )
-            ]
-            lines += [f"  {finding.describe()}" for finding in findings]
-            lines.append(
-                "  Describe it by its characteristics instead, and run the "
-                "handoff again."
-            )
-            raise GateFailure("\n".join(lines))
-        return text
+        now = self._note(session, f"report {outcome}", extra={"report": outcome})
+        session.reports.append(
+            {"outcome": outcome, "note": text, "at": now, "state": session.state}
+        )
+        self._save(session)
+        if session.state not in _FINISHED:
+            self._register(session)
+        return session
 
     def record_handoff(self, session_id: str, note: str, name: str) -> Session:
         """Write the handoff onto the session record, in any state.
@@ -3132,6 +3157,57 @@ HANDOFF_NAME_CHARS = 48
 #: A handoff note is a keyword line, not a document. The bound is far above
 #: any real one and far below what a shell argument or a prompt can carry.
 HANDOFF_NOTE_MAX = 2000
+
+#: How each outcome of ``session report`` reads (ADR-027 D1): the session's
+#: part is finished, it is blocked, or it needs the user.
+REPORT_OUTCOMES = ("done", "blocked", "needs-user")
+
+
+def vet_line(
+    manifest,
+    text: str | None,
+    *,
+    noun: str,
+    one_line: str,
+    refused: str,
+    again: str,
+    bound: int = HANDOFF_NOTE_MAX,
+) -> str:
+    """``text`` stripped, or a refusal saying why it cannot be written down.
+
+    The one check every short line invariant records for another session or
+    the oracle goes through: a handoff note, a report note, a queue entry's
+    ``ref`` and ``brief`` (ADR-005 D1, ADR-027 D10). Empty, a line break, past
+    ``bound`` and the exemption marker are refused; so is any privacy finding
+    under the project's own patterns, redacted in the refusal. ``noun`` names
+    the line in the messages; ``one_line`` is the line-break refusal;
+    ``refused`` and ``again`` say what was not done and what to do instead.
+    """
+    from ..core.privacy import EXEMPTION_MARKER, PrivacyScanner
+
+    value = (text or "").strip()
+    if not value:
+        raise UsageError(f"a {noun} cannot be empty")
+    if "\n" in value or "\r" in value:
+        raise UsageError(one_line)
+    if len(value) > bound:
+        raise UsageError(
+            f"a {noun} is a keyword line, not a document: "
+            f"{len(value)} characters against a bound of {bound}"
+        )
+    if EXEMPTION_MARKER in value:
+        raise GateFailure(
+            f"a {noun} cannot carry the {EXEMPTION_MARKER!r} marker: "
+            f"it would exempt the whole {noun} from the one scan it gets"
+        )
+    findings = PrivacyScanner.from_manifest(manifest).scan_text(value)
+    if findings:
+        lines = [f"the {noun} carries personal or operational data, so {refused}:"]
+        lines += [f"  {finding.describe()}" for finding in findings]
+        lines.append(f"  Describe it by its characteristics instead, and {again}.")
+        raise GateFailure("\n".join(lines))
+    return value
+
 
 #: The ``next:`` label, wherever it sits in the note. The look-behind keeps it
 #: from matching the tail of a longer word.

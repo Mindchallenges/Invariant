@@ -29,6 +29,7 @@ from test_guidelines_domain import (
     INDEX,
     OURS,
     RULESET_REL,
+    domain,
     write,
 )
 
@@ -112,6 +113,16 @@ class TestTheDriftGateNotesIt:
         assert "set guidelines.instruction_files" in detail
         assert FIX in detail
 
+    def test_an_explicit_empty_list_chose_no_block_and_carries_no_note(
+        self, make_manifest, tree
+    ):
+        """BUG_161: `[]` is the project's choice of no block, not a gap."""
+        none = {"instruction_files": []}
+        domain(make_manifest, tree, none, instruction_files=(CLAUDE,)).render()
+        result = current(context(make_manifest, tree, none, host=(CLAUDE,)))
+        assert result.verdict.ok
+        assert "always rule" not in (result.verdict.detail or "")
+
     def test_a_failing_verdict_carries_the_note_and_still_fails_as_before(
         self, make_manifest, tree
     ):
@@ -153,6 +164,10 @@ class TestTheSummary:
         assert text.startswith(f"1 always rule but no instruction file carries the {INDEX}")
         assert f"({CLAUDE})" in text
         assert text.endswith(f"; try: {FIX}")
+
+    def test_an_explicit_empty_list_is_no_row(self, make_manifest, tree):
+        ctx = context(make_manifest, tree, {"instruction_files": []}, host=(CLAUDE,))
+        assert rules.always_layer_summary(ctx) is None
 
     def test_the_block_present_is_no_row(self, make_manifest, tree):
         render(make_manifest, tree, host=(CLAUDE,), insert=(INDEX,))
